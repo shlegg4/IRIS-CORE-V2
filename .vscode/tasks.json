@@ -1,0 +1,118 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "IRIS: configure",
+      "type": "shell",
+      "command": "call \"C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\Common7\\Tools\\VsDevCmd.bat\" -arch=x64 && cmake --preset default",
+      "options": {
+        "shell": {
+          "executable": "C:\\Windows\\System32\\cmd.exe",
+          "args": ["/d", "/s", "/c"]
+        }
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "IRIS: build",
+      "type": "shell",
+      "command": "call \"C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\Common7\\Tools\\VsDevCmd.bat\" -arch=x64 && cmake --build --preset default",
+      "options": {
+        "shell": {
+          "executable": "C:\\Windows\\System32\\cmd.exe",
+          "args": ["/d", "/s", "/c"]
+        }
+      },
+      "dependsOn": "IRIS: configure",
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": ["$gcc", "$msCompile"]
+    },
+    {
+      "label": "IRIS: run interactive",
+      "type": "shell",
+      "command": "./build/default/bin/iris_app.exe",
+      "dependsOn": "IRIS: build",
+      "problemMatcher": []
+    },
+    {
+      "label": "IRIS: test unit",
+      "type": "shell",
+      "command": "ctest --preset unit",
+      "dependsOn": "IRIS: build",
+      "group": { "kind": "test", "isDefault": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "IRIS: configure hardware",
+      "type": "shell",
+      "command": "call \"C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\Common7\\Tools\\VsDevCmd.bat\" -arch=x64 && cmake --preset hardware",
+      "options": {
+        "shell": {
+          "executable": "C:\\Windows\\System32\\cmd.exe",
+          "args": ["/d", "/s", "/c"]
+        }
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "IRIS: build hardware",
+      "type": "shell",
+      "command": "call \"C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\Common7\\Tools\\VsDevCmd.bat\" -arch=x64 && cmake --build --preset hardware",
+      "options": {
+        "shell": {
+          "executable": "C:\\Windows\\System32\\cmd.exe",
+          "args": ["/d", "/s", "/c"]
+        }
+      },
+      "dependsOn": "IRIS: configure hardware",
+      "problemMatcher": ["$gcc", "$msCompile"]
+    },
+    {
+      "label": "IRIS: test hardware smoke",
+      "type": "shell",
+      "command": "ctest --preset hardware",
+      "dependsOn": "IRIS: build hardware",
+      "problemMatcher": []
+    },
+    {
+      "label": "IRIS: test hardware smoke verbose",
+      "type": "shell",
+      "command": "ctest --preset hardware --verbose",
+      "dependsOn": "IRIS: build hardware",
+      "problemMatcher": []
+    },
+    {
+      "label": "IRIS: validate",
+      "type": "shell",
+      "command": "ctest --preset validation",
+      "dependsOn": "IRIS: build hardware",
+      "problemMatcher": []
+    },
+    {
+      "label": "IRIS: validate verbose",
+      "type": "shell",
+      "command": "ctest --preset validation --verbose",
+      "dependsOn": "IRIS: build hardware",
+      "problemMatcher": []
+    },
+    {
+      "label": "IRIS: soak",
+      "type": "shell",
+      "command": "ctest --preset soak",
+      "dependsOn": "IRIS: build hardware",
+      "problemMatcher": []
+    },
+    {
+      "label": "IRIS: observability up",
+      "type": "shell",
+      "command": "docker compose -f tools/observability/compose.yaml up -d",
+      "problemMatcher": []
+    },
+    {
+      "label": "IRIS: observability down",
+      "type": "shell",
+      "command": "docker compose -f tools/observability/compose.yaml down",
+      "problemMatcher": []
+    }
+  ]
+}

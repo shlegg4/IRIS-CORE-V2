@@ -1,0 +1,14 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug IRIS",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/default/iris_app.exe",
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "IRIS: build"
+    }
+  ]
+}
+

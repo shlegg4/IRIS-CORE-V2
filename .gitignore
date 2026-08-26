@@ -1,0 +1,10 @@
+build/
+out/
+.cache/
+.vs/
+compile_commands.json
+iris_metrics.json
+capture-*.json
+*.user
+*.suo
+*.mp4

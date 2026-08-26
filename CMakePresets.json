@@ -1,0 +1,69 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 24, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "default",
+      "displayName": "IRIS Debug",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/default",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "IRIS_BUILD_TESTS": "ON",
+        "IRIS_BUILD_HARDWARE_TESTS": "OFF"
+      }
+    },
+    {
+      "name": "hardware",
+      "inherits": "default",
+      "displayName": "IRIS Hardware Validation",
+      "binaryDir": "${sourceDir}/build/hardware",
+      "cacheVariables": { "IRIS_BUILD_HARDWARE_TESTS": "ON" }
+    },
+    {
+      "name": "release",
+      "inherits": "default",
+      "displayName": "IRIS Release",
+      "binaryDir": "${sourceDir}/build/release",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "default", "configurePreset": "default" },
+    { "name": "hardware", "configurePreset": "hardware" },
+    { "name": "release", "configurePreset": "release" }
+  ],
+  "testPresets": [
+    {
+      "name": "unit",
+      "configurePreset": "default",
+      "filter": { "include": { "label": "unit" } },
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "hardware",
+      "configurePreset": "hardware",
+      "filter": {
+        "include": { "label": "hardware|smoke" },
+        "exclude": { "label": "validation|soak" }
+      },
+      "execution": { "jobs": 1, "stopOnFailure": true },
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "validation",
+      "configurePreset": "hardware",
+      "filter": { "exclude": { "label": "soak" } },
+      "execution": { "jobs": 1, "stopOnFailure": true },
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "soak",
+      "configurePreset": "hardware",
+      "filter": { "include": { "label": "soak" } },
+      "execution": { "jobs": 1, "stopOnFailure": true },
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}

@@ -1,0 +1,340 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Capture Up",
+      "id": 1,
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
+      "targets": [{ "expr": "iris_capture_up", "refId": "A" }],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [{ "type": "value", "options": { "0": { "text": "DOWN" }, "1": { "text": "UP" } } }],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red" }, { "color": "green", "value": 1 }] }
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "type": "stat",
+      "title": "Capture FPS",
+      "id": 2,
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
+      "targets": [{ "expr": "rate(iris_capture_frames_emitted_total[$__rate_interval])", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "fps", "decimals": 1 }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "type": "stat",
+      "title": "Encode FPS",
+      "id": 3,
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 0 },
+      "targets": [{ "expr": "rate(iris_output_disk_encoded_frames_total[$__rate_interval])", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "fps", "decimals": 1 }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "type": "stat",
+      "title": "Recording",
+      "id": 4,
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 0 },
+      "targets": [{ "expr": "iris_output_recording_active", "refId": "A" }],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [{ "type": "value", "options": { "0": { "text": "IDLE" }, "1": { "text": "RECORDING" } } }],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "blue" }, { "color": "green", "value": 1 }] }
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "type": "stat",
+      "title": "Clock Drift",
+      "id": 5,
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 0 },
+      "targets": [{ "expr": "iris_capture_clock_drift_ppm", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "ppm", "decimals": 1 }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "type": "stat",
+      "title": "Total Failures",
+      "id": 6,
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 0 },
+      "targets": [{ "expr": "iris_capture_decode_failures_total + iris_capture_source_errors_total + iris_output_disk_failures_total", "refId": "A" }],
+      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "green" }, { "color": "red", "value": 1 }] } }, "overrides": [] },
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Pipeline Throughput",
+      "id": 7,
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "targets": [
+        { "expr": "rate(iris_capture_frames_emitted_total[$__rate_interval])", "legendFormat": "capture", "refId": "A" },
+        { "expr": "rate(iris_output_disk_encoded_frames_total[$__rate_interval])", "legendFormat": "encode", "refId": "B" },
+        { "expr": "rate(iris_output_disk_packets_total[$__rate_interval])", "legendFormat": "mux", "refId": "C" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "fps" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Queue Depth",
+      "id": 8,
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "targets": [
+        { "expr": "iris_channel_capture_samples_depth", "legendFormat": "capture samples", "refId": "A" },
+        { "expr": "iris_channel_capture_to_pose_depth", "legendFormat": "capture to pose", "refId": "B" },
+        { "expr": "iris_channel_pose_to_output_depth", "legendFormat": "pose to output", "refId": "C" },
+        { "expr": "iris_channel_output_to_disk_depth", "legendFormat": "output to disk", "refId": "D" }
+      ],
+      "fieldConfig": { "defaults": { "decimals": 0 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Capture-to-Emit Latency p95",
+      "id": 9,
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "targets": [{ "expr": "histogram_quantile(0.95, sum by (le) (rate(iris_capture_capture_to_emit_ms_bucket[$__rate_interval])))", "legendFormat": "p95", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Recording Frame Accounting",
+      "id": 10,
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "targets": [
+        { "expr": "iris_output_disk_accepted_frames_total", "legendFormat": "accepted", "refId": "A" },
+        { "expr": "iris_output_disk_encoded_frames_total", "legendFormat": "encoded", "refId": "B" },
+        { "expr": "iris_output_disk_packets_total", "legendFormat": "muxed", "refId": "C" }
+      ],
+      "fieldConfig": { "defaults": { "decimals": 0 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Capture Counters",
+      "id": 11,
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 20 },
+      "targets": [
+        { "expr": "rate(iris_capture_samples_received_total[$__rate_interval])", "legendFormat": "samples received", "refId": "A" },
+        { "expr": "rate(iris_capture_decode_failures_total[$__rate_interval])", "legendFormat": "decode failures", "refId": "B" },
+        { "expr": "rate(iris_capture_decode_invalid_header_total[$__rate_interval])", "legendFormat": "invalid header", "refId": "C" },
+        { "expr": "rate(iris_capture_decode_dimension_mismatch_total[$__rate_interval])", "legendFormat": "dimension mismatch", "refId": "D" },
+        { "expr": "rate(iris_capture_decode_nvjpeg_total[$__rate_interval])", "legendFormat": "nvJPEG decodes", "refId": "E" },
+        { "expr": "rate(iris_capture_decode_unsupported_format_total[$__rate_interval])", "legendFormat": "unsupported format", "refId": "F" },
+        { "expr": "rate(iris_capture_decode_exceptions_total[$__rate_interval])", "legendFormat": "decode exceptions", "refId": "G" },
+        { "expr": "rate(iris_capture_source_errors_total[$__rate_interval])", "legendFormat": "source errors", "refId": "H" },
+        { "expr": "rate(iris_capture_timestamp_regressions_total[$__rate_interval])", "legendFormat": "timestamp regressions", "refId": "I" },
+        { "expr": "rate(iris_capture_clock_resets_total[$__rate_interval])", "legendFormat": "clock resets", "refId": "J" },
+        { "expr": "rate(iris_capture_pool_exhaustions_total[$__rate_interval])", "legendFormat": "pool exhaustions", "refId": "K" },
+        { "expr": "rate(iris_capture_rotation_frames_total[$__rate_interval])", "legendFormat": "rotated frames", "refId": "L" },
+        { "expr": "rate(iris_capture_rotation_failures_total[$__rate_interval])", "legendFormat": "rotation failures", "refId": "M" },
+        { "expr": "rate(iris_capture_rotation_pool_exhaustions_total[$__rate_interval])", "legendFormat": "rotation pool exhaustions", "refId": "N" }
+      ],
+      "fieldConfig": { "defaults": { "decimals": 2, "unit": "ops" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Capture State and Timing",
+      "id": 12,
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 20 },
+      "targets": [
+        { "expr": "iris_capture_pool_available", "legendFormat": "pool available", "refId": "A" },
+        { "expr": "iris_capture_clock_drift_ppm", "legendFormat": "clock drift ppm", "refId": "B" },
+        { "expr": "iris_capture_clock_residual_us", "legendFormat": "clock residual us", "refId": "C" },
+        { "expr": "iris_capture_last_frame_age_ms", "legendFormat": "last frame age ms", "refId": "D" },
+        { "expr": "iris_capture_rotation_degrees", "legendFormat": "rotation degrees", "refId": "E" },
+        { "expr": "iris_capture_rotation_pool_available", "legendFormat": "rotation pool available", "refId": "F" }
+      ],
+      "fieldConfig": { "defaults": { "decimals": 2 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Capture Timing Distributions",
+      "id": 13,
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 29 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (le) (rate(iris_capture_interframe_interval_ms_bucket[$__rate_interval])))", "legendFormat": "interframe p50", "refId": "A" },
+        { "expr": "histogram_quantile(0.95, sum by (le) (rate(iris_capture_interframe_interval_ms_bucket[$__rate_interval])))", "legendFormat": "interframe p95", "refId": "B" },
+        { "expr": "histogram_quantile(0.95, sum by (le) (rate(iris_capture_queue_wait_ms_bucket[$__rate_interval])))", "legendFormat": "queue wait p95", "refId": "C" },
+        { "expr": "histogram_quantile(0.95, sum by (le) (rate(iris_capture_decode_submit_ms_bucket[$__rate_interval])))", "legendFormat": "decode submit p95", "refId": "D" },
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(iris_capture_capture_to_emit_ms_bucket[$__rate_interval])))", "legendFormat": "capture to emit p99", "refId": "E" },
+        { "expr": "histogram_quantile(0.95, sum by (le) (rate(iris_capture_rotation_submit_ms_bucket[$__rate_interval])))", "legendFormat": "rotation submit p95", "refId": "F" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms", "decimals": 2 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Channel Activity",
+      "id": 14,
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 29 },
+      "targets": [
+        { "expr": "rate(iris_channel_capture_samples_sent_total[$__rate_interval])", "legendFormat": "capture samples sent", "refId": "A" },
+        { "expr": "rate(iris_channel_capture_samples_received_total[$__rate_interval])", "legendFormat": "capture samples received", "refId": "B" },
+        { "expr": "rate(iris_channel_capture_samples_dropped_total[$__rate_interval])", "legendFormat": "capture samples dropped", "refId": "C" },
+        { "expr": "rate(iris_channel_capture_to_pose_dropped_total[$__rate_interval])", "legendFormat": "capture to pose dropped", "refId": "D" },
+        { "expr": "rate(iris_channel_pose_to_output_dropped_total[$__rate_interval])", "legendFormat": "pose to output dropped", "refId": "E" },
+        { "expr": "rate(iris_channel_output_to_disk_dropped_total[$__rate_interval])", "legendFormat": "output to disk dropped", "refId": "F" },
+        { "expr": "rate(iris_channel_output_to_shm_dropped_total[$__rate_interval])", "legendFormat": "output to shm dropped", "refId": "G" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops", "decimals": 2 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Channel Drops and Rejections",
+      "id": 15,
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 38 },
+      "targets": [
+        { "expr": "rate(iris_channel_capture_samples_dropped_oldest_total[$__rate_interval])", "legendFormat": "capture samples dropped oldest", "refId": "A" },
+        { "expr": "rate(iris_channel_capture_samples_dropped_newest_total[$__rate_interval])", "legendFormat": "capture samples dropped newest", "refId": "B" },
+        { "expr": "rate(iris_channel_capture_to_pose_rejected_closed_total[$__rate_interval])", "legendFormat": "capture to pose rejected", "refId": "C" },
+        { "expr": "rate(iris_channel_pose_to_output_rejected_closed_total[$__rate_interval])", "legendFormat": "pose to output rejected", "refId": "D" },
+        { "expr": "rate(iris_channel_output_to_shm_rejected_closed_total[$__rate_interval])", "legendFormat": "output to shm rejected", "refId": "E" },
+        { "expr": "rate(iris_channel_output_to_disk_rejected_closed_total[$__rate_interval])", "legendFormat": "output to disk rejected", "refId": "F" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops", "decimals": 2 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Output Activity",
+      "id": 16,
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 38 },
+      "targets": [
+        { "expr": "rate(iris_output_packets_received_total[$__rate_interval])", "legendFormat": "packets received", "refId": "A" },
+        { "expr": "rate(iris_output_shm_packets_total[$__rate_interval])", "legendFormat": "SHM packets", "refId": "B" },
+        { "expr": "rate(iris_output_shm_failures_total[$__rate_interval])", "legendFormat": "SHM failures", "refId": "C" },
+        { "expr": "rate(iris_output_disk_accepted_frames_total[$__rate_interval])", "legendFormat": "disk accepted frames", "refId": "D" },
+        { "expr": "rate(iris_output_disk_encoded_frames_total[$__rate_interval])", "legendFormat": "disk encoded frames", "refId": "E" },
+        { "expr": "rate(iris_output_disk_packets_total[$__rate_interval])", "legendFormat": "disk packets", "refId": "F" },
+        { "expr": "rate(iris_output_disk_failures_total[$__rate_interval])", "legendFormat": "disk failures", "refId": "G" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops", "decimals": 2 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Output Storage",
+      "id": 17,
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 47 },
+      "targets": [
+        { "expr": "rate(iris_output_disk_bytes_total[$__rate_interval])", "legendFormat": "disk bytes/sec", "refId": "A" },
+        { "expr": "iris_channel_output_to_disk_depth", "legendFormat": "disk queue depth", "refId": "B" },
+        { "expr": "iris_channel_output_to_shm_depth", "legendFormat": "SHM queue depth", "refId": "C" },
+        { "expr": "iris_channel_output_to_disk_peak_depth", "legendFormat": "disk peak depth", "refId": "D" },
+        { "expr": "iris_channel_output_to_shm_peak_depth", "legendFormat": "SHM peak depth", "refId": "E" }
+      ],
+      "fieldConfig": { "defaults": { "decimals": 2 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "All Channel Counters",
+      "id": 18,
+      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 47 },
+      "targets": [
+        {
+          "expr": "sum by (__name__) (rate({__name__=~\"iris_channel_.*_total\"}[$__rate_interval]))",
+          "legendFormat": "{{__name__}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops", "decimals": 2 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "All Channel Gauges",
+      "id": 19,
+      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 55 },
+      "targets": [
+        {
+          "expr": "{__name__=~\"iris_channel_.*_(depth|peak_depth)\"}",
+          "legendFormat": "{{__name__}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "decimals": 0 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Multi-Camera Capture FPS",
+      "id": 20,
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 57 },
+      "targets": [
+        {
+          "expr": "sum by (__name__) (rate({__name__=~\"iris_capture_camera_[0-9]+_frames_emitted_total\"}[$__rate_interval]))",
+          "legendFormat": "{{__name__}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "fps", "decimals": 2 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Multi-Camera Clock Health",
+      "id": 21,
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 65 },
+      "targets": [
+        { "expr": "{__name__=~\"iris_capture_camera_[0-9]+_clock_drift_ppm\"}", "legendFormat": "{{__name__}}", "refId": "A" },
+        { "expr": "{__name__=~\"iris_capture_camera_[0-9]+_clock_residual_us\"}", "legendFormat": "{{__name__}}", "refId": "B" },
+        { "expr": "{__name__=~\"iris_capture_camera_[0-9]+_last_frame_age_ms\"}", "legendFormat": "{{__name__}}", "refId": "C" }
+      ],
+      "fieldConfig": { "defaults": { "decimals": 2 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Frame Synchronization",
+      "id": 22,
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 66 },
+      "targets": [
+        { "expr": "rate(iris_sync_batches_emitted_total[$__rate_interval])", "legendFormat": "batches/sec", "refId": "A" },
+        { "expr": "rate(iris_sync_frames_dropped_total[$__rate_interval])", "legendFormat": "dropped/sec", "refId": "B" },
+        { "expr": "rate(iris_sync_partial_batches_total[$__rate_interval])", "legendFormat": "partial/sec", "refId": "C" },
+        { "expr": "histogram_quantile(0.95, sum by (le) (rate(iris_sync_match_skew_ms_bucket[$__rate_interval])))", "legendFormat": "match skew p95 ms", "refId": "D" }
+      ],
+      "fieldConfig": { "defaults": { "decimals": 2 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Multi-Camera Failures",
+      "id": 23,
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 75 },
+      "targets": [
+        {
+          "expr": "sum by (__name__) (rate({__name__=~\"iris_capture_camera_[0-9]+_(decode_failures|source_errors|rotation_failures)_total\"}[$__rate_interval]))",
+          "legendFormat": "{{__name__}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops", "decimals": 2 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" } }
+    }
+  ],
+  "refresh": "1s",
+  "schemaVersion": 41,
+  "tags": ["iris", "developer"],
+  "templating": { "list": [] },
+  "time": { "from": "now-15m", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "IRIS Developer",
+  "uid": "iris-developer",
+  "version": 1
+}
