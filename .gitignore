@@ -2,9 +2,12 @@ build/
 out/
 .cache/
 .vs/
+vcpkg_installed/
 compile_commands.json
 iris_metrics.json
 capture-*.json
 *.user
 *.suo
 *.mp4
+*.mp4.partial
+*.pt

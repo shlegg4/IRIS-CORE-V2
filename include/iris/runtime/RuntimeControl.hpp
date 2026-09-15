@@ -28,6 +28,7 @@ struct StopRecordingCommand {};
 struct ConfigureSharedMemoryCommand {
     SharedMemoryOutputConfig config;
 };
+struct ConfigurePreviewCommand { PreviewConfig config; };
 struct CaptureConfigPatch {
     std::optional<std::string> device_symbolic_link;
     std::optional<std::uint32_t> device_index;
@@ -70,6 +71,7 @@ struct ShutdownCommand {};
 using RuntimeCommand =
     std::variant<StartPipelineCommand, StopPipelineCommand, GetStatusCommand, GetMetricsCommand,
                  StartRecordingCommand, StopRecordingCommand, ConfigureSharedMemoryCommand,
+                 ConfigurePreviewCommand,
                  ConfigureCaptureCommand, AddCameraCommand, RemoveCameraCommand, GetCamerasCommand,
                  ConfigureSynchronizerCommand, ShutdownCommand>;
 

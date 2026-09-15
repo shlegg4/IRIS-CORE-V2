@@ -2,6 +2,18 @@
   "version": "2.0.0",
   "tasks": [
     {
+      "label": "IRIS: install dependencies",
+      "type": "shell",
+      "command": "call \"C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\Common7\\Tools\\VsDevCmd.bat\" -arch=x64 && set VCPKG_ROOT=C:\\vcpkg && C:\\vcpkg\\vcpkg.exe install --triplet x64-windows --overlay-triplets vcpkg-triplets --x-manifest-root . --x-install-root vcpkg_installed",
+      "options": {
+        "shell": {
+          "executable": "C:\\Windows\\System32\\cmd.exe",
+          "args": ["/d", "/s", "/c"]
+        }
+      },
+      "problemMatcher": []
+    },
+    {
       "label": "IRIS: configure",
       "type": "shell",
       "command": "call \"C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\Common7\\Tools\\VsDevCmd.bat\" -arch=x64 && cmake --preset default",
@@ -11,6 +23,7 @@
           "args": ["/d", "/s", "/c"]
         }
       },
+      "dependsOn": "IRIS: install dependencies",
       "problemMatcher": []
     },
     {

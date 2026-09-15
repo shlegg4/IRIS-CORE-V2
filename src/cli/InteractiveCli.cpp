@@ -294,6 +294,20 @@ std::optional<RuntimeCommand> InteractiveCli::parse(std::string line, std::strin
     if (tokens[0] == "preview" && tokens.size() == 2 && tokens[1] == "status") {
         return GetStatusCommand{};
     }
+    if (tokens[0] == "preview" && tokens.size() >= 2 && tokens.size() <= 3) {
+        PreviewConfig config;
+        if (tokens[1] == "enable") {
+            config.http.enabled = true;
+            config.mjpeg.enabled = true;
+            if (tokens.size() == 3) {
+                const auto port = parse_positive(tokens[2]);
+                if (!port || *port > UINT16_MAX) { error = "preview port must be between 1 and 65535"; return std::nullopt; }
+                config.http.port = static_cast<std::uint16_t>(*port);
+            }
+            return ConfigurePreviewCommand{std::move(config)};
+        }
+        if (tokens[1] == "disable" && tokens.size() == 2) return ConfigurePreviewCommand{std::move(config)};
+    }
     if (tokens[0] == "capture" && tokens.size() == 2 && tokens[1] == "list") {
         return GetCamerasCommand{};
     }
@@ -458,6 +472,8 @@ std::string InteractiveCli::help() {
            "shm enable <name>\n"
            "shm disable\n"
            "preview status\n"
+           "preview enable [port]\n"
+           "preview disable\n"
            "capture list\n"
            "capture sync <tolerance-ms> <capacity> <drop|partial>\n"
            "capture add <camera-id> <device-index> [width height fps format]\n"

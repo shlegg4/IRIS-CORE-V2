@@ -2,6 +2,7 @@
 
 #include "iris/runtime/RuntimeControl.hpp"
 #include "iris/stages/capture/CaptureConfig.hpp"
+#include "iris/stages/pose/PoseConfig.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -10,8 +11,10 @@ namespace iris {
 
 class Runtime {
   public:
-    explicit Runtime(CaptureConfig = {}, std::uint16_t metrics_port = 9464);
-    explicit Runtime(MultiCameraCaptureConfig, std::uint16_t metrics_port = 9464);
+    explicit Runtime(CaptureConfig = {}, std::uint16_t metrics_port = 9464,
+                     PoseConfig = {});
+    explicit Runtime(MultiCameraCaptureConfig, std::uint16_t metrics_port = 9464,
+                     PoseConfig = {});
     ~Runtime();
 
     Runtime(const Runtime&) = delete;

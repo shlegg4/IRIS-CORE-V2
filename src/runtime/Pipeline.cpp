@@ -31,14 +31,15 @@ OutputConfig output_config(std::size_t camera_count) {
 
 class Pipeline::Impl {
   public:
-    Impl(MultiCameraCaptureConfig config, infrastructure::metrics::MetricRegistry& metrics)
+    Impl(MultiCameraCaptureConfig config, infrastructure::metrics::MetricRegistry& metrics,
+         PoseConfig pose_config)
         : capture_to_pose_(2, OverflowPolicy::DropOldest,
                            infrastructure::metrics::register_channel_metrics(
                                metrics, "iris_channel_capture_to_pose")),
           pose_to_output_(2, OverflowPolicy::DropOldest,
                           infrastructure::metrics::register_channel_metrics(
                               metrics, "iris_channel_pose_to_output")),
-          pose_(capture_to_pose_, &pose_to_output_),
+          pose_(capture_to_pose_, &pose_to_output_, std::move(pose_config)),
           output_(pose_to_output_, metrics, output_config(config.cameras.size())) {
         if (config.cameras.empty()) {
             throw std::invalid_argument("multi-camera pipeline requires at least one camera");
@@ -157,11 +158,12 @@ class Pipeline::Impl {
     std::atomic_bool production_stop_requested_{false};
 };
 
-Pipeline::Pipeline(CaptureConfig config, infrastructure::metrics::MetricRegistry& metrics)
-    : Pipeline(single_camera_config(std::move(config)), metrics) {}
+Pipeline::Pipeline(CaptureConfig config, infrastructure::metrics::MetricRegistry& metrics,
+                   PoseConfig pose_config)
+    : Pipeline(single_camera_config(std::move(config)), metrics, std::move(pose_config)) {}
 Pipeline::Pipeline(MultiCameraCaptureConfig config,
-                   infrastructure::metrics::MetricRegistry& metrics)
-    : impl_(std::make_unique<Impl>(std::move(config), metrics)) {}
+                   infrastructure::metrics::MetricRegistry& metrics, PoseConfig pose_config)
+    : impl_(std::make_unique<Impl>(std::move(config), metrics, std::move(pose_config))) {}
 Pipeline::~Pipeline() = default;
 void Pipeline::start() { impl_->start(); }
 void Pipeline::stop_producing() { impl_->stop_producing(); }
@@ -170,6 +172,8 @@ void Pipeline::stop() { impl_->stop(); }
 OutputCommandResult Pipeline::configure_shared_memory(SharedMemoryOutputConfig config) {
     return impl_->output_.configure_shared_memory(std::move(config));
 }
+OutputCommandResult Pipeline::configure_preview(PreviewConfig config) { return impl_->output_.configure_preview(std::move(config)); }
+void Pipeline::set_preview_status_provider(std::function<std::string()> provider) { impl_->output_.set_preview_status_provider(std::move(provider)); }
 OutputCommandResult Pipeline::configure_disk(DiskOutputConfig config) {
     return impl_->output_.configure_disk(std::move(config));
 }

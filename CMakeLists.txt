@@ -1,12 +1,21 @@
 cmake_minimum_required(VERSION 3.24)
+# CUDA 12.8 predates the installed VS 18 toolset; nvcc otherwise rejects it during compiler ID.
+set(CMAKE_CUDA_FLAGS_INIT "--allow-unsupported-compiler")
 project(IRIS VERSION 0.2.0 LANGUAGES CXX CUDA)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 option(IRIS_BUILD_TESTS "Build IRIS tests" ON)
 option(IRIS_BUILD_TOOLS "Build IRIS diagnostic tools" ON)
 option(IRIS_BUILD_HARDWARE_TESTS "Build tests requiring a camera and CUDA GPU" OFF)
-set(IRIS_FFMPEG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../Iris/build/vcpkg_installed/x64-windows"
-    CACHE PATH "Pinned prebuilt FFmpeg x64-windows package root")
+set(IRIS_VCPKG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/vcpkg_installed/x64-windows"
+    CACHE PATH "IRIS_V2 local vcpkg x64-windows install root")
+set(IRIS_FFMPEG_ROOT "${IRIS_VCPKG_ROOT}"
+    CACHE PATH "FFmpeg x64-windows package root")
+set(IRIS_TORCH_ROOT "C:/libtorch" CACHE PATH "LibTorch installation root")
 find_package(CUDAToolkit REQUIRED)
+list(PREPEND CMAKE_PREFIX_PATH "${IRIS_TORCH_ROOT}" "${IRIS_VCPKG_ROOT}" "${IRIS_FFMPEG_ROOT}")
+find_package(Boost CONFIG REQUIRED COMPONENTS system)
+find_package(Torch REQUIRED)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
 
 foreach(component avformat avcodec avutil)
   if(NOT EXISTS "${IRIS_FFMPEG_ROOT}/include/lib${component}/${component}.h")
@@ -31,13 +40,16 @@ add_library(iris
   src/stages/capture/decoding/GpuDecoder.cpp src/stages/capture/decoding/Yuy2CudaConverter.cu
   src/stages/capture/decoding/BgrRotate.cu
   src/stages/pose/PoseStage.cpp src/stages/output/OutputStage.cpp src/stages/output/PreviewSink.cpp
+  src/stages/output/PreviewHttpServer.cpp
+  src/stages/output/MjpegResize.cu
   src/stages/output/disk/GpuMp4Writer.cpp src/stages/output/disk/BgrToNv12.cu)
 add_library(iris::iris ALIAS iris)
 target_compile_features(iris PUBLIC cxx_std_20)
 set_target_properties(iris PROPERTIES CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED YES)
 target_include_directories(iris PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include> PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(iris PUBLIC CUDA::cudart PRIVATE CUDA::nvjpeg FFmpeg::avformat
-  FFmpeg::avcodec FFmpeg::avutil CUDA::cuda_driver)
+  FFmpeg::avcodec FFmpeg::avutil CUDA::cuda_driver Boost::system)
+target_link_libraries(iris PRIVATE "${TORCH_LIBRARIES}")
 if(WIN32)
   target_compile_definitions(iris PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
   target_link_libraries(iris PRIVATE mf mfplat mfreadwrite mfuuid ole32 strmiids ws2_32)
@@ -53,6 +65,14 @@ add_custom_command(TARGET iris_app POST_BUILD
     "${IRIS_FFMPEG_ROOT}/$<IF:$<CONFIG:Debug>,debug/bin,bin>"
     "$<TARGET_FILE_DIR:iris_app>"
   COMMENT "Copying pinned FFmpeg runtime bundle")
+if(WIN32 AND TORCH_INSTALL_PREFIX)
+  file(GLOB _iris_torch_dlls "${TORCH_INSTALL_PREFIX}/lib/*.dll")
+  add_custom_command(TARGET iris_app POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      ${_iris_torch_dlls} "$<TARGET_FILE_DIR:iris_app>"
+    COMMAND_EXPAND_LISTS
+    COMMENT "Copying LibTorch runtime bundle")
+endif()
 if(IRIS_BUILD_TOOLS)
   add_executable(iris_list_cameras tools/list_cameras.cpp)
   target_link_libraries(iris_list_cameras PRIVATE iris::iris)

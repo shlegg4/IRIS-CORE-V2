@@ -20,6 +20,11 @@
 
 namespace iris {
 namespace {
+std::string json_quote(const std::string& value) {
+    std::string result{"\""};
+    for (const char c : value) { if (c == '\\' || c == '\"') result += '\\'; if (c == '\n') result += "\\n"; else result += c; }
+    return result + '"';
+}
 
 struct CommandRequest {
     RuntimeCommand command;
@@ -150,8 +155,8 @@ const char* to_string(RuntimeState state) noexcept {
 
 class Runtime::Impl {
   public:
-    explicit Impl(MultiCameraCaptureConfig config, std::uint16_t metrics_port)
-        : capture_config_(std::move(config)), exporter_(metrics_, "iris_metrics.json"),
+    explicit Impl(MultiCameraCaptureConfig config, std::uint16_t metrics_port, PoseConfig pose_config)
+        : capture_config_(std::move(config)), pose_config_(std::move(pose_config)), exporter_(metrics_, "iris_metrics.json"),
           prometheus_(metrics_, metrics_port), commands_(32, OverflowPolicy::Block) {}
 
     ~Impl() { stop(); }
@@ -244,7 +249,7 @@ class Runtime::Impl {
         if (pipeline_thread_.joinable()) {
             pipeline_thread_.join();
         }
-        pipeline_ = std::make_unique<Pipeline>(capture_config_, metrics_);
+        pipeline_ = std::make_unique<Pipeline>(capture_config_, metrics_, pose_config_);
         auto disk_result = pipeline_->configure_disk(disk_config_);
         if (!disk_result) {
             return from_output_result(std::move(disk_result));
@@ -253,6 +258,20 @@ class Runtime::Impl {
         if (!shm_result) {
             return from_output_result(std::move(shm_result));
         }
+        auto requested_preview = preview_config_;
+        requested_preview.shared_memory = shm_config_;
+        auto preview_result = pipeline_->configure_preview(requested_preview);
+        if (!preview_result) {
+            return from_output_result(std::move(preview_result));
+        }
+        pipeline_->set_preview_status_provider([this] {
+            const auto current = snapshot();
+            return std::string{"{\"pipeline\":"} + json_quote(to_string(current.state)) +
+                   ",\"recording\":" + (current.recording ? "true" : "false") +
+                   ",\"processedPackets\":" + std::to_string(current.processed_packets) +
+                   ",\"previewDropped\":" + std::to_string(current.preview.dropped_packets) +
+                   ",\"lastError\":" + json_quote(current.last_error) + "}";
+        });
         {
             std::scoped_lock lock(state_mutex_);
             state_ = RuntimeState::Starting;
@@ -343,10 +362,31 @@ class Runtime::Impl {
         {
             std::scoped_lock lock(state_mutex_);
             shm_config_ = command.config;
+            preview_config_.shared_memory = command.config;
         }
         return {RuntimeCommandStatus::Applied,
                 command.config.enabled ? "shared memory enabled" : "shared memory disabled",
                 std::nullopt};
+    }
+
+    RuntimeCommandResponse handle(const ConfigurePreviewCommand& command) {
+        if (command.config.http.enabled &&
+            !(command.config.http.bind_address == "127.0.0.1" ||
+              command.config.http.bind_address == "::1" ||
+              command.config.http.bind_address == "localhost")) {
+            return {RuntimeCommandStatus::Rejected, "preview server must bind to loopback", std::nullopt};
+        }
+        if (pipeline_running()) {
+            auto requested = command.config;
+            requested.shared_memory = shm_config_;
+            auto response = from_output_result(pipeline_->configure_preview(std::move(requested)));
+            if (!response) return response;
+        }
+        preview_config_ = command.config;
+        return {RuntimeCommandStatus::Applied,
+                pipeline_running() ? "preview configuration applied and transports restarted"
+                                   : "preview configuration applied",
+                snapshot()};
     }
 
     RuntimeCommandResponse handle(const ConfigureCaptureCommand& command) {
@@ -539,9 +579,13 @@ class Runtime::Impl {
         result.recording_path = disk_config_.destination;
         result.shared_memory_destination = shm_config_.destination;
         result.shared_memory_enabled = shm_config_.enabled;
+        result.preview.enabled = preview_config_.http.enabled || preview_config_.mjpeg.enabled ||
+                                 preview_config_.shared_memory.enabled;
+        result.preview.bind_address = preview_config_.http.bind_address;
+        result.preview.port = preview_config_.http.port;
         if (pipeline_) {
             const auto preview = pipeline_->preview_health();
-            result.preview.enabled = preview.enabled;
+            result.preview.enabled = result.preview.enabled || preview.enabled;
             result.preview.published_packets = preview.published_packets;
             result.preview.dropped_packets = preview.dropped_packets;
             result.preview.connected_clients = preview.connected_clients;
@@ -564,11 +608,13 @@ class Runtime::Impl {
     MultiCameraCaptureConfig capture_config_;
     DiskOutputConfig disk_config_;
     SharedMemoryOutputConfig shm_config_;
+    PreviewConfig preview_config_;
     mutable std::mutex state_mutex_;
     std::condition_variable state_changed_;
     RuntimeState state_{RuntimeState::Stopped};
     bool recording_{};
     std::string last_error_;
+    PoseConfig pose_config_;
     infrastructure::metrics::MetricRegistry metrics_;
     infrastructure::metrics::MetricsExporter exporter_;
     infrastructure::metrics::PrometheusExporter prometheus_;
@@ -580,10 +626,12 @@ class Runtime::Impl {
     std::atomic_bool control_accepting_{false};
 };
 
-Runtime::Runtime(CaptureConfig config, std::uint16_t metrics_port)
-    : impl_(std::make_unique<Impl>(single_camera_config(std::move(config)), metrics_port)) {}
-Runtime::Runtime(MultiCameraCaptureConfig config, std::uint16_t metrics_port)
-    : impl_(std::make_unique<Impl>(std::move(config), metrics_port)) {}
+Runtime::Runtime(CaptureConfig config, std::uint16_t metrics_port, PoseConfig pose_config)
+    : impl_(std::make_unique<Impl>(single_camera_config(std::move(config)), metrics_port,
+                                  std::move(pose_config))) {}
+Runtime::Runtime(MultiCameraCaptureConfig config, std::uint16_t metrics_port,
+                 PoseConfig pose_config)
+    : impl_(std::make_unique<Impl>(std::move(config), metrics_port, std::move(pose_config))) {}
 
 Runtime::~Runtime() = default;
 

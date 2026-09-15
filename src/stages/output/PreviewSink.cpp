@@ -1,4 +1,6 @@
 #include "iris/stages/output/PreviewSink.hpp"
+#include "iris/stages/output/PreviewHttpServer.hpp"
+#include "iris/infrastructure/gpu/CudaResources.hpp"
 
 #include "iris/pipeline/Channel.hpp"
 
@@ -9,13 +11,17 @@
 #include <stdexcept>
 #include <thread>
 #include <vector>
+#include <chrono>
+#include <unordered_map>
 
 #include <cuda_runtime_api.h>
+#include <nvjpeg.h>
 #ifdef _WIN32
 #include <Windows.h>
 #endif
 
 namespace iris {
+namespace output { void resize_bgr(const unsigned char*, std::size_t, unsigned char*, std::size_t, unsigned, unsigned, unsigned, unsigned, cudaStream_t); }
 namespace {
 template <typename T> void append(std::vector<std::byte>& out, const T& value) {
     const auto* p = reinterpret_cast<const std::byte*>(&value);
@@ -44,20 +50,59 @@ class Mapping { public: Mapping(const std::string& name,std::size_t cap):cap_(ca
 #endif
 } // namespace
 
+class MjpegTransport final : public PreviewTransport {
+  public:
+    MjpegTransport(MjpegPreviewConfig config, output::PreviewHttpServer& server)
+        : config_(std::move(config)), server_(server), queue_(config_.queue_capacity, OverflowPolicy::DropOldest) {
+        if (!config_.queue_capacity || !config_.max_fps || !config_.max_width || config_.jpeg_quality > 100) throw std::invalid_argument("invalid MJPEG preview configuration");
+    }
+    ~MjpegTransport() override { stop(); }
+    void start() override { if (running_.exchange(true)) return; worker_=std::thread([this]{run();}); }
+    void stop() noexcept override { if(running_.exchange(false)) queue_.close(); if(worker_.joinable())worker_.join(); }
+    void publish(PreviewPacket packet) noexcept override { if(!running_)return; const auto r=queue_.send(std::move(packet)); if(r==SendResult::ReplacedOldest||r==SendResult::DroppedNewest)++dropped_; }
+    PreviewTransportHealth health() const override { std::scoped_lock lock(lock_); return {config_.enabled,0,published_,dropped_,error_}; }
+  private:
+    void run() noexcept { while(auto packet=queue_.receive()) { for(const auto& frame:(*packet)->frames) { try { if(frame.format != PixelFormat::Bgr8 || !frame.buffer.data) continue; const auto now=std::chrono::steady_clock::now(); const auto interval=std::chrono::milliseconds(1000/config_.max_fps); if(auto it=last_.find(frame.camera);it!=last_.end() && now-it->second<interval) continue; if(frame.ready) frame.ready->synchronize(); auto jpeg=encode(frame); server_.set_frame(frame.camera,std::move(jpeg)); last_[frame.camera]=now; ++published_; } catch(const std::exception& e) { std::scoped_lock lock(lock_); error_=e.what(); } } } }
+    std::shared_ptr<const std::vector<std::uint8_t>> encode(const Frame& frame) {
+        // nvJPEG consumes the captured GPU buffer directly after its readiness event completes.
+        nvjpegHandle_t handle{}; nvjpegEncoderState_t state{}; nvjpegEncoderParams_t params{}; cudaStream_t stream{};
+        auto cleanup=[&]{if(stream)cudaStreamDestroy(stream);if(params)nvjpegEncoderParamsDestroy(params);if(state)nvjpegEncoderStateDestroy(state);if(handle)nvjpegDestroy(handle);};
+        if(nvjpegCreateSimple(&handle)!=NVJPEG_STATUS_SUCCESS) throw std::runtime_error("nvjpegCreateSimple failed");
+        if(cudaStreamCreateWithFlags(&stream,cudaStreamNonBlocking)!=cudaSuccess){cleanup();throw std::runtime_error("cudaStreamCreateWithFlags failed");}
+        if(nvjpegEncoderStateCreate(handle,&state,stream)!=NVJPEG_STATUS_SUCCESS || nvjpegEncoderParamsCreate(handle,&params,stream)!=NVJPEG_STATUS_SUCCESS || nvjpegEncoderParamsSetQuality(params,static_cast<int>(config_.jpeg_quality),stream)!=NVJPEG_STATUS_SUCCESS){cleanup();throw std::runtime_error("nvjpeg encoder setup failed");}
+        const auto width=frame.extent.width > config_.max_width ? config_.max_width : frame.extent.width;
+        const auto height=static_cast<std::uint32_t>((static_cast<std::uint64_t>(frame.extent.height)*width)/frame.extent.width);
+        unsigned char* resized{}; std::size_t resized_pitch{};
+        if(width != frame.extent.width && cudaMallocPitch(reinterpret_cast<void**>(&resized),&resized_pitch,width*3,height)!=cudaSuccess){cleanup();throw std::runtime_error("preview resize allocation failed");}
+        if(resized) output::resize_bgr(static_cast<unsigned char*>(frame.buffer.data),frame.buffer.stride_bytes,resized,resized_pitch,frame.extent.width,frame.extent.height,width,height,stream);
+        nvjpegImage_t image{}; image.channel[0]=resized ? resized : static_cast<unsigned char*>(frame.buffer.data); image.pitch[0]=static_cast<unsigned int>(resized ? resized_pitch : frame.buffer.stride_bytes);
+        const auto result=nvjpegEncodeImage(handle,state,params,&image,NVJPEG_INPUT_BGRI,static_cast<int>(width),static_cast<int>(height),stream);
+        if(result!=NVJPEG_STATUS_SUCCESS){if(resized)cudaFree(resized);cleanup();throw std::runtime_error("nvjpegEncodeImage failed");}
+        if(cudaStreamSynchronize(stream)!=cudaSuccess){if(resized)cudaFree(resized);cleanup();throw std::runtime_error("CUDA JPEG encoding failed");}
+        std::size_t bytes{}; if(nvjpegEncodeRetrieveBitstream(handle,state,nullptr,&bytes,stream)!=NVJPEG_STATUS_SUCCESS){if(resized)cudaFree(resized);cleanup();throw std::runtime_error("nvjpeg bitstream size failed");}
+        auto output=std::make_shared<std::vector<std::uint8_t>>(bytes); if(nvjpegEncodeRetrieveBitstream(handle,state,output->data(),&bytes,stream)!=NVJPEG_STATUS_SUCCESS){if(resized)cudaFree(resized);cleanup();throw std::runtime_error("nvjpeg bitstream retrieval failed");} output->resize(bytes); if(resized)cudaFree(resized); cleanup(); return output;
+    }
+    MjpegPreviewConfig config_; output::PreviewHttpServer& server_; Channel<PreviewPacket> queue_; std::atomic_bool running_{false}; std::thread worker_; mutable std::mutex lock_; std::unordered_map<CameraId,std::chrono::steady_clock::time_point> last_; std::size_t published_{},dropped_{}; std::string error_;
+};
+
 class PreviewSink::Impl {
  public:
-  explicit Impl(PreviewConfig c): config(std::move(c)), queue(config.shared_memory_queue_capacity,OverflowPolicy::DropOldest) { if (config.shared_memory_queue_capacity == 0) throw std::invalid_argument("preview queue capacity must be greater than zero"); }
+  explicit Impl(PreviewConfig c): config(std::move(c)), queue(config.shared_memory_queue_capacity,OverflowPolicy::DropOldest), event_queue(config.http.queue_capacity,OverflowPolicy::DropOldest) { if (config.shared_memory_queue_capacity == 0 || config.http.queue_capacity == 0) throw std::invalid_argument("preview queue capacity must be greater than zero"); }
   ~Impl(){stop();}
-  void start(){if(running.exchange(true))return; {std::scoped_lock l(lock); configure_locked(config.shared_memory);} worker=std::thread([this]{while(auto p=queue.receive()){try{std::scoped_lock l(lock); if(!config.shared_memory.enabled)continue; auto b=v2(**p);
+  void start(){if(running.exchange(true))return; {std::scoped_lock l(lock); configure_locked(config.shared_memory);} start_network(); worker=std::thread([this]{while(auto p=queue.receive()){try{std::scoped_lock l(lock); if(!config.shared_memory.enabled)continue; auto b=v2(**p);
 #ifdef _WIN32
 if(v2map)v2map->write((*p)->sequence,b); if(v1map)v1map->write((*p)->sequence,v1(**p));
 #endif
-++published;}catch(const std::exception& e){std::scoped_lock l(lock); error=e.what();}}});}
-  void stop() noexcept {if(running.exchange(false)){queue.close();} if(worker.joinable())worker.join();}
-  void publish(PreviewPacket p) noexcept {if(!running || !config.shared_memory.enabled)return; try{const auto result=queue.send(std::move(p)); if(result==SendResult::ReplacedOldest || result==SendResult::DroppedNewest) ++dropped; if(result!=SendResult::Closed) ++submitted;}catch(...){++dropped;}}
+++published;}catch(const std::exception& e){std::scoped_lock l(lock); error=e.what();}}}); event_worker=std::thread([this]{while(auto packet=event_queue.receive()){std::scoped_lock l(lock); if(!server)continue; if((*packet)->poses)for(const auto& pose:*(*packet)->poses)server->publish_event("{\"version\":1,\"type\":\"pose\",\"data\":{\"sourceSequence\":"+std::to_string(pose.source_sequence)+"}}"); }});}
+  void stop() noexcept {if(running.exchange(false)){queue.close();event_queue.close();} if(worker.joinable())worker.join();if(event_worker.joinable())event_worker.join();stop_network();}
+  void publish(PreviewPacket p) noexcept {if(!running)return; try{std::scoped_lock l(lock);if(config.shared_memory.enabled){const auto result=queue.send(p);if(result==SendResult::ReplacedOldest||result==SendResult::DroppedNewest)++dropped;if(result!=SendResult::Closed)++submitted;}if(mjpeg)mjpeg->publish(p);if(server){const auto result=event_queue.send(std::move(p));if(result==SendResult::ReplacedOldest||result==SendResult::DroppedNewest)++event_dropped;}}catch(...){++dropped;}}
   OutputCommandResult configure(SharedMemoryOutputConfig c){std::scoped_lock l(lock);try{configure_locked(c);config.shared_memory=std::move(c);return {OutputCommandStatus::Applied,"shared-memory configuration applied"};}catch(const std::exception&e){error=e.what();return {OutputCommandStatus::Failed,error};}}
-  PreviewTransportHealth health()const{std::scoped_lock l(lock);return {config.shared_memory.enabled,0,published.load(),dropped.load(),error};}
+  OutputCommandResult configure_preview(PreviewConfig c){try {if(!output::is_loopback_address(c.http.bind_address))throw std::invalid_argument("preview server must bind to a loopback address");if(running)stop_network();{std::scoped_lock l(lock);config=std::move(c);}if(running)start_network();return {OutputCommandStatus::Applied,"preview configuration applied"};}catch(const std::exception&e){std::scoped_lock l(lock);error=e.what();return {OutputCommandStatus::Failed,error};}}
+  void set_status(std::function<std::string()> provider){std::scoped_lock l(lock);status_provider=std::move(provider);}
+  PreviewTransportHealth health()const{std::scoped_lock l(lock);auto result=PreviewTransportHealth{config.shared_memory.enabled || config.mjpeg.enabled || config.http.enabled,0,published.load(),dropped.load(),error};if(mjpeg){const auto video=mjpeg->health();result.published_packets+=video.published_packets;result.dropped_packets+=video.dropped_packets;if(!video.last_error.empty())result.last_error=video.last_error;}if(server){auto web=server->health();result.connected_clients=web.connected_clients;if(!web.last_error.empty())result.last_error=web.last_error;}return result;}
  private:
+  void start_network(){std::scoped_lock l(lock);if(!config.http.enabled)return;server=std::make_unique<output::PreviewHttpServer>(config.http.bind_address,config.http.port,[this]{return status_provider?status_provider():std::string("{}");});server->start();if(config.mjpeg.enabled){mjpeg=std::make_unique<MjpegTransport>(config.mjpeg,*server);mjpeg->start();}}
+  void stop_network() noexcept {std::unique_ptr<MjpegTransport> old_mjpeg;std::unique_ptr<output::PreviewHttpServer> old_server;{std::scoped_lock l(lock);old_mjpeg=std::move(mjpeg);old_server=std::move(server);}if(old_mjpeg)old_mjpeg->stop();if(old_server)old_server->stop();}
   void configure_locked(const SharedMemoryOutputConfig& c){
 #ifdef _WIN32
 std::unique_ptr<Mapping> legacy,versioned; if(c.enabled){versioned=std::make_unique<Mapping>(c.destination+"_v2",c.capacity_bytes);if(c.legacy_v1)legacy=std::make_unique<Mapping>(c.destination,c.capacity_bytes);} v1map=std::move(legacy);v2map=std::move(versioned);
@@ -65,10 +110,10 @@ std::unique_ptr<Mapping> legacy,versioned; if(c.enabled){versioned=std::make_uni
 if(c.enabled) throw std::runtime_error("shared-memory output is currently implemented for Windows only");
 #endif
 }
-  PreviewConfig config; Channel<PreviewPacket> queue; std::atomic_bool running{false}; std::thread worker; mutable std::mutex lock; std::atomic_size_t submitted{0},published{0},dropped{0};std::string error;
+  PreviewConfig config; Channel<PreviewPacket> queue,event_queue; std::atomic_bool running{false}; std::thread worker,event_worker; mutable std::mutex lock; std::atomic_size_t submitted{0},published{0},dropped{0},event_dropped{0};std::string error;std::function<std::string()> status_provider;std::unique_ptr<output::PreviewHttpServer> server;std::unique_ptr<MjpegTransport> mjpeg;
 #ifdef _WIN32
 std::unique_ptr<Mapping> v1map,v2map;
 #endif
  };
-PreviewSink::PreviewSink(PreviewConfig c):impl_(std::make_unique<Impl>(std::move(c))){} PreviewSink::~PreviewSink()=default; void PreviewSink::start(){impl_->start();} void PreviewSink::publish(PreviewPacket p) noexcept{impl_->publish(std::move(p));} void PreviewSink::stop() noexcept{impl_->stop();} OutputCommandResult PreviewSink::configure_shared_memory(SharedMemoryOutputConfig c){return impl_->configure(std::move(c));} PreviewTransportHealth PreviewSink::shared_memory_health()const{return impl_->health();}
+PreviewSink::PreviewSink(PreviewConfig c):impl_(std::make_unique<Impl>(std::move(c))){} PreviewSink::~PreviewSink()=default; void PreviewSink::start(){impl_->start();} void PreviewSink::publish(PreviewPacket p) noexcept{impl_->publish(std::move(p));} void PreviewSink::stop() noexcept{impl_->stop();} OutputCommandResult PreviewSink::configure(PreviewConfig c){return impl_->configure_preview(std::move(c));} void PreviewSink::set_status_provider(std::function<std::string()> p){impl_->set_status(std::move(p));} OutputCommandResult PreviewSink::configure_shared_memory(SharedMemoryOutputConfig c){return impl_->configure(std::move(c));} PreviewTransportHealth PreviewSink::shared_memory_health()const{return impl_->health();}
 } // namespace iris

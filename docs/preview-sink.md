@@ -21,3 +21,12 @@ individually; readers must not interpret C++ object layouts as wire data.
 
 Preview faults are recorded in transport health and are non-fatal. Start and stop are idempotent;
 stop closes the queue and joins the consumer before releasing mappings.
+
+## Browser transports
+
+Enable the local preview server before starting the pipeline with `preview enable [port]`.
+It binds only to loopback (default `127.0.0.1:8080`). Each available camera is exposed at
+`/api/preview/<cameraId>.mjpeg` as a multipart MJPEG response. Frames are synchronized on their
+CUDA readiness event, rate limited to 10 FPS, resized to 960 pixels maximum width, and encoded
+with nvJPEG quality 75. `/api/events` upgrades to a WebSocket and sends version-1 JSON envelopes
+for pose events plus a transport/runtime status envelope at least once per second.
