@@ -2,11 +2,9 @@
 
 #include "iris/pipeline/Frame.hpp"
 
-#include <array>
 #include <cstddef>
-#include <cstdint>
 #include <filesystem>
-#include <vector>
+#include <string>
 
 namespace iris {
 
