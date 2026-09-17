@@ -10,6 +10,7 @@ Stage::~Stage() { stop(); }
 
 void Stage::start() {
     if (!running_.exchange(true)) {
+        { std::scoped_lock lock(failure_mutex_); failure_ = nullptr; }
         worker_ = std::thread(&Stage::run, this);
     }
 }
@@ -24,19 +25,23 @@ void Stage::stop() {
 }
 
 void Stage::run() {
-    while (true) {
-        auto packet = input_.receive();
-        if (!packet) {
-            break;
+    try {
+        while (true) {
+            auto packet = input_.receive();
+            if (!packet) break;
+            process(*packet);
+            if (output_ && output_->send(std::move(*packet)) == SendResult::Closed) break;
         }
-        process(*packet);
-        if (output_ && output_->send(std::move(*packet)) == SendResult::Closed) {
-            break;
-        }
+    } catch (...) {
+        std::scoped_lock lock(failure_mutex_);
+        failure_ = std::current_exception();
     }
     if (output_) {
         output_->close();
     }
 }
+
+bool Stage::healthy() const noexcept { std::scoped_lock lock(failure_mutex_); return !failure_; }
+std::exception_ptr Stage::failure() const noexcept { std::scoped_lock lock(failure_mutex_); return failure_; }
 
 } // namespace iris

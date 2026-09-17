@@ -258,13 +258,15 @@ std::optional<RuntimeCommand> InteractiveCli::parse(std::string line, std::strin
     if (tokens[0] == "pose") {
         if (tokens.size() == 2 && tokens[1] == "status") return GetStatusCommand{};
         if (tokens.size() == 2 && tokens[1] == "off") return ConfigurePoseCommand{};
+        if (tokens.size() == 2 && tokens[1] == "monocular")
+            return ConfigurePoseCommand{ConfigurePoseCommand::Backend::Monocular, "@assets/pear_ehm_libtorch.pt", {}, {}};
         if (tokens.size() == 3 && tokens[1] == "monocular")
             return ConfigurePoseCommand{ConfigurePoseCommand::Backend::Monocular, tokens[2], {}};
         if (tokens.size() == 3 && tokens[1] == "multiview")
-            return ConfigurePoseCommand{ConfigurePoseCommand::Backend::Multiview, {}, tokens[2], {}};
+            return ConfigurePoseCommand{ConfigurePoseCommand::Backend::Multiview, {}, "@assets/rtmo_s_full_epipolar_fp16.engine", tokens[2]};
         if (tokens.size() == 4 && tokens[1] == "multiview")
             return ConfigurePoseCommand{ConfigurePoseCommand::Backend::Multiview, {}, tokens[2], tokens[3]};
-        error = "pose requires: status | off | monocular <model-path> | multiview <engine-path> <calibration.json>";
+        error = "pose requires: status | off | monocular [model-path] | multiview [engine-path] <calibration.json>";
         return std::nullopt;
     }
     if (tokens[0] == "record" && tokens.size() >= 2) {
@@ -484,7 +486,8 @@ std::string InteractiveCli::help() {
            "pipeline stop\n"
            "pose status\n"
            "pose off\n"
-           "pose monocular <model-path>\n"
+           "pose monocular [model-path]\n"
+           "pose multiview <calibration.json>\n"
            "pose multiview <engine-path> <calibration.json>\n"
            "record start <file.mp4> [bitrate] [fps]\n"
            "record stop\n"

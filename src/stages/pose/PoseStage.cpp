@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -50,14 +51,16 @@ void copy_output(const torch::Tensor& tensor, std::array<float, Size>& destinati
 
 class PoseStage::Impl {
   public:
-    explicit Impl(PoseConfig config) : config_(std::move(config)), device_(config_.device) {}
+    explicit Impl(PoseConfig config) : config_(std::move(config)) {}
     void start() {
         if (config_.model_path.empty()) return;
+        const auto device_name = config_.device.empty() ? std::string{"cpu"} : config_.device;
+        device_ = torch::Device(device_name);
         if (!std::filesystem::is_regular_file(config_.model_path)) throw std::runtime_error("PEAR HMR TorchScript model does not exist: " + config_.model_path.string());
-        try { model_ = torch::jit::load(config_.model_path.string(), device_); model_.eval(); started_ = true; }
+        try { model_ = torch::jit::load(config_.model_path.string(), *device_); model_.eval(); started_ = true; }
         catch (const c10::Error& error) { throw std::runtime_error("could not load PEAR HMR TorchScript model: " + std::string(error.what())); }
     }
-    void stop() { model_ = torch::jit::script::Module{}; started_ = false; }
+    void stop() { model_ = torch::jit::script::Module{}; device_.reset(); started_ = false; }
     void process(Packet& packet) {
         if (config_.model_path.empty() || packet.frames.empty()) return;
         if (!started_) throw std::logic_error("pose stage was not started");
@@ -65,7 +68,7 @@ class PoseStage::Impl {
         std::vector<float> images(batch * 3 * pose_model_height * pose_model_width);
         for (std::size_t index = 0; index < batch; ++index) copy_and_resize_rgb(packet.frames[index], images.data() + index * 3 * pose_model_height * pose_model_width);
         torch::InferenceMode inference;
-        auto input = torch::from_blob(images.data(), {static_cast<int64_t>(batch), 3, pose_model_height, pose_model_width}, torch::TensorOptions().dtype(torch::kFloat32)).clone().to(device_);
+        auto input = torch::from_blob(images.data(), {static_cast<int64_t>(batch), 3, pose_model_height, pose_model_width}, torch::TensorOptions().dtype(torch::kFloat32)).clone().to(*device_);
         const auto output = model_.forward({input});
         if (!output.isTuple() || output.toTuple()->elements().size() != 15) throw std::runtime_error("PEAR HMR model must return its 15-value parameter tuple");
         const auto& values = output.toTuple()->elements();
@@ -94,7 +97,7 @@ class PoseStage::Impl {
     }
   private:
     PoseConfig config_;
-    torch::Device device_;
+    std::optional<torch::Device> device_;
     torch::jit::script::Module model_;
     bool started_{};
 };

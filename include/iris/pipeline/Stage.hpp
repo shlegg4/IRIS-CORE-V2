@@ -5,6 +5,8 @@
 
 #include <atomic>
 #include <thread>
+#include <exception>
+#include <mutex>
 
 namespace iris {
 
@@ -18,6 +20,8 @@ class Stage {
 
     virtual void start();
     virtual void stop();
+    [[nodiscard]] bool healthy() const noexcept;
+    [[nodiscard]] std::exception_ptr failure() const noexcept;
 
   protected:
     virtual void process(Packet& packet) = 0;
@@ -29,6 +33,8 @@ class Stage {
     Channel<Packet>* output_;
     std::atomic_bool running_{false};
     std::thread worker_;
+    mutable std::mutex failure_mutex_;
+    std::exception_ptr failure_;
 };
 
 } // namespace iris

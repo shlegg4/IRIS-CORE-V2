@@ -63,7 +63,7 @@ template <typename T> void append_value(std::vector<std::byte>& bytes, const T& 
 }
 
 std::vector<std::byte> serialize_shm_packet(const Packet& packet) {
-    constexpr std::uint32_t version = 1;
+    constexpr std::uint32_t version = 2;
     std::vector<std::byte> bytes;
     append_value(bytes, version);
     append_value(bytes, packet.sequence);
@@ -90,6 +90,14 @@ std::vector<std::byte> serialize_shm_packet(const Packet& packet) {
         for (const auto& pose : *packet.poses) {
             append_value(bytes, pose.source_sequence);
         }
+    }
+    const auto multiview_count = static_cast<std::uint32_t>(packet.multiview_poses ? packet.multiview_poses->size() : 0);
+    append_value(bytes, multiview_count);
+    if (packet.multiview_poses) for (const auto& pose : *packet.multiview_poses) {
+        const std::uint8_t active = pose.active ? 1 : 0; append_value(bytes, active);
+        for (const auto& joint : pose.joints_3d) for (float value : joint) append_value(bytes, value);
+        for (bool valid : pose.joint_valid) { const std::uint8_t value = valid ? 1 : 0; append_value(bytes, value); }
+        for (const auto& view : pose.joint_scores) for (float score : view) append_value(bytes, score);
     }
     return bytes;
 }

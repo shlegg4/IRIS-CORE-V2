@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.24)
 set(CMAKE_CUDA_FLAGS_INIT "--allow-unsupported-compiler")
 project(IRIS VERSION 0.2.0 LANGUAGES CXX CUDA)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+set(IRIS_BUILD_ASSET_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/assets")
 option(IRIS_BUILD_TESTS "Build IRIS tests" ON)
 option(IRIS_BUILD_TOOLS "Build IRIS diagnostic tools" ON)
 option(IRIS_BUILD_HARDWARE_TESTS "Build tests requiring a camera and CUDA GPU" OFF)
@@ -58,6 +59,7 @@ add_library(iris
   src/stages/output/disk/GpuMp4Writer.cpp src/stages/output/disk/BgrToNv12.cu)
 add_library(iris::iris ALIAS iris)
 target_compile_features(iris PUBLIC cxx_std_20)
+target_compile_definitions(iris PRIVATE IRIS_BUILD_ASSET_DIRECTORY="${IRIS_BUILD_ASSET_DIRECTORY}")
 set_target_properties(iris PROPERTIES CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED YES)
 target_include_directories(iris PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include> PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src "${IRIS_VCPKG_ROOT}/include")
 if(IRIS_HAS_TENSORRT)
@@ -79,6 +81,16 @@ add_executable(iris_app src/main.cpp)
 target_link_libraries(iris_app PRIVATE iris::iris)
 
 add_custom_command(TARGET iris_app POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:iris_app>/assets"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    "${CMAKE_CURRENT_SOURCE_DIR}/pear_ehm_libtorch.pt"
+    "$<TARGET_FILE_DIR:iris_app>/assets/pear_ehm_libtorch.pt"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    "${CMAKE_CURRENT_SOURCE_DIR}/rtmo_s_full_epipolar_fp16.engine"
+    "$<TARGET_FILE_DIR:iris_app>/assets/rtmo_s_full_epipolar_fp16.engine"
+  COMMENT "Provisioning IRIS pose assets")
+
+add_custom_command(TARGET iris_app POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_directory
     "${IRIS_FFMPEG_ROOT}/$<IF:$<CONFIG:Debug>,debug/bin,bin>"
     "$<TARGET_FILE_DIR:iris_app>"
@@ -90,6 +102,14 @@ if(WIN32 AND TORCH_INSTALL_PREFIX)
       ${_iris_torch_dlls} "$<TARGET_FILE_DIR:iris_app>"
     COMMAND_EXPAND_LISTS
     COMMENT "Copying LibTorch runtime bundle")
+endif()
+if(WIN32 AND IRIS_HAS_TENSORRT)
+  file(GLOB _iris_tensorrt_dlls "${IRIS_TENSORRT_ROOT}/bin/nvinfer*.dll" "${IRIS_TENSORRT_ROOT}/lib/nvinfer*.dll")
+  if(_iris_tensorrt_dlls)
+    add_custom_command(TARGET iris_app POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_iris_tensorrt_dlls} "$<TARGET_FILE_DIR:iris_app>"
+      COMMAND_EXPAND_LISTS COMMENT "Copying TensorRT runtime")
+  endif()
 endif()
 if(IRIS_BUILD_TOOLS)
   add_executable(iris_list_cameras tools/list_cameras.cpp)

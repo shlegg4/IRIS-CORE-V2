@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <ranges>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -46,6 +47,20 @@ class Pipeline::Impl {
         }
         if (!pose_config.model_path.empty() && !pose_config.multiview_engine_path.empty())
             throw std::invalid_argument("configure either monocular model_path or multiview_engine_path, not both");
+        if (!pose_config.multiview_engine_path.empty()) {
+            if (config.cameras.size() != 3 || config.incomplete_batch_policy != IncompleteBatchPolicy::DropBatch)
+                throw std::invalid_argument("multiview pose requires exactly three cameras and drop-partial synchronization");
+            for (const auto& calibration : pose_config.multiview_calibration)
+                if (std::ranges::find(config.cameras, calibration.camera_id, &CameraCaptureConfig::camera_id) == config.cameras.end())
+                    throw std::invalid_argument("multiview calibration camera ID is not configured for capture");
+            const int cuda_device = config.cameras.front().capture.cuda_device;
+            for (const auto& camera : config.cameras) {
+                if (camera.capture.rotation != FrameRotation::None)
+                    throw std::invalid_argument("multiview pose currently requires unrotated capture frames");
+                if (camera.capture.cuda_device != cuda_device)
+                    throw std::invalid_argument("multiview pose requires all frames on the same CUDA device");
+            }
+        }
         if (!pose_config.multiview_engine_path.empty())
             pose_ = std::make_unique<MultiviewPoseStage>(capture_to_pose_, &pose_to_output_, std::move(pose_config));
         else
@@ -125,6 +140,7 @@ class Pipeline::Impl {
         }
         pose_->stop();
         output_.stop();
+        if (!failure && pose_->failure()) failure = pose_->failure();
         if (failure) {
             std::rethrow_exception(failure);
         }
@@ -146,6 +162,7 @@ class Pipeline::Impl {
         output_.stop();
     }
     bool healthy() const noexcept {
+        if (pose_ && !pose_->healthy()) return false;
         for (const auto& capture : captures_) {
             if (!capture->healthy()) {
                 return false;

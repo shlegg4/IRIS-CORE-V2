@@ -10,6 +10,7 @@ inline constexpr std::size_t panoptic_joint_count = 19;
 inline constexpr std::size_t coco_joint_count = 17;
 
 struct MultiviewPose {
+    bool active{};
     std::array<std::array<float, 3>, coco_joint_count> joints_3d{};
     std::array<bool, coco_joint_count> joint_valid{};
     std::array<std::array<float, coco_joint_count>, 3> joint_scores{};

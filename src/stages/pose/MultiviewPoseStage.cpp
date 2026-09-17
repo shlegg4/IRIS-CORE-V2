@@ -1,9 +1,11 @@
 #include "iris/stages/MultiviewPoseStage.hpp"
 #include "iris/stages/pose/TensorRtMultiviewEngine.hpp"
+#include "iris/infrastructure/gpu/CudaResources.hpp"
 
 #include <filesystem>
 #include <stdexcept>
 #include <utility>
+#include <ranges>
 
 namespace iris {
 
@@ -39,23 +41,32 @@ class MultiviewPoseStage::Impl {
         std::array<std::uint32_t, 3> widths{};
         std::array<std::uint32_t, 3> heights{};
         for (std::size_t i = 0; i < 3; ++i) {
-            if (packet.frames[i].ready) packet.frames[i].ready->synchronize();
-            buffers[i] = packet.frames[i].buffer.data;
-            strides[i] = packet.frames[i].buffer.stride_bytes;
-            widths[i] = packet.frames[i].extent.width;
-            heights[i] = packet.frames[i].extent.height;
+            const auto id = config_.multiview_calibration[i].camera_id;
+            const auto frame = std::ranges::find(packet.frames, id, &Frame::camera);
+            if (frame == packet.frames.end() || frame->format != PixelFormat::Bgr8 || !frame->buffer.data)
+                throw std::runtime_error("multiview packet is missing a valid calibrated BGR camera frame");
+            if (!frame->extent.width || !frame->extent.height || frame->buffer.stride_bytes < static_cast<std::size_t>(frame->extent.width) * 3)
+                throw std::runtime_error("multiview frame has invalid dimensions or stride");
+            if (frame->ready) frame->ready->synchronize();
+            buffers[i] = frame->buffer.data;
+            strides[i] = frame->buffer.stride_bytes;
+            widths[i] = frame->extent.width;
+            heights[i] = frame->extent.height;
         }
         TensorRtMultiviewResult result;
         engine_->infer(buffers, strides, widths, heights, result);
         std::array<MultiviewPose, 10> poses{};
         for (std::size_t person = 0; person < 10; ++person) {
+            std::size_t valid_count = 0;
             for (std::size_t joint = 0; joint < 17; ++joint) {
                 const auto base = person * 17 * 3 + joint * 3;
                 poses[person].joints_3d[joint] = {result.poses_3d[base], result.poses_3d[base + 1], result.poses_3d[base + 2]};
                 poses[person].joint_valid[joint] = result.joint_valid[person * 17 + joint] != 0;
+                valid_count += poses[person].joint_valid[joint] ? 1U : 0U;
                 for (std::size_t view = 0; view < 3; ++view)
                     poses[person].joint_scores[view][joint] = result.joint_scores[person * 3 * 17 + view * 17 + joint];
             }
+            poses[person].active = valid_count >= 5;
         }
         packet.multiview_poses = std::move(poses);
 #endif
