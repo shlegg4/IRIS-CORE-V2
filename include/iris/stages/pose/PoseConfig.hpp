@@ -23,6 +23,7 @@ struct PoseConfig {
     // the multiview stage runs after the monocular stage and requires exactly
     // three synchronized cameras with calibration below.
     std::filesystem::path multiview_engine_path;
+    std::filesystem::path multiview_calibration_path;
     struct CameraCalibration {
         std::array<float, 9> R_w2c{};
         std::array<float, 3> t_w2c{};

@@ -6,6 +6,8 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 option(IRIS_BUILD_TESTS "Build IRIS tests" ON)
 option(IRIS_BUILD_TOOLS "Build IRIS diagnostic tools" ON)
 option(IRIS_BUILD_HARDWARE_TESTS "Build tests requiring a camera and CUDA GPU" OFF)
+option(IRIS_ENABLE_TENSORRT "Enable TensorRT multiview inference" ON)
+set(IRIS_TENSORRT_ROOT "" CACHE PATH "TensorRT SDK root")
 set(IRIS_VCPKG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/vcpkg_installed/x64-windows"
     CACHE PATH "IRIS_V2 local vcpkg x64-windows install root")
 set(IRIS_FFMPEG_ROOT "${IRIS_VCPKG_ROOT}"
@@ -16,6 +18,17 @@ list(PREPEND CMAKE_PREFIX_PATH "${IRIS_TORCH_ROOT}" "${IRIS_VCPKG_ROOT}" "${IRIS
 find_package(Boost CONFIG REQUIRED COMPONENTS system)
 find_package(Torch REQUIRED)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
+
+if(IRIS_ENABLE_TENSORRT AND IRIS_TENSORRT_ROOT)
+  find_path(IRIS_TENSORRT_INCLUDE NvInfer.h PATHS "${IRIS_TENSORRT_ROOT}/include" NO_DEFAULT_PATH)
+  find_library(IRIS_TENSORRT_LIBRARY nvinfer PATHS "${IRIS_TENSORRT_ROOT}/lib" "${IRIS_TENSORRT_ROOT}/lib/x64" NO_DEFAULT_PATH)
+  if(IRIS_TENSORRT_INCLUDE AND IRIS_TENSORRT_LIBRARY)
+    set(IRIS_HAS_TENSORRT TRUE)
+    message(STATUS "TensorRT enabled: ${IRIS_TENSORRT_INCLUDE}")
+  else()
+    message(WARNING "IRIS_TENSORRT_ROOT was supplied but TensorRT was not found; multiview inference disabled")
+  endif()
+endif()
 
 foreach(component avformat avcodec avutil)
   if(NOT EXISTS "${IRIS_FFMPEG_ROOT}/include/lib${component}/${component}.h")
@@ -38,15 +51,20 @@ add_library(iris
   src/stages/capture/FrameSynchronizerStage.cpp
   src/stages/capture/media_foundation/MediaFoundationSource.cpp
   src/stages/capture/decoding/GpuDecoder.cpp src/stages/capture/decoding/Yuy2CudaConverter.cu
-  src/stages/capture/decoding/BgrRotate.cu
-  src/stages/pose/PoseStage.cpp src/stages/pose/MultiviewPoseStage.cpp src/stages/output/OutputStage.cpp src/stages/output/PreviewSink.cpp
+  src/stages/capture/decoding/BgrRotate.cu src/stages/pose/MultiviewPreprocess.cu
+  src/stages/pose/PoseStage.cpp src/stages/pose/MultiviewPoseStage.cpp src/stages/pose/TensorRtMultiviewEngine.cpp src/stages/output/OutputStage.cpp src/stages/output/PreviewSink.cpp
   src/stages/output/PreviewHttpServer.cpp
   src/stages/output/MjpegResize.cu
   src/stages/output/disk/GpuMp4Writer.cpp src/stages/output/disk/BgrToNv12.cu)
 add_library(iris::iris ALIAS iris)
 target_compile_features(iris PUBLIC cxx_std_20)
 set_target_properties(iris PROPERTIES CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED YES)
-target_include_directories(iris PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include> PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_include_directories(iris PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include> PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src "${IRIS_VCPKG_ROOT}/include")
+if(IRIS_HAS_TENSORRT)
+  target_include_directories(iris PRIVATE "${IRIS_TENSORRT_INCLUDE}")
+  target_link_libraries(iris PRIVATE "${IRIS_TENSORRT_LIBRARY}")
+  target_compile_definitions(iris PRIVATE IRIS_HAS_TENSORRT=1)
+endif()
 target_link_libraries(iris PUBLIC CUDA::cudart PRIVATE CUDA::nvjpeg FFmpeg::avformat
   FFmpeg::avcodec FFmpeg::avutil CUDA::cuda_driver Boost::system)
 target_link_libraries(iris PRIVATE "${TORCH_LIBRARIES}")

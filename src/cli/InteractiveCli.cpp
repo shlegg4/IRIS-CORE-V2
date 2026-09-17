@@ -132,6 +132,10 @@ void print_snapshot(const RuntimeSnapshot& snapshot, std::ostream& output) {
     output << "recording: " << (snapshot.recording ? "active" : "inactive") << '\n';
     output << "file:      " << snapshot.recording_path.string() << '\n';
     output << "packets:   " << snapshot.processed_packets << '\n';
+    output << "pose:      " << snapshot.pose_backend;
+    if (!snapshot.pose_model_path.empty()) output << " " << snapshot.pose_model_path.string();
+    if (!snapshot.pose_engine_path.empty()) output << " " << snapshot.pose_engine_path.string();
+    output << '\n';
     output << "shm:       " << (snapshot.shared_memory_enabled ? "enabled " : "disabled ")
            << snapshot.shared_memory_destination << '\n';
     output << "preview:   " << (snapshot.preview.enabled ? "enabled" : "disabled")
@@ -250,6 +254,18 @@ std::optional<RuntimeCommand> InteractiveCli::parse(std::string line, std::strin
         if (tokens[1] == "stop") {
             return StopPipelineCommand{};
         }
+    }
+    if (tokens[0] == "pose") {
+        if (tokens.size() == 2 && tokens[1] == "status") return GetStatusCommand{};
+        if (tokens.size() == 2 && tokens[1] == "off") return ConfigurePoseCommand{};
+        if (tokens.size() == 3 && tokens[1] == "monocular")
+            return ConfigurePoseCommand{ConfigurePoseCommand::Backend::Monocular, tokens[2], {}};
+        if (tokens.size() == 3 && tokens[1] == "multiview")
+            return ConfigurePoseCommand{ConfigurePoseCommand::Backend::Multiview, {}, tokens[2], {}};
+        if (tokens.size() == 4 && tokens[1] == "multiview")
+            return ConfigurePoseCommand{ConfigurePoseCommand::Backend::Multiview, {}, tokens[2], tokens[3]};
+        error = "pose requires: status | off | monocular <model-path> | multiview <engine-path> <calibration.json>";
+        return std::nullopt;
     }
     if (tokens[0] == "record" && tokens.size() >= 2) {
         if (tokens[1] == "stop" && tokens.size() == 2) {
@@ -466,6 +482,10 @@ std::string InteractiveCli::help() {
            "metrics [prefix]\n"
            "pipeline start\n"
            "pipeline stop\n"
+           "pose status\n"
+           "pose off\n"
+           "pose monocular <model-path>\n"
+           "pose multiview <engine-path> <calibration.json>\n"
            "record start <file.mp4> [bitrate] [fps]\n"
            "record stop\n"
            "record status\n"

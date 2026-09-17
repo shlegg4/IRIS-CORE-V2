@@ -10,6 +10,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <future>
+#include <fstream>
 #include <iostream>
 #include <mutex>
 #include <ranges>
@@ -17,9 +18,39 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
+#include <nlohmann/json.hpp>
 
 namespace iris {
 namespace {
+using json = nlohmann::json;
+
+void load_multiview_calibration(PoseConfig& config, const std::filesystem::path& path) {
+    std::ifstream input(path);
+    if (!input) throw std::runtime_error("could not open multiview calibration file: " + path.string());
+    const auto document = json::parse(input);
+    if (!document.contains("cameras") || !document["cameras"].is_array() || document["cameras"].size() != 3)
+        throw std::runtime_error("multiview calibration must contain exactly three cameras");
+    for (std::size_t index = 0; index < 3; ++index) {
+        const auto& camera = document["cameras"][index];
+        auto read = [&camera](const char* name, std::size_t count) {
+            if (!camera.contains(name) || !camera[name].is_array() || camera[name].size() != count)
+                throw std::runtime_error(std::string("calibration field must contain ") + std::to_string(count) + " values: " + name);
+            std::vector<float> values;
+            for (const auto& value : camera[name]) values.push_back(value.get<float>());
+            return values;
+        };
+        const auto rotation = read("R_w2c", 9);
+        const auto translation = read("t_w2c", 3);
+        const auto intrinsics = read("intrinsics", 9);
+        const auto distortion = camera.contains("distortion") ? read("distortion", 5) : std::vector<float>(5, 0.0F);
+        auto& target = config.multiview_calibration[index];
+        std::copy(rotation.begin(), rotation.end(), target.R_w2c.begin());
+        std::copy(translation.begin(), translation.end(), target.t_w2c.begin());
+        std::copy(intrinsics.begin(), intrinsics.end(), target.intrinsics.begin());
+        std::copy(distortion.begin(), distortion.end(), target.distortion.begin());
+        target.calibrated = true;
+    }
+}
 std::string json_quote(const std::string& value) {
     std::string result{"\""};
     for (const char c : value) { if (c == '\\' || c == '\"') result += '\\'; if (c == '\n') result += "\\n"; else result += c; }
@@ -295,6 +326,29 @@ class Runtime::Impl {
         const auto result = stop_pipeline();
         return {result ? RuntimeCommandStatus::Applied : RuntimeCommandStatus::Rejected,
                 result ? "pipeline stopped" : "pipeline is not running", snapshot()};
+    }
+
+    RuntimeCommandResponse handle(const ConfigurePoseCommand& command) {
+        const bool was_running = pipeline_running();
+        if (was_running && !stop_pipeline())
+            return {RuntimeCommandStatus::Failed, "could not stop pipeline for pose reconfiguration", snapshot()};
+        PoseConfig requested;
+        if (command.backend == ConfigurePoseCommand::Backend::Monocular)
+            requested.model_path = command.model_path;
+        else if (command.backend == ConfigurePoseCommand::Backend::Multiview)
+        {
+            requested.multiview_engine_path = command.engine_path;
+            requested.multiview_calibration_path = command.calibration_path;
+            if (requested.multiview_calibration_path.empty())
+                return {RuntimeCommandStatus::Rejected, "multiview requires an engine path and calibration JSON path", snapshot()};
+            load_multiview_calibration(requested, requested.multiview_calibration_path);
+        }
+        {
+            std::scoped_lock lock(state_mutex_);
+            pose_config_ = std::move(requested);
+        }
+        if (was_running) return handle(StartPipelineCommand{});
+        return {RuntimeCommandStatus::Applied, "pose backend configured", snapshot()};
     }
 
     RuntimeCommandResponse handle(const GetStatusCommand&) {
@@ -597,6 +651,9 @@ class Runtime::Impl {
         result.sync_queue_capacity = capture_config_.sync_queue_capacity;
         result.incomplete_batch_policy = capture_config_.incomplete_batch_policy;
         result.last_error = last_error_;
+        result.pose_backend = pose_backend_name(pose_config_);
+        result.pose_model_path = pose_config_.model_path;
+        result.pose_engine_path = pose_config_.multiview_engine_path;
         result.metrics = metrics_.snapshot();
         if (const auto active = result.metrics.gauges.find("iris_output_recording_active");
             active != result.metrics.gauges.end()) {

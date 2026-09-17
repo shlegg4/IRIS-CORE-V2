@@ -15,6 +15,12 @@ enum class RuntimeState { Stopped, Starting, Running, Stopping, Failed, Shutdown
 
 struct StartPipelineCommand {};
 struct StopPipelineCommand {};
+struct ConfigurePoseCommand {
+    enum class Backend { Off, Monocular, Multiview } backend{Backend::Off};
+    std::filesystem::path model_path;
+    std::filesystem::path engine_path;
+    std::filesystem::path calibration_path;
+};
 struct GetStatusCommand {};
 struct GetMetricsCommand {
     std::string prefix;
@@ -69,7 +75,7 @@ struct ConfigureSynchronizerCommand {
 struct ShutdownCommand {};
 
 using RuntimeCommand =
-    std::variant<StartPipelineCommand, StopPipelineCommand, GetStatusCommand, GetMetricsCommand,
+    std::variant<StartPipelineCommand, StopPipelineCommand, ConfigurePoseCommand, GetStatusCommand, GetMetricsCommand,
                  StartRecordingCommand, StopRecordingCommand, ConfigureSharedMemoryCommand,
                  ConfigurePreviewCommand,
                  ConfigureCaptureCommand, AddCameraCommand, RemoveCameraCommand, GetCamerasCommand,
@@ -96,6 +102,9 @@ struct RuntimeSnapshot {
     std::size_t sync_queue_capacity{4};
     IncompleteBatchPolicy incomplete_batch_policy{IncompleteBatchPolicy::DropBatch};
     std::string last_error;
+    std::string pose_backend{"off"};
+    std::filesystem::path pose_model_path;
+    std::filesystem::path pose_engine_path;
     infrastructure::metrics::MetricsSnapshot metrics;
 };
 
