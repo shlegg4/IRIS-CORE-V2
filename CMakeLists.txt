@@ -39,7 +39,7 @@ add_library(iris
   src/stages/capture/media_foundation/MediaFoundationSource.cpp
   src/stages/capture/decoding/GpuDecoder.cpp src/stages/capture/decoding/Yuy2CudaConverter.cu
   src/stages/capture/decoding/BgrRotate.cu
-  src/stages/pose/PoseStage.cpp src/stages/output/OutputStage.cpp src/stages/output/PreviewSink.cpp
+  src/stages/pose/PoseStage.cpp src/stages/pose/MultiviewPoseStage.cpp src/stages/output/OutputStage.cpp src/stages/output/PreviewSink.cpp
   src/stages/output/PreviewHttpServer.cpp
   src/stages/output/MjpegResize.cu
   src/stages/output/disk/GpuMp4Writer.cpp src/stages/output/disk/BgrToNv12.cu)

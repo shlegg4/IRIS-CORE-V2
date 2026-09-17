@@ -7,6 +7,13 @@ namespace iris {
 using FrameBatch = std::vector<Frame>;
 
 inline constexpr std::size_t panoptic_joint_count = 19;
+inline constexpr std::size_t coco_joint_count = 17;
+
+struct MultiviewPose {
+    std::array<std::array<float, 3>, coco_joint_count> joints_3d{};
+    std::array<bool, coco_joint_count> joint_valid{};
+    std::array<std::array<float, coco_joint_count>, 3> joint_scores{};
+};
 
 // The PEAR EHM TorchScript model regresses SMPL-X and FLAME parameters, rather than joint XYZ
 // positions. Rotation matrices are row-major. The model does not return a detection confidence.
@@ -43,5 +50,8 @@ struct Packet {
     std::uint64_t sequence{};
     FrameBatch frames;
     std::optional<PoseBatch> poses;
+    // Results from the fixed three-view COCO-17 TensorRT engine. Coordinates
+    // use the calibration world frame and units (e.g. centimetres for Panoptic).
+    std::optional<std::array<MultiviewPose, 10>> multiview_poses;
 };
 } // namespace iris

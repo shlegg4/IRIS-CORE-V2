@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <filesystem>
 #include <string>
+#include <array>
 
 namespace iris {
 
@@ -17,6 +18,19 @@ struct PoseConfig {
     // The supplied PEAR artifact was exported on CPU. CUDA is supported only when the artifact
     // itself is compatible with the selected LibTorch CUDA runtime.
     std::string device{"cpu"};
+
+    // Optional fixed-shape RTMO-S + epipolar + triangulation engine.  When set,
+    // the multiview stage runs after the monocular stage and requires exactly
+    // three synchronized cameras with calibration below.
+    std::filesystem::path multiview_engine_path;
+    struct CameraCalibration {
+        std::array<float, 9> R_w2c{};
+        std::array<float, 3> t_w2c{};
+        std::array<float, 9> intrinsics{};
+        std::array<float, 5> distortion{};
+        bool calibrated{false};
+    };
+    std::array<CameraCalibration, 3> multiview_calibration{};
 };
 
 } // namespace iris

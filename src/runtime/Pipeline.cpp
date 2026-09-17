@@ -2,6 +2,7 @@
 
 #include "iris/pipeline/Channel.hpp"
 #include "iris/stages/PoseStage.hpp"
+#include "iris/stages/MultiviewPoseStage.hpp"
 #include "iris/stages/capture/CaptureStage.hpp"
 #include "iris/stages/capture/FrameSynchronizerStage.hpp"
 
@@ -36,11 +37,15 @@ class Pipeline::Impl {
         : capture_to_pose_(2, OverflowPolicy::DropOldest,
                            infrastructure::metrics::register_channel_metrics(
                                metrics, "iris_channel_capture_to_pose")),
-          pose_to_output_(2, OverflowPolicy::DropOldest,
+          pose_to_multiview_(2, OverflowPolicy::DropOldest,
+                             infrastructure::metrics::register_channel_metrics(
+                                 metrics, "iris_channel_pose_to_multiview")),
+          multiview_to_output_(2, OverflowPolicy::DropOldest,
                           infrastructure::metrics::register_channel_metrics(
                               metrics, "iris_channel_pose_to_output")),
-          pose_(capture_to_pose_, &pose_to_output_, std::move(pose_config)),
-          output_(pose_to_output_, metrics, output_config(config.cameras.size())) {
+          pose_(capture_to_pose_, &pose_to_multiview_, pose_config),
+          multiview_(pose_to_multiview_, &multiview_to_output_, pose_config),
+          output_(multiview_to_output_, metrics, output_config(config.cameras.size())) {
         if (config.cameras.empty()) {
             throw std::invalid_argument("multi-camera pipeline requires at least one camera");
         }
@@ -85,6 +90,7 @@ class Pipeline::Impl {
     void start() {
         production_stop_requested_.store(false);
         output_.start();
+        multiview_.start();
         pose_.start();
         if (synchronizer_) {
             synchronizer_->start();
@@ -118,6 +124,7 @@ class Pipeline::Impl {
             synchronizer_->wait();
         }
         pose_.stop();
+        multiview_.stop();
         output_.stop();
         if (failure) {
             std::rethrow_exception(failure);
@@ -135,8 +142,10 @@ class Pipeline::Impl {
             synchronizer_->stop();
         }
         capture_to_pose_.close();
-        pose_to_output_.close();
+        pose_to_multiview_.close();
+        multiview_to_output_.close();
         pose_.stop();
+        multiview_.stop();
         output_.stop();
     }
     bool healthy() const noexcept {
@@ -149,11 +158,13 @@ class Pipeline::Impl {
     }
 
     Channel<Packet> capture_to_pose_;
-    Channel<Packet> pose_to_output_;
+    Channel<Packet> pose_to_multiview_;
+    Channel<Packet> multiview_to_output_;
     std::vector<std::unique_ptr<Channel<Packet>>> capture_channels_;
     std::vector<std::unique_ptr<CaptureStage>> captures_;
     std::unique_ptr<FrameSynchronizerStage> synchronizer_;
     PoseStage pose_;
+    MultiviewPoseStage multiview_;
     OutputStage output_;
     std::atomic_bool production_stop_requested_{false};
 };
