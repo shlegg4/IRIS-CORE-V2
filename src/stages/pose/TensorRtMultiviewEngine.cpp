@@ -52,7 +52,7 @@ class TensorRtMultiviewEngine::Impl {
         if (!engine_) throw std::runtime_error("could not deserialize TensorRT engine: " + logger_.last_error);
         context_.reset(engine_->createExecutionContext());
         if (!context_) throw std::runtime_error("could not create TensorRT execution context");
-        validate("images", nvinfer1::Dims5{1,3,3,640,640}, nvinfer1::TensorIOMode::kINPUT, nvinfer1::DataType::kFLOAT);
+        validate("images", nvinfer1::Dims{5, {1,3,3,640,640}}, nvinfer1::TensorIOMode::kINPUT, nvinfer1::DataType::kFLOAT);
         validate("R_w2c", nvinfer1::Dims4{1,3,3,3}, nvinfer1::TensorIOMode::kINPUT, nvinfer1::DataType::kFLOAT);
         validate("t_w2c", nvinfer1::Dims3{1,3,3}, nvinfer1::TensorIOMode::kINPUT, nvinfer1::DataType::kFLOAT);
         validate("intrinsics", nvinfer1::Dims4{1,3,3,3}, nvinfer1::TensorIOMode::kINPUT, nvinfer1::DataType::kFLOAT);

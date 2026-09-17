@@ -9,10 +9,11 @@
 #include <functional>
 
 namespace iris {
+class RigCalibrationTool;
 class Pipeline {
   public:
-    Pipeline(CaptureConfig, infrastructure::metrics::MetricRegistry&, PoseConfig = {});
-    Pipeline(MultiCameraCaptureConfig, infrastructure::metrics::MetricRegistry&, PoseConfig = {});
+    Pipeline(CaptureConfig, infrastructure::metrics::MetricRegistry&, PoseConfig = {}, std::shared_ptr<RigCalibrationTool> = {});
+    Pipeline(MultiCameraCaptureConfig, infrastructure::metrics::MetricRegistry&, PoseConfig = {}, std::shared_ptr<RigCalibrationTool> = {});
     ~Pipeline();
     Pipeline(const Pipeline&) = delete;
     Pipeline& operator=(const Pipeline&) = delete;

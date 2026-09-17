@@ -4,6 +4,7 @@
 #include "iris/infrastructure/metrics/PrometheusExporter.hpp"
 #include "iris/pipeline/Channel.hpp"
 #include "iris/runtime/Pipeline.hpp"
+#include "iris/tools/RigCalibrationTool.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -205,7 +206,7 @@ const char* to_string(RuntimeState state) noexcept {
 class Runtime::Impl {
   public:
     explicit Impl(MultiCameraCaptureConfig config, std::uint16_t metrics_port, PoseConfig pose_config)
-        : capture_config_(std::move(config)), pose_config_(std::move(pose_config)), exporter_(metrics_, "iris_metrics.json"),
+        : capture_config_(std::move(config)), pose_config_(std::move(pose_config)), calibration_store_(std::make_shared<CalibrationStore>()), rig_tool_(std::make_shared<RigCalibrationTool>(calibration_store_)), exporter_(metrics_, "iris_metrics.json"),
           prometheus_(metrics_, metrics_port), commands_(32, OverflowPolicy::Block) {}
 
     ~Impl() { stop(); }
@@ -298,7 +299,8 @@ class Runtime::Impl {
         if (pipeline_thread_.joinable()) {
             pipeline_thread_.join();
         }
-        pipeline_ = std::make_unique<Pipeline>(capture_config_, metrics_, pose_config_);
+        auto pipeline_pose_config=pose_config_; pipeline_pose_config.calibration_store=calibration_store_;
+        pipeline_ = std::make_unique<Pipeline>(capture_config_, metrics_, std::move(pipeline_pose_config), rig_tool_);
         auto disk_result = pipeline_->configure_disk(disk_config_);
         if (!disk_result) {
             return from_output_result(std::move(disk_result));
@@ -355,9 +357,9 @@ class Runtime::Impl {
         {
             requested.multiview_engine_path = resolve_pose_asset(command.engine_path);
             requested.multiview_calibration_path = command.calibration_path;
-            if (requested.multiview_calibration_path.empty())
-                return {RuntimeCommandStatus::Rejected, "multiview requires an engine path and calibration JSON path", snapshot()};
-            load_multiview_calibration(requested, requested.multiview_calibration_path);
+            if (!requested.multiview_calibration_path.empty()) load_multiview_calibration(requested, requested.multiview_calibration_path);
+            else if (!calibration_store_->snapshot())
+                return {RuntimeCommandStatus::Rejected, "multiview requires a loaded/generated rig calibration", snapshot()};
         }
         PoseConfig previous;
         {
@@ -381,6 +383,20 @@ class Runtime::Impl {
                     snapshot()};
         }
         return {RuntimeCommandStatus::Applied, "pose backend configured", snapshot()};
+    }
+
+    RuntimeCommandResponse handle(const StartRigCalibrationCommand& command) {
+        if (!pipeline_running()) return {RuntimeCommandStatus::Rejected,"pipeline must be running to calibrate the rig",snapshot()};
+        const auto engine=resolve_pose_asset("@assets/da3_base.trt");
+        if (!std::filesystem::is_regular_file(engine)) return {RuntimeCommandStatus::Failed,"DA3 engine asset is missing: "+engine.string(),snapshot()};
+        if (!rig_tool_->start(engine,command.output_path)) return {RuntimeCommandStatus::Rejected,"rig calibration is already running",snapshot()};
+        return {RuntimeCommandStatus::Applied,"DA3 rig calibration started",snapshot()};
+    }
+    RuntimeCommandResponse handle(const CancelRigCalibrationCommand&) { rig_tool_->cancel(); return {RuntimeCommandStatus::Applied,"rig calibration cancelled",snapshot()}; }
+    RuntimeCommandResponse handle(const ClearRigCalibrationCommand&) { calibration_store_->clear(); return {RuntimeCommandStatus::Applied,"rig calibration cleared",snapshot()}; }
+    RuntimeCommandResponse handle(const GetRigCalibrationStatusCommand&) {
+        const auto s=rig_tool_->status(); const auto calibration=calibration_store_->snapshot();
+        return {RuntimeCommandStatus::Applied,"rig "+s.state+(s.message.empty()?"":" - "+s.message)+(calibration?" revision="+std::to_string(calibration->revision):""),snapshot()};
     }
 
     RuntimeCommandResponse handle(const GetStatusCommand&) {
@@ -627,6 +643,7 @@ class Runtime::Impl {
             }
             state_ = RuntimeState::Stopping;
         }
+        rig_tool_->cancel();
         bool was_recording = false;
         {
             std::scoped_lock lock(state_mutex_);
@@ -704,6 +721,8 @@ class Runtime::Impl {
     bool recording_{};
     std::string last_error_;
     PoseConfig pose_config_;
+    std::shared_ptr<CalibrationStore> calibration_store_;
+    std::shared_ptr<RigCalibrationTool> rig_tool_;
     infrastructure::metrics::MetricRegistry metrics_;
     infrastructure::metrics::MetricsExporter exporter_;
     infrastructure::metrics::PrometheusExporter prometheus_;

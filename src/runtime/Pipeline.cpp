@@ -5,6 +5,9 @@
 #include "iris/stages/MultiviewPoseStage.hpp"
 #include "iris/stages/capture/CaptureStage.hpp"
 #include "iris/stages/capture/FrameSynchronizerStage.hpp"
+#include "iris/stages/FrameTapStage.hpp"
+#include "iris/tools/RigCalibrationTool.hpp"
+#include "iris/calibration/RigCalibration.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -34,13 +37,15 @@ OutputConfig output_config(std::size_t camera_count) {
 class Pipeline::Impl {
   public:
     Impl(MultiCameraCaptureConfig config, infrastructure::metrics::MetricRegistry& metrics,
-         PoseConfig pose_config)
+         PoseConfig pose_config, std::shared_ptr<RigCalibrationTool> rig_tool)
         : capture_to_pose_(2, OverflowPolicy::DropOldest,
                            infrastructure::metrics::register_channel_metrics(
                                metrics, "iris_channel_capture_to_pose")),
           pose_to_output_(2, OverflowPolicy::DropOldest,
                           infrastructure::metrics::register_channel_metrics(
                               metrics, "iris_channel_pose_to_output")),
+          tap_to_pose_(2, OverflowPolicy::DropOldest),
+          tap_(capture_to_pose_, &tap_to_pose_, [rig_tool](const Packet& packet){ if(rig_tool) rig_tool->observe(packet); }),
           output_(pose_to_output_, metrics, output_config(config.cameras.size())) {
         if (config.cameras.empty()) {
             throw std::invalid_argument("multi-camera pipeline requires at least one camera");
@@ -50,9 +55,11 @@ class Pipeline::Impl {
         if (!pose_config.multiview_engine_path.empty()) {
             if (config.cameras.size() != 3 || config.incomplete_batch_policy != IncompleteBatchPolicy::DropBatch)
                 throw std::invalid_argument("multiview pose requires exactly three cameras and drop-partial synchronization");
-            for (const auto& calibration : pose_config.multiview_calibration)
-                if (std::ranges::find(config.cameras, calibration.camera_id, &CameraCaptureConfig::camera_id) == config.cameras.end())
-                    throw std::invalid_argument("multiview calibration camera ID is not configured for capture");
+            if (const auto rig=pose_config.calibration_store ? pose_config.calibration_store->snapshot() : nullptr) {
+                for (const auto& calibration : rig->cameras)
+                    if (std::ranges::find(config.cameras, calibration.camera_id, &CameraCaptureConfig::camera_id) == config.cameras.end()) throw std::invalid_argument("runtime calibration camera ID is not configured for capture");
+            } else for (const auto& calibration : pose_config.multiview_calibration)
+                if (calibration.calibrated && std::ranges::find(config.cameras, calibration.camera_id, &CameraCaptureConfig::camera_id) == config.cameras.end()) throw std::invalid_argument("multiview calibration camera ID is not configured for capture");
             const int cuda_device = config.cameras.front().capture.cuda_device;
             for (const auto& camera : config.cameras) {
                 if (camera.capture.rotation != FrameRotation::None)
@@ -62,9 +69,9 @@ class Pipeline::Impl {
             }
         }
         if (!pose_config.multiview_engine_path.empty())
-            pose_ = std::make_unique<MultiviewPoseStage>(capture_to_pose_, &pose_to_output_, std::move(pose_config));
+            pose_ = std::make_unique<MultiviewPoseStage>(tap_to_pose_, &pose_to_output_, std::move(pose_config));
         else
-            pose_ = std::make_unique<PoseStage>(capture_to_pose_, &pose_to_output_, std::move(pose_config));
+            pose_ = std::make_unique<PoseStage>(tap_to_pose_, &pose_to_output_, std::move(pose_config));
         if (config.sync_queue_capacity == 0 || config.sync_tolerance.count() < 0) {
             throw std::invalid_argument("invalid multi-camera synchronizer configuration");
         }
@@ -107,6 +114,7 @@ class Pipeline::Impl {
         production_stop_requested_.store(false);
         output_.start();
         pose_->start();
+        tap_.start();
         if (synchronizer_) {
             synchronizer_->start();
         }
@@ -138,7 +146,7 @@ class Pipeline::Impl {
         if (synchronizer_) {
             synchronizer_->wait();
         }
-        pose_->stop();
+        tap_.stop(); pose_->stop();
         output_.stop();
         if (!failure && pose_->failure()) failure = pose_->failure();
         if (failure) {
@@ -157,8 +165,9 @@ class Pipeline::Impl {
             synchronizer_->stop();
         }
         capture_to_pose_.close();
+        tap_to_pose_.close();
         pose_to_output_.close();
-        pose_->stop();
+        tap_.stop(); pose_->stop();
         output_.stop();
     }
     bool healthy() const noexcept {
@@ -173,6 +182,8 @@ class Pipeline::Impl {
 
     Channel<Packet> capture_to_pose_;
     Channel<Packet> pose_to_output_;
+    Channel<Packet> tap_to_pose_;
+    FrameTapStage tap_;
     std::vector<std::unique_ptr<Channel<Packet>>> capture_channels_;
     std::vector<std::unique_ptr<CaptureStage>> captures_;
     std::unique_ptr<FrameSynchronizerStage> synchronizer_;
@@ -182,11 +193,11 @@ class Pipeline::Impl {
 };
 
 Pipeline::Pipeline(CaptureConfig config, infrastructure::metrics::MetricRegistry& metrics,
-                   PoseConfig pose_config)
-    : Pipeline(single_camera_config(std::move(config)), metrics, std::move(pose_config)) {}
+                   PoseConfig pose_config, std::shared_ptr<RigCalibrationTool> rig_tool)
+    : Pipeline(single_camera_config(std::move(config)), metrics, std::move(pose_config), std::move(rig_tool)) {}
 Pipeline::Pipeline(MultiCameraCaptureConfig config,
-                   infrastructure::metrics::MetricRegistry& metrics, PoseConfig pose_config)
-    : impl_(std::make_unique<Impl>(std::move(config), metrics, std::move(pose_config))) {}
+                   infrastructure::metrics::MetricRegistry& metrics, PoseConfig pose_config, std::shared_ptr<RigCalibrationTool> rig_tool)
+    : impl_(std::make_unique<Impl>(std::move(config), metrics, std::move(pose_config), std::move(rig_tool))) {}
 Pipeline::~Pipeline() = default;
 void Pipeline::start() { impl_->start(); }
 void Pipeline::stop_producing() { impl_->stop_producing(); }

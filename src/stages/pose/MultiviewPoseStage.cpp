@@ -1,6 +1,7 @@
 #include "iris/stages/MultiviewPoseStage.hpp"
 #include "iris/stages/pose/TensorRtMultiviewEngine.hpp"
 #include "iris/infrastructure/gpu/CudaResources.hpp"
+#include "iris/calibration/RigCalibration.hpp"
 
 #include <filesystem>
 #include <stdexcept>
@@ -16,6 +17,7 @@ class MultiviewPoseStage::Impl {
         if (config_.multiview_engine_path.empty()) return;
         if (!std::filesystem::is_regular_file(config_.multiview_engine_path))
             throw std::runtime_error("multiview TensorRT engine does not exist: " + config_.multiview_engine_path.string());
+        refresh_calibration();
         for (const auto& calibration : config_.multiview_calibration)
             if (!calibration.calibrated)
                 throw std::runtime_error("multiview TensorRT requires calibration for all three cameras");
@@ -30,6 +32,7 @@ class MultiviewPoseStage::Impl {
     void process(Packet& packet) {
         if (config_.multiview_engine_path.empty()) return;
         if (!started_) throw std::logic_error("multiview pose stage was not started");
+        refresh_calibration();
         if (packet.frames.size() != 3)
             throw std::runtime_error("multiview TensorRT engine requires exactly three synchronized frames");
 #ifndef IRIS_HAS_TENSORRT
@@ -72,9 +75,21 @@ class MultiviewPoseStage::Impl {
 #endif
     }
   private:
+    void refresh_calibration() {
+        if (!config_.calibration_store) return;
+        const auto rig=config_.calibration_store->snapshot();
+        if (!rig || rig->revision==calibration_revision_) return;
+        if (rig->cameras.size()!=3) throw std::runtime_error("multiview pose requires a three-camera runtime calibration");
+        for(std::size_t i=0;i<3;++i){const auto& source=rig->cameras[i];auto& target=config_.multiview_calibration[i];target.camera_id=source.camera_id;target.intrinsics=source.intrinsics;target.distortion=source.distortion;target.R_w2c=source.R_w2c;target.t_w2c=source.t_w2c;target.calibrated=true;}
+        calibration_revision_=rig->revision;
+#ifdef IRIS_HAS_TENSORRT
+        if(started_) engine_=std::make_unique<TensorRtMultiviewEngine>(config_);
+#endif
+    }
     PoseConfig config_;
     std::unique_ptr<TensorRtMultiviewEngine> engine_;
     bool started_{};
+    std::uint64_t calibration_revision_{};
 };
 
 MultiviewPoseStage::MultiviewPoseStage(Channel<Packet>& input, Channel<Packet>* output, PoseConfig config)

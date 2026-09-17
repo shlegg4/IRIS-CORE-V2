@@ -6,8 +6,10 @@
 #include <filesystem>
 #include <string>
 #include <array>
+#include <memory>
 
 namespace iris {
+class CalibrationStore;
 
 inline constexpr std::size_t pose_model_height = 256;
 inline constexpr std::size_t pose_model_width = 256;
@@ -32,6 +34,7 @@ struct PoseConfig {
         bool calibrated{false};
     };
     std::array<CameraCalibration, 3> multiview_calibration{};
+    std::shared_ptr<CalibrationStore> calibration_store;
 };
 
 inline const char* pose_backend_name(const PoseConfig& config) noexcept {

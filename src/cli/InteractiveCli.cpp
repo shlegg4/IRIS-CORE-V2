@@ -264,10 +264,20 @@ std::optional<RuntimeCommand> InteractiveCli::parse(std::string line, std::strin
             return ConfigurePoseCommand{ConfigurePoseCommand::Backend::Monocular, tokens[2], {}};
         if (tokens.size() == 3 && tokens[1] == "multiview")
             return ConfigurePoseCommand{ConfigurePoseCommand::Backend::Multiview, {}, "@assets/rtmo_s_full_epipolar_fp16.engine", tokens[2]};
+        if (tokens.size() == 2 && tokens[1] == "multiview")
+            return ConfigurePoseCommand{ConfigurePoseCommand::Backend::Multiview, {}, "@assets/rtmo_s_full_epipolar_fp16.engine", {}};
         if (tokens.size() == 4 && tokens[1] == "multiview")
             return ConfigurePoseCommand{ConfigurePoseCommand::Backend::Multiview, {}, tokens[2], tokens[3]};
         error = "pose requires: status | off | monocular [model-path] | multiview [engine-path] <calibration.json>";
         return std::nullopt;
+    }
+    if (tokens[0] == "rig") {
+        if (tokens.size()==2 && tokens[1]=="status") return GetRigCalibrationStatusCommand{};
+        if (tokens.size()==3 && tokens[1]=="calibrate" && tokens[2]=="cancel") return CancelRigCalibrationCommand{};
+        if (tokens.size()==2 && tokens[1]=="clear") return ClearRigCalibrationCommand{};
+        if ((tokens.size()==3 || tokens.size()==4) && tokens[1]=="calibrate" && tokens[2]=="da3")
+            return StartRigCalibrationCommand{tokens.size()==4 ? std::filesystem::path(tokens[3]) : std::filesystem::path{"rig-calibration.json"}};
+        error="rig requires: status | clear | calibrate da3 [output.json] | calibrate cancel"; return std::nullopt;
     }
     if (tokens[0] == "record" && tokens.size() >= 2) {
         if (tokens[1] == "stop" && tokens.size() == 2) {
@@ -487,8 +497,12 @@ std::string InteractiveCli::help() {
            "pose status\n"
            "pose off\n"
            "pose monocular [model-path]\n"
-           "pose multiview <calibration.json>\n"
+           "pose multiview [calibration.json]\n"
            "pose multiview <engine-path> <calibration.json>\n"
+           "rig status\n"
+           "rig calibrate da3 [output.json]\n"
+           "rig calibrate cancel\n"
+           "rig clear\n"
            "record start <file.mp4> [bitrate] [fps]\n"
            "record stop\n"
            "record status\n"

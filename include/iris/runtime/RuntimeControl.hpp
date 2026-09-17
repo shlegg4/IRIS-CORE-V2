@@ -21,6 +21,10 @@ struct ConfigurePoseCommand {
     std::filesystem::path engine_path;
     std::filesystem::path calibration_path;
 };
+struct StartRigCalibrationCommand { std::filesystem::path output_path; };
+struct CancelRigCalibrationCommand {};
+struct ClearRigCalibrationCommand {};
+struct GetRigCalibrationStatusCommand {};
 struct GetStatusCommand {};
 struct GetMetricsCommand {
     std::string prefix;
@@ -75,7 +79,8 @@ struct ConfigureSynchronizerCommand {
 struct ShutdownCommand {};
 
 using RuntimeCommand =
-    std::variant<StartPipelineCommand, StopPipelineCommand, ConfigurePoseCommand, GetStatusCommand, GetMetricsCommand,
+    std::variant<StartPipelineCommand, StopPipelineCommand, ConfigurePoseCommand, StartRigCalibrationCommand,
+                 CancelRigCalibrationCommand, ClearRigCalibrationCommand, GetRigCalibrationStatusCommand, GetStatusCommand, GetMetricsCommand,
                  StartRecordingCommand, StopRecordingCommand, ConfigureSharedMemoryCommand,
                  ConfigurePreviewCommand,
                  ConfigureCaptureCommand, AddCameraCommand, RemoveCameraCommand, GetCamerasCommand,

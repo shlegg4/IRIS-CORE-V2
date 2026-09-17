@@ -22,9 +22,12 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
 
 if(IRIS_ENABLE_TENSORRT AND IRIS_TENSORRT_ROOT)
   find_path(IRIS_TENSORRT_INCLUDE NvInfer.h PATHS "${IRIS_TENSORRT_ROOT}/include" NO_DEFAULT_PATH)
-  find_library(IRIS_TENSORRT_LIBRARY nvinfer PATHS "${IRIS_TENSORRT_ROOT}/lib" "${IRIS_TENSORRT_ROOT}/lib/x64" NO_DEFAULT_PATH)
+  find_library(IRIS_TENSORRT_LIBRARY NAMES nvinfer_10 nvinfer PATHS "${IRIS_TENSORRT_ROOT}/lib" "${IRIS_TENSORRT_ROOT}/lib/x64" NO_DEFAULT_PATH)
   if(IRIS_TENSORRT_INCLUDE AND IRIS_TENSORRT_LIBRARY)
     set(IRIS_HAS_TENSORRT TRUE)
+    find_library(IRIS_TENSORRT_PLUGIN_LIBRARY NAMES nvinfer_plugin_10 nvinfer_plugin PATHS "${IRIS_TENSORRT_ROOT}/lib" "${IRIS_TENSORRT_ROOT}/lib/x64" NO_DEFAULT_PATH REQUIRED)
+    find_package(Eigen3 CONFIG REQUIRED)
+    find_package(OpenCV CONFIG REQUIRED COMPONENTS core imgcodecs imgproc)
     message(STATUS "TensorRT enabled: ${IRIS_TENSORRT_INCLUDE}")
   else()
     message(WARNING "IRIS_TENSORRT_ROOT was supplied but TensorRT was not found; multiview inference disabled")
@@ -45,6 +48,7 @@ endforeach()
 add_library(iris
   src/pipeline/Stage.cpp src/runtime/Pipeline.cpp src/runtime/Runtime.cpp
   src/cli/InteractiveCli.cpp
+  src/tools/RigCalibrationTool.cpp
   src/infrastructure/gpu/CudaResources.cpp src/infrastructure/gpu/FramePool.cpp
   src/infrastructure/metrics/MetricRegistry.cpp src/infrastructure/metrics/MetricsExporter.cpp
   src/infrastructure/metrics/PrometheusExporter.cpp
@@ -63,8 +67,10 @@ target_compile_definitions(iris PRIVATE IRIS_BUILD_ASSET_DIRECTORY="${IRIS_BUILD
 set_target_properties(iris PROPERTIES CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED YES)
 target_include_directories(iris PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include> PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src "${IRIS_VCPKG_ROOT}/include")
 if(IRIS_HAS_TENSORRT)
+  target_sources(iris PRIVATE src/tools/da3/src/preprocess.cpp src/tools/da3/src/tensor_rt.cpp)
   target_include_directories(iris PRIVATE "${IRIS_TENSORRT_INCLUDE}")
-  target_link_libraries(iris PRIVATE "${IRIS_TENSORRT_LIBRARY}")
+  target_include_directories(iris PRIVATE src/tools/da3/include ${OpenCV_INCLUDE_DIRS})
+  target_link_libraries(iris PRIVATE "${IRIS_TENSORRT_LIBRARY}" "${IRIS_TENSORRT_PLUGIN_LIBRARY}" Eigen3::Eigen ${OpenCV_LIBS})
   target_compile_definitions(iris PRIVATE IRIS_HAS_TENSORRT=1)
 endif()
 target_link_libraries(iris PUBLIC CUDA::cudart PRIVATE CUDA::nvjpeg FFmpeg::avformat
@@ -88,6 +94,9 @@ add_custom_command(TARGET iris_app POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "${CMAKE_CURRENT_SOURCE_DIR}/rtmo_s_full_epipolar_fp16.engine"
     "$<TARGET_FILE_DIR:iris_app>/assets/rtmo_s_full_epipolar_fp16.engine"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    "${CMAKE_CURRENT_SOURCE_DIR}/da3_base.trt"
+    "$<TARGET_FILE_DIR:iris_app>/assets/da3_base.trt"
   COMMENT "Provisioning IRIS pose assets")
 
 add_custom_command(TARGET iris_app POST_BUILD
@@ -109,6 +118,12 @@ if(WIN32 AND IRIS_HAS_TENSORRT)
     add_custom_command(TARGET iris_app POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_iris_tensorrt_dlls} "$<TARGET_FILE_DIR:iris_app>"
       COMMAND_EXPAND_LISTS COMMENT "Copying TensorRT runtime")
+  endif()
+endif()
+if(WIN32)
+  file(GLOB _iris_opencv_dlls "${IRIS_VCPKG_ROOT}/bin/opencv_*.dll")
+  if(_iris_opencv_dlls)
+    add_custom_command(TARGET iris_app POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_iris_opencv_dlls} "$<TARGET_FILE_DIR:iris_app>" COMMAND_EXPAND_LISTS COMMENT "Copying OpenCV runtime")
   endif()
 endif()
 if(IRIS_BUILD_TOOLS)

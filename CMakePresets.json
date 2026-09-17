@@ -14,7 +14,8 @@
         "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/vcpkg-triplets",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
         "IRIS_BUILD_TESTS": "ON",
-        "IRIS_BUILD_HARDWARE_TESTS": "OFF"
+        "IRIS_BUILD_HARDWARE_TESTS": "OFF",
+        "IRIS_TENSORRT_ROOT": "C:/TensorRT-10.10.0.31"
       }
     },
     {
