@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
-const props = defineProps<{ showGrid?: boolean }>()
+import type { PoseFrame } from '../types/iris'
+const props = defineProps<{ showGrid?: boolean; pose?: PoseFrame | null }>()
 const canvas = ref<HTMLCanvasElement | null>(null)
 let renderer: THREE.WebGLRenderer | undefined
 let frame = 0
@@ -53,18 +54,59 @@ onMounted(() => {
   scene.add(grid)
   const mat = new THREE.LineBasicMaterial({ color: 0x74e5df })
   const geo = new THREE.BufferGeometry()
-  geo.setFromPoints(
-    links.flatMap(([a, b]) => [new THREE.Vector3(...points[a]), new THREE.Vector3(...points[b])])
-  )
+  const posePoints = (): Array<[number, number, number]> => {
+    const incoming = props.pose?.joints ?? props.pose?.joints3d ?? props.pose?.joints_3d
+    if (!incoming || incoming.length < 15) return points
+    const raw = incoming.map(
+      (joint) =>
+        [Number(joint[0]) || 0, Number(joint[1]) || 0, Number(joint[2]) || 0] as [
+          number,
+          number,
+          number
+        ]
+    )
+    const valid = raw.filter(
+      (_, index) =>
+        props.pose?.valid?.[index] !== false && props.pose?.jointValid?.[index] !== false
+    )
+    if (!valid.length) return points
+    const min = [0, 1, 2].map((axis) => Math.min(...valid.map((joint) => joint[axis])))
+    const max = [0, 1, 2].map((axis) => Math.max(...valid.map((joint) => joint[axis])))
+    const scale = 1.7 / Math.max(max[0] - min[0], max[1] - min[1], max[2] - min[2], 0.001)
+    const centerX = (min[0] + max[0]) / 2
+    const centerZ = (min[2] + max[2]) / 2
+    return raw.map(([x, y, z]) => [
+      (x - centerX) * scale,
+      (y - min[1]) * scale + 0.1,
+      (z - centerZ) * scale
+    ])
+  }
+  const updateLines = (next: Array<[number, number, number]>): void => {
+    geo.setFromPoints(
+      links.flatMap(([a, b]) => [new THREE.Vector3(...next[a]), new THREE.Vector3(...next[b])])
+    )
+  }
+  updateLines(posePoints())
   scene.add(new THREE.LineSegments(geo, mat))
   const jgeo = new THREE.SphereGeometry(0.035, 10, 10),
     jmat = new THREE.MeshBasicMaterial({ color: 0xd4ffff })
-  points.forEach((p) => {
+  const joints: THREE.Mesh[] = []
+  posePoints().forEach((p) => {
     const j = new THREE.Mesh(jgeo, jmat)
     j.position.set(...p)
     scene.add(j)
+    joints.push(j)
   })
-  const resize = () => {
+  const stopPoseWatch = watch(
+    () => props.pose,
+    () => {
+      const next = posePoints()
+      updateLines(next)
+      joints.forEach((joint, index) => joint.position.set(...next[index]))
+    },
+    { deep: true }
+  )
+  const resize = (): void => {
     if (!canvas.value || !renderer) return
     const w = canvas.value.clientWidth,
       h = canvas.value.clientHeight
@@ -75,7 +117,7 @@ onMounted(() => {
   const observer = new ResizeObserver(resize)
   observer.observe(canvas.value)
   resize()
-  const tick = () => {
+  const tick = (): void => {
     grid.visible = props.showGrid !== false
     controls.update()
     renderer?.render(scene, camera)
@@ -86,6 +128,7 @@ onMounted(() => {
     cancelAnimationFrame(frame)
     observer.disconnect()
     controls.dispose()
+    stopPoseWatch()
     renderer?.dispose()
     geo.dispose()
     jgeo.dispose()
@@ -95,10 +138,5 @@ onMounted(() => {
 })
 </script>
 <template>
-  <canvas
-    ref="canvas"
-    class="three-canvas"
-    style="position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: grab"
-    aria-label="Interactive Three.js 3D pose graph"
-  />
+  <canvas ref="canvas" class="three-canvas" aria-label="Interactive Three.js 3D pose graph" />
 </template>

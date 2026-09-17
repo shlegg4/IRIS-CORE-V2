@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <sstream>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -46,6 +47,14 @@ std::vector<std::byte> v2(const Packet& p) {
     if(p.multiview_poses)for(const auto& pose:*p.multiview_poses){const std::uint8_t active=pose.active?1:0;append(out,active);for(const auto& joint:pose.joints_3d)for(float value:joint)append(out,value);for(bool valid:pose.joint_valid){const std::uint8_t value=valid?1:0;append(out,value);}for(const auto& view:pose.joint_scores)for(float score:view)append(out,score);}
     const auto n=static_cast<std::uint64_t>(out.size()); std::memcpy(out.data()+sizeof(magic)+sizeof(version),&n,sizeof n); return out;
 }
+template <std::size_t N>
+std::string pose_event(std::uint64_t sequence, const std::array<std::array<float, 3>, N>& joints, const std::array<bool, N>& valid) {
+    std::ostringstream out; out << "{\"version\":1,\"type\":\"pose\",\"data\":{\"sequence\":" << sequence << ",\"joints3d\":[";
+    for(std::size_t i=0;i<N;++i){if(i)out<<',';out<<'['<<joints[i][0]<<','<<joints[i][1]<<','<<joints[i][2]<<']';}
+    out << "],\"valid\":["; for(std::size_t i=0;i<N;++i){if(i)out<<',';out<<(valid[i]?"true":"false");} out << "]}}"; return out.str();
+}
+std::string pose_event(const Packet&, const Pose& pose) { std::array<bool,panoptic_joint_count> valid{}; for(std::size_t i=0;i<valid.size();++i)valid[i]=pose.joint_confidence[i]>0.0F; return pose_event(pose.source_sequence,pose.joints_3d_mm,valid); }
+std::string pose_event(const Packet& packet, const MultiviewPose& pose) { return pose_event(packet.sequence,pose.joints_3d,pose.joint_valid); }
 #ifdef _WIN32
 std::wstring widen(const std::string& value) { const auto n=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,value.data(),static_cast<int>(value.size()),nullptr,0); if(n<=0) throw std::runtime_error("shared-memory destination is not valid UTF-8"); std::wstring out(n,L'\0'); MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,value.data(),static_cast<int>(value.size()),out.data(),n); return out; }
 struct Header { alignas(8) volatile LONG64 sequence_lock{}; std::uint64_t packet_sequence{}; std::uint64_t payload_size{}; };
@@ -96,7 +105,7 @@ class PreviewSink::Impl {
 #ifdef _WIN32
 if(v2map)v2map->write((*p)->sequence,b); if(v1map)v1map->write((*p)->sequence,v1(**p));
 #endif
-++published;}catch(const std::exception& e){std::scoped_lock l(lock); error=e.what();}}}); event_worker=std::thread([this]{while(auto packet=event_queue.receive()){std::scoped_lock l(lock); if(!server)continue; if((*packet)->poses)for(const auto& pose:*(*packet)->poses)server->publish_event("{\"version\":1,\"type\":\"pose\",\"data\":{\"sourceSequence\":"+std::to_string(pose.source_sequence)+"}}"); }});}
+++published;}catch(const std::exception& e){std::scoped_lock l(lock); error=e.what();}}}); event_worker=std::thread([this]{while(auto packet=event_queue.receive()){std::scoped_lock l(lock); if(!server)continue; if((*packet)->poses)for(const auto& pose:*(*packet)->poses)server->publish_event(pose_event(**packet,pose)); if((*packet)->multiview_poses)for(const auto& pose:*(*packet)->multiview_poses)if(pose.active)server->publish_event(pose_event(**packet,pose)); }});}
   void stop() noexcept {if(running.exchange(false)){queue.close();event_queue.close();} if(worker.joinable())worker.join();if(event_worker.joinable())event_worker.join();stop_network();}
   void publish(PreviewPacket p) noexcept {if(!running)return; try{std::scoped_lock l(lock);if(config.shared_memory.enabled){const auto result=queue.send(p);if(result==SendResult::ReplacedOldest||result==SendResult::DroppedNewest)++dropped;if(result!=SendResult::Closed)++submitted;}if(mjpeg)mjpeg->publish(p);if(server){const auto result=event_queue.send(std::move(p));if(result==SendResult::ReplacedOldest||result==SendResult::DroppedNewest)++event_dropped;}}catch(...){++dropped;}}
   OutputCommandResult configure(SharedMemoryOutputConfig c){std::scoped_lock l(lock);try{configure_locked(c);config.shared_memory=std::move(c);return {OutputCommandStatus::Applied,"shared-memory configuration applied"};}catch(const std::exception&e){error=e.what();return {OutputCommandStatus::Failed,error};}}
