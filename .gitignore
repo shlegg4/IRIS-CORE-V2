@@ -11,3 +11,5 @@ capture-*.json
 *.mp4
 *.mp4.partial
 *.pt
+*.trt
+*.engine
