@@ -317,11 +317,40 @@ class Runtime::Impl {
         }
         pipeline_->set_preview_status_provider([this] {
             const auto current = snapshot();
-            return std::string{"{\"pipeline\":"} + json_quote(to_string(current.state)) +
+            std::string result = std::string{"{\"pipeline\":"} + json_quote(to_string(current.state)) +
                    ",\"recording\":" + (current.recording ? "true" : "false") +
                    ",\"processedPackets\":" + std::to_string(current.processed_packets) +
                    ",\"previewDropped\":" + std::to_string(current.preview.dropped_packets) +
-                   ",\"lastError\":" + json_quote(current.last_error) + "}";
+                   ",\"previewPublished\":" + std::to_string(current.preview.published_packets) +
+                   ",\"lastError\":" + json_quote(current.last_error);
+            result += ",\"cameras\":[";
+            for (std::size_t i = 0; i < current.cameras.size(); ++i) {
+                if (i) result += ',';
+                const auto& camera = current.cameras[i];
+                result += "{\"camera_id\":" + std::to_string(camera.camera_id) +
+                          ",\"width\":" + std::to_string(camera.capture.extent.width) +
+                          ",\"height\":" + std::to_string(camera.capture.extent.height) +
+                          ",\"fps\":" + std::to_string(camera.capture.frame_rate.value()) +
+                          ",\"reconnect\":" + (camera.capture.reconnect ? "true" : "false") + "}";
+            }
+            result += "]";
+            result += std::string{",\"preview\":{\"enabled\":"} +
+                      (current.preview.enabled ? "true" : "false") +
+                      ",\"port\":" + std::to_string(current.preview.port) +
+                      ",\"last_error\":" + json_quote(current.preview.last_error) + "}";
+            if (const auto rig = calibration_store_->snapshot()) {
+                result += ",\"calibration\":{\"revision\":" + std::to_string(rig->revision) + ",\"cameras\":[";
+                for (std::size_t i = 0; i < rig->cameras.size(); ++i) {
+                    if (i) result += ',';
+                    const auto& c = rig->cameras[i]; result += "{\"camera_id\":" + std::to_string(c.camera_id) + ",\"R_w2c\":[";
+                    for (std::size_t j=0;j<c.R_w2c.size();++j) { if(j) result += ','; result += std::to_string(c.R_w2c[j]); }
+                    result += "],\"t_w2c\":[";
+                    for (std::size_t j=0;j<c.t_w2c.size();++j) { if(j) result += ','; result += std::to_string(c.t_w2c[j]); }
+                    result += "]}";
+                }
+                result += "]}";
+            }
+            return result + "}";
         });
         {
             std::scoped_lock lock(state_mutex_);
@@ -356,6 +385,10 @@ class Runtime::Impl {
         else if (command.backend == ConfigurePoseCommand::Backend::Multiview)
         {
             requested.multiview_engine_path = resolve_pose_asset(command.engine_path);
+            // Keep the live calibration store when switching pose backends.  The
+            // store is what `rig calibrate` updates, and the multiview stage
+            // refreshes its camera matrices from it when it starts.
+            requested.calibration_store = calibration_store_;
             requested.multiview_calibration_path = command.calibration_path;
             if (!requested.multiview_calibration_path.empty()) load_multiview_calibration(requested, requested.multiview_calibration_path);
             else if (!calibration_store_->snapshot())
@@ -375,11 +408,12 @@ class Runtime::Impl {
         if (was_running) {
             auto started = handle(StartPipelineCommand{});
             if (started) return started;
+            const auto startup_error = started.message;
             { std::scoped_lock lock(state_mutex_); pose_config_ = std::move(previous); }
             auto restored = handle(StartPipelineCommand{});
             return {RuntimeCommandStatus::Failed,
-                    restored ? "pose configuration failed; previous pipeline restored"
-                             : "pose configuration failed and previous pipeline could not be restored",
+                    restored ? "pose configuration failed; previous pipeline restored: " + startup_error
+                             : "pose configuration failed and previous pipeline could not be restored: " + startup_error,
                     snapshot()};
         }
         return {RuntimeCommandStatus::Applied, "pose backend configured", snapshot()};

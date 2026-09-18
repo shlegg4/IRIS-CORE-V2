@@ -3,6 +3,7 @@
 #include "iris/pipeline/OverflowPolicy.hpp"
 #include <algorithm>
 #include <condition_variable>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
@@ -54,12 +55,14 @@ template <typename T> class Channel {
                 return SendResult::DroppedNewest;
             }
             queue_.pop();
+            enqueue_times_.pop();
             replaced_oldest = true;
             if (metrics_) {
                 metrics_->dropped_oldest.increment();
             }
         }
         queue_.push(std::move(value));
+        enqueue_times_.push(std::chrono::steady_clock::now());
         ++sent_;
         peak_depth_ = std::max(peak_depth_, queue_.size());
         if (metrics_) {
@@ -77,11 +80,16 @@ template <typename T> class Channel {
             return std::nullopt;
         }
         T value = std::move(queue_.front());
+        const auto enqueued = enqueue_times_.front();
         queue_.pop();
+        enqueue_times_.pop();
         ++received_;
         if (metrics_) {
             metrics_->received.increment();
             metrics_->depth.set(static_cast<double>(queue_.size()));
+            const auto residence = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - enqueued).count();
+            metrics_->residence_ms.observe(residence);
+            metrics_->last_residence_ms.set(residence);
         }
         writable_.notify_one();
         return value;
@@ -92,11 +100,16 @@ template <typename T> class Channel {
             return std::nullopt;
         }
         T value = std::move(queue_.front());
+        const auto enqueued = enqueue_times_.front();
         queue_.pop();
+        enqueue_times_.pop();
         ++received_;
         if (metrics_) {
             metrics_->received.increment();
             metrics_->depth.set(static_cast<double>(queue_.size()));
+            const auto residence = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - enqueued).count();
+            metrics_->residence_ms.observe(residence);
+            metrics_->last_residence_ms.set(residence);
         }
         writable_.notify_one();
         return value;
@@ -119,6 +132,7 @@ template <typename T> class Channel {
     mutable std::mutex mutex_;
     std::condition_variable readable_, writable_;
     std::queue<T> queue_;
+    std::queue<std::chrono::steady_clock::time_point> enqueue_times_;
     std::size_t peak_depth_{};
     std::uint64_t sent_{}, received_{}, dropped_{};
     bool closed_{};

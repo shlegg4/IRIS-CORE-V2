@@ -32,7 +32,7 @@ body {
   min-height: 0;
   flex: 1 1 auto;
   display: grid;
-  grid-template-columns: clamp(220px, 25vw, 286px) minmax(0, 1fr);
+  grid-template-columns: var(--console-width, 286px) 6px minmax(0, 1fr);
   overflow: hidden;
 }
 
@@ -47,6 +47,25 @@ body {
   flex-direction: column;
   overflow: hidden;
   border-right: 1px solid var(--line);
+}
+
+.console-resizer {
+  position: relative;
+  z-index: 5;
+  cursor: col-resize;
+  background: var(--line);
+  touch-action: none;
+}
+
+.console-resizer::after {
+  content: '';
+  position: absolute;
+  inset: 0 -3px;
+}
+
+.console-resizer:hover,
+.console-resizer:active {
+  background: var(--cyan);
 }
 
 .panel-heading {
@@ -70,6 +89,7 @@ body {
   overflow: hidden auto;
   scrollbar-width: thin;
   scrollbar-color: #2a3b3f transparent;
+  font-size: 12px;
 }
 
 .log-line {
@@ -88,7 +108,7 @@ body {
 }
 .kind {
   overflow: hidden;
-  font-size: 9px;
+  font-size: 10px;
   text-transform: uppercase;
   text-overflow: ellipsis;
 }
@@ -123,16 +143,21 @@ body {
   color: var(--cyan);
   font-size: 17px;
 }
-.cursor-line input {
+.cursor-line textarea {
   min-width: 0;
   width: 100%;
+  resize: none;
+  overflow: hidden;
+  font: inherit;
+  line-height: inherit;
+  white-space: pre;
   padding: 0;
   border: 0;
   outline: 0;
   background: none;
   color: #e2efee;
 }
-.cursor-line input::placeholder {
+.cursor-line textarea::placeholder {
   color: #405156;
 }
 
@@ -146,7 +171,7 @@ body {
   overflow: hidden;
   border-top: 1px solid var(--line);
   color: #536469;
-  font-size: 9px;
+  font-size: 10px;
   white-space: nowrap;
 }
 
@@ -310,6 +335,9 @@ body {
     grid-template-columns: 1fr;
   }
   .console {
+    display: none;
+  }
+  .console-resizer {
     display: none;
   }
   .stage-toolbar {

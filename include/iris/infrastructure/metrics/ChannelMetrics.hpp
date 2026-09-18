@@ -16,6 +16,8 @@ struct ChannelMetrics {
     Counter rejected_closed;
     Gauge depth;
     Gauge peak_depth;
+    Histogram residence_ms;
+    Gauge last_residence_ms;
 };
 
 inline ChannelMetrics register_channel_metrics(MetricRegistry& registry, std::string_view prefix) {
@@ -29,6 +31,8 @@ inline ChannelMetrics register_channel_metrics(MetricRegistry& registry, std::st
         registry.counter(name + "_rejected_closed_total"),
         registry.gauge(name + "_depth"),
         registry.gauge(name + "_peak_depth"),
+        registry.histogram(name + "_residence_ms", {0.1, 0.5, 1, 2, 5, 10, 20, 50, 100, 250, 500, 1000}),
+        registry.gauge(name + "_last_residence_ms"),
     };
 }
 

@@ -92,8 +92,8 @@ add_custom_command(TARGET iris_app POST_BUILD
     "${CMAKE_CURRENT_SOURCE_DIR}/pear_ehm_libtorch.pt"
     "$<TARGET_FILE_DIR:iris_app>/assets/pear_ehm_libtorch.pt"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
-    "${CMAKE_CURRENT_SOURCE_DIR}/rtmo_s_full_epipolar_fp16.engine"
-    "$<TARGET_FILE_DIR:iris_app>/assets/rtmo_s_full_epipolar_fp16.engine"
+    "${CMAKE_CURRENT_SOURCE_DIR}/rtmo_s.engine"
+    "$<TARGET_FILE_DIR:iris_app>/assets/rtmo_s.engine"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "${CMAKE_CURRENT_SOURCE_DIR}/da3_base.trt"
     "$<TARGET_FILE_DIR:iris_app>/assets/da3_base.trt"

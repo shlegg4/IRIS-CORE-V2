@@ -45,7 +45,18 @@ void MetricsExporter::run(std::stop_token stop) {
             if (!first) {
                 o << ',';
             }
-            o << "\n    \"" << n << "\": {\"count\": " << v.count << ", \"sum\": " << v.sum << '}';
+            o << "\n    \"" << n << "\": {\"count\": " << v.count << ", \"sum\": " << v.sum
+              << ", \"bounds\": [";
+            for (std::size_t index = 0; index < v.bounds.size(); ++index) {
+                if (index) o << ',';
+                o << v.bounds[index];
+            }
+            o << "], \"counts\": [";
+            for (std::size_t index = 0; index < v.counts.size(); ++index) {
+                if (index) o << ',';
+                o << v.counts[index];
+            }
+            o << "]}";
             first = false;
         }
         o << "\n  }\n}\n";

@@ -2,141 +2,95 @@
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
-import type { PoseFrame } from '../types/iris'
-const props = defineProps<{ showGrid?: boolean; pose?: PoseFrame | null }>()
+import type { CalibrationSnapshot, PoseFrame, PosePerson } from '../types/iris'
+
+const props = defineProps<{ showGrid?: boolean; showCameras?: boolean; pose?: PoseFrame | null; calibration?: CalibrationSnapshot | null }>()
 const canvas = ref<HTMLCanvasElement | null>(null)
 let renderer: THREE.WebGLRenderer | undefined
-let frame = 0
-const points: [[number, number, number], ...Array<[number, number, number]>] = [
-  [0, 1.8, 0],
-  [0, 1.55, 0],
-  [0, 1.3, 0],
-  [-0.35, 1.52, 0],
-  [-0.65, 1.3, 0],
-  [-0.8, 1.05, 0],
-  [0.35, 1.52, 0],
-  [0.65, 1.3, 0],
-  [0.8, 1.05, 0],
-  [-0.22, 1.08, 0],
-  [-0.32, 0.58, 0],
-  [-0.35, 0.1, 0],
-  [0.22, 1.08, 0],
-  [0.32, 0.58, 0],
-  [0.35, 0.1, 0]
-]
-const links = [
-  [0, 1],
-  [1, 2],
-  [2, 3],
-  [3, 4],
-  [4, 5],
-  [2, 6],
-  [6, 7],
-  [7, 8],
-  [2, 9],
-  [9, 10],
-  [10, 11],
-  [2, 12],
-  [12, 13],
-  [13, 14]
-]
+let animationFrame = 0
+const links = [[0,1],[0,2],[1,3],[2,4],[5,6],[0,5],[0,6],[5,7],[7,9],[6,8],[8,10],[5,11],[6,12],[11,12],[11,13],[13,15],[12,14],[14,16]]
+const colors = [0x74e5df, 0xffb86b, 0xbd93f9, 0x50fa7b, 0xff79c6, 0xf1fa8c]
+
+// Calibration and triangulation use camera coordinates (Y down); Three.js uses Y up.
+const toScene = (v: number[]): THREE.Vector3 => new THREE.Vector3(Number(v[0]) || 0, -(Number(v[1]) || 0), Number(v[2]) || 0)
+const peopleInFrame = (): PosePerson[] => props.pose?.people ?? (props.pose ? [props.pose] : [])
+
 onMounted(() => {
   if (!canvas.value) return
-  const scene = new THREE.Scene(),
-    camera = new THREE.PerspectiveCamera(35, 1, 0.1, 100)
+  const scene = new THREE.Scene()
+  const camera = new THREE.PerspectiveCamera(35, 1, 0.01, 100)
   camera.position.set(2.8, 1.5, 3.5)
   renderer = new THREE.WebGLRenderer({ canvas: canvas.value, antialias: true, alpha: true })
   renderer.setPixelRatio(Math.min(devicePixelRatio, 2))
   const controls = new OrbitControls(camera, canvas.value)
   controls.enableDamping = true
-  controls.target.set(0, 1, 0)
+  controls.target.set(0, 0, 0)
   const grid = new THREE.GridHelper(4, 16, 0x2b666d, 0x163439)
-  scene.add(grid)
-  const mat = new THREE.LineBasicMaterial({ color: 0x74e5df })
-  const geo = new THREE.BufferGeometry()
-  const posePoints = (): Array<[number, number, number]> => {
-    const incoming = props.pose?.joints ?? props.pose?.joints3d ?? props.pose?.joints_3d
-    if (!incoming || incoming.length < 15) return points
-    const raw = incoming.map(
-      (joint) =>
-        [Number(joint[0]) || 0, Number(joint[1]) || 0, Number(joint[2]) || 0] as [
-          number,
-          number,
-          number
-        ]
-    )
-    const valid = raw.filter(
-      (_, index) =>
-        props.pose?.valid?.[index] !== false && props.pose?.jointValid?.[index] !== false
-    )
-    if (!valid.length) return points
-    const min = [0, 1, 2].map((axis) => Math.min(...valid.map((joint) => joint[axis])))
-    const max = [0, 1, 2].map((axis) => Math.max(...valid.map((joint) => joint[axis])))
-    const scale = 1.7 / Math.max(max[0] - min[0], max[1] - min[1], max[2] - min[2], 0.001)
-    const centerX = (min[0] + max[0]) / 2
-    const centerZ = (min[2] + max[2]) / 2
-    return raw.map(([x, y, z]) => [
-      (x - centerX) * scale,
-      (y - min[1]) * scale + 0.1,
-      (z - centerZ) * scale
-    ])
+  const poseGroup = new THREE.Group(), cameraGroup = new THREE.Group()
+  scene.add(grid, poseGroup, cameraGroup)
+
+  const disposeGroup = (group: THREE.Group): void => {
+    for (const child of [...group.children]) {
+      child.removeFromParent()
+      const object = child as THREE.Mesh | THREE.LineSegments
+      object.geometry?.dispose()
+      const material = object.material
+      if (Array.isArray(material)) material.forEach((item) => item.dispose())
+      else material?.dispose()
+    }
   }
-  const updateLines = (next: Array<[number, number, number]>): void => {
-    geo.setFromPoints(
-      links.flatMap(([a, b]) => [new THREE.Vector3(...next[a]), new THREE.Vector3(...next[b])])
-    )
+  const updatePoses = (): void => {
+    disposeGroup(poseGroup)
+    peopleInFrame().forEach((person, personIndex) => {
+      const incoming = person.joints ?? person.joints3d ?? person.joints_3d
+      if (!incoming || incoming.length < 17) return
+      const valid = person.valid ?? person.jointValid ?? incoming.map(() => true)
+      const points = incoming.map(toScene), color = colors[personIndex % colors.length]
+      const linePoints = links.filter(([a,b]) => valid[a] !== false && valid[b] !== false).flatMap(([a,b]) => [points[a], points[b]])
+      if (linePoints.length) poseGroup.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(linePoints), new THREE.LineBasicMaterial({ color })))
+      points.forEach((point, index) => {
+        if (valid[index] === false) return
+        const joint = new THREE.Mesh(new THREE.SphereGeometry(0.025, 8, 8), new THREE.MeshBasicMaterial({ color }))
+        joint.position.copy(point); poseGroup.add(joint)
+      })
+    })
   }
-  updateLines(posePoints())
-  scene.add(new THREE.LineSegments(geo, mat))
-  const jgeo = new THREE.SphereGeometry(0.035, 10, 10),
-    jmat = new THREE.MeshBasicMaterial({ color: 0xd4ffff })
-  const joints: THREE.Mesh[] = []
-  posePoints().forEach((p) => {
-    const j = new THREE.Mesh(jgeo, jmat)
-    j.position.set(...p)
-    scene.add(j)
-    joints.push(j)
-  })
-  const stopPoseWatch = watch(
-    () => props.pose,
-    () => {
-      const next = posePoints()
-      updateLines(next)
-      joints.forEach((joint, index) => joint.position.set(...next[index]))
-    },
-    { deep: true }
-  )
+  const updateCameras = (): void => {
+    disposeGroup(cameraGroup)
+    for (const calibration of props.calibration?.cameras ?? []) {
+      const r = calibration.R_w2c, t = calibration.t_w2c
+      if (r.length < 9 || t.length < 3) continue
+      const center = toScene([-(r[0]*t[0]+r[3]*t[1]+r[6]*t[2]), -(r[1]*t[0]+r[4]*t[1]+r[7]*t[2]), -(r[2]*t[0]+r[5]*t[1]+r[8]*t[2])])
+      const direction = toScene([r[6], r[7], r[8]]).normalize()
+      const viewCamera = new THREE.PerspectiveCamera(45, 1, 0.05, 0.35)
+      viewCamera.position.copy(center); viewCamera.lookAt(center.clone().add(direction)); viewCamera.updateMatrixWorld()
+      const frustum = new THREE.CameraHelper(viewCamera)
+      frustum.setColors(new THREE.Color(0xffb86b), new THREE.Color(0xff7b72), new THREE.Color(0xffd166), new THREE.Color(0xffb86b), new THREE.Color(0xffb86b))
+      cameraGroup.add(frustum)
+    }
+  }
+  updatePoses(); updateCameras()
+  const stopPoseWatch = watch(() => props.pose, updatePoses, { deep: true })
+  const stopCalibrationWatch = watch(() => props.calibration, updateCameras, { deep: true })
   const resize = (): void => {
     if (!canvas.value || !renderer) return
-    const w = canvas.value.clientWidth,
-      h = canvas.value.clientHeight
-    camera.aspect = w / h
-    camera.updateProjectionMatrix()
-    renderer.setSize(w, h, false)
+    camera.aspect = canvas.value.clientWidth / canvas.value.clientHeight
+    camera.updateProjectionMatrix(); renderer.setSize(canvas.value.clientWidth, canvas.value.clientHeight, false)
   }
-  const observer = new ResizeObserver(resize)
-  observer.observe(canvas.value)
-  resize()
+  const observer = new ResizeObserver(resize); observer.observe(canvas.value); resize()
   const tick = (): void => {
-    grid.visible = props.showGrid !== false
-    controls.update()
-    renderer?.render(scene, camera)
-    frame = requestAnimationFrame(tick)
+    grid.visible = props.showGrid !== false; cameraGroup.visible = props.showCameras !== false
+    controls.update(); renderer?.render(scene, camera); animationFrame = requestAnimationFrame(tick)
   }
   tick()
   onBeforeUnmount(() => {
-    cancelAnimationFrame(frame)
-    observer.disconnect()
-    controls.dispose()
-    stopPoseWatch()
+    cancelAnimationFrame(animationFrame); observer.disconnect(); controls.dispose(); stopPoseWatch(); stopCalibrationWatch()
+    disposeGroup(poseGroup); disposeGroup(cameraGroup); grid.geometry.dispose()
+    const gridMaterial = grid.material
+    if (Array.isArray(gridMaterial)) gridMaterial.forEach((item) => item.dispose()); else gridMaterial.dispose()
     renderer?.dispose()
-    geo.dispose()
-    jgeo.dispose()
-    mat.dispose()
-    jmat.dispose()
   })
 })
 </script>
-<template>
-  <canvas ref="canvas" class="three-canvas" aria-label="Interactive Three.js 3D pose graph" />
-</template>
+
+<template><canvas ref="canvas" class="three-canvas" aria-label="Interactive Three.js multi-person 3D pose graph" /></template>

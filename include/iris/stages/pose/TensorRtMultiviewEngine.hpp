@@ -10,9 +10,14 @@
 namespace iris {
 
 struct TensorRtMultiviewResult {
-    std::array<float, 10 * 17 * 3> poses_3d{};
-    std::array<unsigned char, 10 * 17> joint_valid{};
-    std::array<float, 10 * 3 * 17> joint_scores{};
+    // The engine is batched over camera views.  These are indexed [view][candidate][joint].
+    std::array<float, 3 * 10 * 17 * 2> keypoints{};
+    std::array<float, 3 * 10 * 17> keypoint_scores{};
+    std::array<float, 3 * 10> instance_scores{};
+    std::array<float, 3 * 10 * 4> boxes{};
+    std::array<unsigned char, 3 * 10> candidate_valid{};
+    // Intrinsics in the letterboxed 640x640 coordinate system used by keypoints.
+    std::array<float, 3 * 9> letterbox_intrinsics{};
 };
 
 class TensorRtMultiviewEngine {

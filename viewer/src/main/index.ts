@@ -10,6 +10,7 @@ let irisProcess: ChildProcessWithoutNullStreams | undefined
 let metricsTimer: NodeJS.Timeout | undefined
 let previewSocket: WebSocket | undefined
 let reconnectTimer: NodeJS.Timeout | undefined
+let mainWindow: BrowserWindow | undefined
 
 function send(window: BrowserWindow, channel: string, payload: unknown): void {
   if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
@@ -75,34 +76,43 @@ function startIrisRuntime(window: BrowserWindow): void {
   if (irisProcess) return
   try {
     const executable = runtimePath()
-    irisProcess = spawn(executable, [], {
+    const child = spawn(executable, [], {
       cwd: dirname(executable),
       stdio: ['pipe', 'pipe', 'pipe']
     })
+    irisProcess = child
     const forward = (_channel: string, chunk: Buffer): void => {
       for (const line of chunk.toString().split(/\r?\n/).filter(Boolean)) {
         try {
           const message = JSON.parse(line) as { type?: string; [key: string]: unknown }
           if (message.type === 'metrics') window.webContents.send('iris:metrics', message)
-          else if (message.type === 'pose') window.webContents.send('iris:pose', message)
+          else if (message.type === 'pose')
+            window.webContents.send('iris:pose', message.data ?? message)
           else window.webContents.send('iris:log', line)
         } catch {
           window.webContents.send('iris:log', line)
         }
       }
     }
-    irisProcess.stdout.on('data', (chunk) => forward('iris:log', chunk))
-    irisProcess.stderr.on('data', (chunk) => forward('iris:log', chunk))
-    irisProcess.on('error', (error) =>
-      window.webContents.send('iris:status', { state: 'error', message: error.message })
+    child.stdout.on('data', (chunk) => forward('iris:log', chunk))
+    child.stderr.on('data', (chunk) => forward('iris:log', chunk))
+    child.on('error', (error) =>
+      send(window, 'iris:status', { state: 'error', message: error.message })
     )
-    irisProcess.on('close', (code) => {
-      window.webContents.send('iris:status', { state: 'stopped', code })
-      irisProcess = undefined
+    child.on('close', (code, signal) => {
+      // A delayed close event from an older child must not clear a newer
+      // runtime started after it.
+      if (irisProcess === child) irisProcess = undefined
+      send(
+        window,
+        'iris:log',
+        `IRIS runtime exited (code ${code ?? 'none'}, signal ${signal ?? 'none'}).`
+      )
+      send(window, 'iris:status', { state: 'stopped', code, signal })
     })
     window.webContents.send('iris:status', { state: 'running', executable })
     startMetricsBridge(window, dirname(executable))
-    irisProcess.stdin.write('preview enable 8080\n')
+    child.stdin.write('preview enable 8080\n')
     connectPreviewEvents(window)
   } catch (error) {
     window.webContents.send('iris:status', { state: 'error', message: String(error) })
@@ -117,8 +127,9 @@ function stopIrisRuntime(): void {
   previewSocket?.close()
   previewSocket = undefined
   if (!irisProcess) return
-  irisProcess.kill()
+  const child = irisProcess
   irisProcess = undefined
+  child.kill()
 }
 
 function createWindow(): BrowserWindow {
@@ -170,13 +181,33 @@ app.whenReady().then(() => {
 
   // IPC test
   ipcMain.on('ping', () => console.log('pong'))
-  ipcMain.handle('iris:command', (_event, command: string) => {
-    if (!irisProcess?.stdin.writable) throw new Error('IRIS runtime is not running')
-    irisProcess.stdin.write(`${command}\n`)
+  ipcMain.handle('iris:command', async (_event, command: string) => {
+    const line = command.trim()
+    if (!line || /[\r\n]/.test(line)) throw new Error('A terminal command must be one line')
+
+    // IRIS may have exited while Electron remained open. Relaunch it once so
+    // the terminal is usable without needing to restart the viewer itself.
+    if (!irisProcess?.stdin.writable && mainWindow) startIrisRuntime(mainWindow)
+    const child = irisProcess
+    if (!child?.stdin.writable) throw new Error('IRIS runtime could not be started')
+
+    await new Promise<void>((resolve, reject) => {
+      const onError = (error: Error): void => {
+        child.stdin.removeListener('error', onError)
+        reject(error)
+      }
+      child.stdin.once('error', onError)
+      child.stdin.write(`${line}\n`, (error) => {
+        child.stdin.removeListener('error', onError)
+        if (error) reject(error)
+        else resolve()
+      })
+    })
   })
   ipcMain.handle('iris:stop', () => stopIrisRuntime())
 
   const window = createWindow()
+  mainWindow = window
   startIrisRuntime(window)
 
   app.on('activate', function () {

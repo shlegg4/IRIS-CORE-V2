@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -51,7 +52,11 @@ void copy_output(const torch::Tensor& tensor, std::array<float, Size>& destinati
 
 class PoseStage::Impl {
   public:
-    explicit Impl(PoseConfig config) : config_(std::move(config)) {}
+    explicit Impl(PoseConfig config, infrastructure::metrics::MetricRegistry* metrics)
+        : config_(std::move(config)), metrics_enabled_(metrics != nullptr), process_ms_(metrics ? metrics->histogram("iris_pose_process_ms", {1, 2, 5, 10, 20, 50, 100, 250, 500, 1000}) : infrastructure::metrics::Histogram{}),
+          capture_to_result_ms_(metrics ? metrics->histogram("iris_pose_capture_to_result_ms", {5, 10, 20, 50, 100, 250, 500, 1000, 2000, 5000}) : infrastructure::metrics::Histogram{}),
+          last_capture_to_result_ms_(metrics ? metrics->gauge("iris_pose_last_capture_to_result_ms") : infrastructure::metrics::Gauge{}),
+          last_process_ms_(metrics ? metrics->gauge("iris_pose_last_process_ms") : infrastructure::metrics::Gauge{}) {}
     void start() {
         if (config_.model_path.empty()) return;
         const auto device_name = config_.device.empty() ? std::string{"cpu"} : config_.device;
@@ -62,6 +67,7 @@ class PoseStage::Impl {
     }
     void stop() { model_ = torch::jit::script::Module{}; device_.reset(); started_ = false; }
     void process(Packet& packet) {
+        const auto started = std::chrono::steady_clock::now();
         if (config_.model_path.empty() || packet.frames.empty()) return;
         if (!started_) throw std::logic_error("pose stage was not started");
         const auto batch = packet.frames.size();
@@ -94,15 +100,30 @@ class PoseStage::Impl {
             pose.hmr = std::move(p); results.push_back(std::move(pose));
         }
         packet.poses = std::move(results);
+        const auto finished = std::chrono::steady_clock::now();
+        if (metrics_enabled_) {
+            const auto process = std::chrono::duration<double, std::milli>(finished - started).count();
+            process_ms_.observe(process);
+            last_process_ms_.set(process);
+        }
+        if (metrics_enabled_ && !packet.frames.empty() && packet.frames.front().timing.estimated_capture_time.time_since_epoch().count() != 0) {
+            const auto latency = std::chrono::duration<double, std::milli>(finished - packet.frames.front().timing.estimated_capture_time).count();
+            capture_to_result_ms_.observe(latency);
+            last_capture_to_result_ms_.set(latency);
+        }
     }
   private:
     PoseConfig config_;
     std::optional<torch::Device> device_;
+    bool metrics_enabled_{};
+    infrastructure::metrics::Histogram process_ms_, capture_to_result_ms_;
+    infrastructure::metrics::Gauge last_capture_to_result_ms_;
+    infrastructure::metrics::Gauge last_process_ms_;
     torch::jit::script::Module model_;
     bool started_{};
 };
 
-PoseStage::PoseStage(Channel<Packet>& input, Channel<Packet>* output, PoseConfig config) : Stage(input, output), impl_(std::make_unique<Impl>(std::move(config))) {}
+PoseStage::PoseStage(Channel<Packet>& input, Channel<Packet>* output, PoseConfig config, infrastructure::metrics::MetricRegistry* metrics) : Stage(input, output), impl_(std::make_unique<Impl>(std::move(config), metrics)) {}
 PoseStage::~PoseStage() { stop(); }
 void PoseStage::start() { impl_->start(); Stage::start(); }
 void PoseStage::stop() { Stage::stop(); impl_->stop(); }

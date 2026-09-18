@@ -16,7 +16,7 @@ struct SharedMemoryOutputConfig {
 
 struct MjpegPreviewConfig {
     bool enabled{false};
-    std::uint32_t max_fps{10};
+    std::uint32_t max_fps{30};
     std::uint32_t max_width{960};
     std::uint32_t jpeg_quality{75};
     std::size_t queue_capacity{2};

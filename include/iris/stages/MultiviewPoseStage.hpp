@@ -1,18 +1,20 @@
 #pragma once
 
 #include "iris/pipeline/Stage.hpp"
+#include "iris/infrastructure/metrics/MetricRegistry.hpp"
 #include "iris/stages/pose/PoseConfig.hpp"
 
 #include <memory>
 
 namespace iris {
 
-// Runs the fixed [1,3,3,640,640] RTMO-S multiview TensorRT engine. It is
-// deliberately separate from PoseStage: PoseStage remains the monocular
-// TorchScript HMR path and can be enabled independently.
+// Runs batched RTMO-S detection, selects one person per camera, then
+// triangulates its COCO-17 keypoints.  It is deliberately separate from
+// PoseStage: PoseStage remains the monocular TorchScript HMR path.
 class MultiviewPoseStage final : public Stage {
   public:
-    MultiviewPoseStage(Channel<Packet>&, Channel<Packet>* = nullptr, PoseConfig = {});
+    MultiviewPoseStage(Channel<Packet>&, Channel<Packet>* = nullptr, PoseConfig = {},
+                       infrastructure::metrics::MetricRegistry* = nullptr);
     ~MultiviewPoseStage() override;
     void start() override;
     void stop() override;

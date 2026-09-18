@@ -52,21 +52,19 @@ class TensorRtMultiviewEngine::Impl {
         if (!engine_) throw std::runtime_error("could not deserialize TensorRT engine: " + logger_.last_error);
         context_.reset(engine_->createExecutionContext());
         if (!context_) throw std::runtime_error("could not create TensorRT execution context");
-        validate("images", nvinfer1::Dims{5, {1,3,3,640,640}}, nvinfer1::TensorIOMode::kINPUT, nvinfer1::DataType::kFLOAT);
-        validate("R_w2c", nvinfer1::Dims4{1,3,3,3}, nvinfer1::TensorIOMode::kINPUT, nvinfer1::DataType::kFLOAT);
-        validate("t_w2c", nvinfer1::Dims3{1,3,3}, nvinfer1::TensorIOMode::kINPUT, nvinfer1::DataType::kFLOAT);
-        validate("intrinsics", nvinfer1::Dims4{1,3,3,3}, nvinfer1::TensorIOMode::kINPUT, nvinfer1::DataType::kFLOAT);
-        validate("poses_3d", nvinfer1::Dims4{1,10,17,3}, nvinfer1::TensorIOMode::kOUTPUT, nvinfer1::DataType::kFLOAT);
-        validate("joint_valid", nvinfer1::Dims3{1,10,17}, nvinfer1::TensorIOMode::kOUTPUT, nvinfer1::DataType::kBOOL);
-        validate("joint_scores", nvinfer1::Dims4{1,10,3,17}, nvinfer1::TensorIOMode::kOUTPUT, nvinfer1::DataType::kFLOAT);
+        validate("images", nvinfer1::Dims4{3,3,640,640}, nvinfer1::TensorIOMode::kINPUT, nvinfer1::DataType::kFLOAT);
+        validate("keypoints", nvinfer1::Dims4{3,10,17,2}, nvinfer1::TensorIOMode::kOUTPUT, nvinfer1::DataType::kFLOAT);
+        validate("keypoint_scores", nvinfer1::Dims3{3,10,17}, nvinfer1::TensorIOMode::kOUTPUT, nvinfer1::DataType::kFLOAT);
+        validate("instance_scores", nvinfer1::Dims2{3,10}, nvinfer1::TensorIOMode::kOUTPUT, nvinfer1::DataType::kFLOAT);
+        validate("boxes", nvinfer1::Dims3{3,10,4}, nvinfer1::TensorIOMode::kOUTPUT, nvinfer1::DataType::kFLOAT);
+        validate("candidate_valid", nvinfer1::Dims2{3,10}, nvinfer1::TensorIOMode::kOUTPUT, nvinfer1::DataType::kBOOL);
         check_cuda(cudaStreamCreate(&stream_), "cudaStreamCreate");
         check_cuda(cudaMalloc(&images_, sizeof(float) * 3 * 3 * 640 * 640), "cudaMalloc images");
-        check_cuda(cudaMalloc(&r_, sizeof(float) * 27), "cudaMalloc R_w2c");
-        check_cuda(cudaMalloc(&t_, sizeof(float) * 9), "cudaMalloc t_w2c");
-        check_cuda(cudaMalloc(&k_, sizeof(float) * 27), "cudaMalloc intrinsics");
-        check_cuda(cudaMalloc(&poses_, sizeof(float) * 510), "cudaMalloc poses_3d");
-        check_cuda(cudaMalloc(&valid_, sizeof(unsigned char) * 170), "cudaMalloc joint_valid");
-        check_cuda(cudaMalloc(&scores_, sizeof(float) * 510), "cudaMalloc joint_scores");
+        check_cuda(cudaMalloc(&keypoints_, sizeof(float) * 3 * 10 * 17 * 2), "cudaMalloc keypoints");
+        check_cuda(cudaMalloc(&keypoint_scores_, sizeof(float) * 3 * 10 * 17), "cudaMalloc keypoint_scores");
+        check_cuda(cudaMalloc(&instance_scores_, sizeof(float) * 3 * 10), "cudaMalloc instance_scores");
+        check_cuda(cudaMalloc(&boxes_, sizeof(float) * 3 * 10 * 4), "cudaMalloc boxes");
+        check_cuda(cudaMalloc(&candidate_valid_, sizeof(unsigned char) * 3 * 10), "cudaMalloc candidate_valid");
         check_cuda(cudaMalloc(&source_ptrs_, sizeof(void*) * 3), "cudaMalloc source pointers");
         check_cuda(cudaMalloc(&strides_, sizeof(std::size_t) * 3), "cudaMalloc strides");
         check_cuda(cudaMalloc(&widths_, sizeof(std::uint32_t) * 3), "cudaMalloc widths");
@@ -75,8 +73,6 @@ class TensorRtMultiviewEngine::Impl {
         check_cuda(cudaMalloc(&target_k_, sizeof(float) * 27), "cudaMalloc target intrinsics");
         check_cuda(cudaMalloc(&distortion_, sizeof(float) * 15), "cudaMalloc distortion");
         for (std::size_t i = 0; i < 3; ++i) {
-            std::copy(config.multiview_calibration[i].R_w2c.begin(), config.multiview_calibration[i].R_w2c.end(), calibration_r_.begin() + i * 9);
-            std::copy(config.multiview_calibration[i].t_w2c.begin(), config.multiview_calibration[i].t_w2c.end(), calibration_t_.begin() + i * 3);
             std::copy(config.multiview_calibration[i].intrinsics.begin(), config.multiview_calibration[i].intrinsics.end(), calibration_k_.begin() + i * 9);
             std::copy(config.multiview_calibration[i].distortion.begin(), config.multiview_calibration[i].distortion.end(), calibration_distortion_.begin() + i * 5);
         }
@@ -88,8 +84,8 @@ class TensorRtMultiviewEngine::Impl {
     ~Impl() {
 #ifdef IRIS_HAS_TENSORRT
         if (stream_) cudaStreamSynchronize(stream_);
-        cudaFree(images_); cudaFree(r_); cudaFree(t_); cudaFree(k_);
-        cudaFree(poses_); cudaFree(valid_); cudaFree(scores_);
+        cudaFree(images_);
+        cudaFree(keypoints_); cudaFree(keypoint_scores_); cudaFree(instance_scores_); cudaFree(boxes_); cudaFree(candidate_valid_);
         cudaFree(source_ptrs_); cudaFree(strides_); cudaFree(widths_); cudaFree(heights_);
         cudaFree(source_k_); cudaFree(target_k_); cudaFree(distortion_);
         if (stream_) cudaStreamDestroy(stream_);
@@ -101,8 +97,6 @@ class TensorRtMultiviewEngine::Impl {
 #ifndef IRIS_HAS_TENSORRT
         throw std::runtime_error("TensorRT support was not compiled into IRIS");
 #else
-        check_cuda(cudaMemcpyAsync(r_, calibration_r_.data(), sizeof(float) * 27, cudaMemcpyHostToDevice, stream_), "copy rotations");
-        check_cuda(cudaMemcpyAsync(t_, calibration_t_.data(), sizeof(float) * 9, cudaMemcpyHostToDevice, stream_), "copy translations");
         std::array<float, 27> target_k{};
         for (std::size_t view = 0; view < 3; ++view) {
             const float scale = std::min(640.0f / static_cast<float>(widths[view]), 640.0f / static_cast<float>(heights[view]));
@@ -116,14 +110,20 @@ class TensorRtMultiviewEngine::Impl {
             target_k[view * 9 + 5] = calibration_k_[view * 9 + 5] * scale + pad_y;
             target_k[view * 9 + 8] = 1.0f;
         }
-        check_cuda(cudaMemcpyAsync(k_, target_k.data(), sizeof(float) * 27, cudaMemcpyHostToDevice, stream_), "copy transformed intrinsics");
+        result.letterbox_intrinsics = target_k;
         check_cuda(iris_multiview_preprocess(sources.data(), strides.data(), widths.data(), heights.data(), calibration_k_.data(), target_k.data(), calibration_distortion_.data(), static_cast<float*>(images_), stream_, static_cast<const std::uint8_t**>(source_ptrs_), static_cast<std::size_t*>(strides_), static_cast<std::uint32_t*>(widths_), static_cast<std::uint32_t*>(heights_), static_cast<float*>(source_k_), static_cast<float*>(target_k_), static_cast<float*>(distortion_)), "multiview preprocessing");
-        if (!context_->setTensorAddress("images", images_) || !context_->setTensorAddress("R_w2c", r_) || !context_->setTensorAddress("t_w2c", t_) || !context_->setTensorAddress("intrinsics", k_) || !context_->setTensorAddress("poses_3d", poses_) || !context_->setTensorAddress("joint_valid", valid_) || !context_->setTensorAddress("joint_scores", scores_))
+        // The pipeline supplies one image for each of its three calibrated views.
+        // This is a no-op for a static engine and selects N=3 for a dynamic one.
+        if (!context_->setInputShape("images", nvinfer1::Dims4{3, 3, 640, 640}))
+            throw std::runtime_error("TensorRT rejected the RTMO batch shape [3,3,640,640]");
+        if (!context_->setTensorAddress("images", images_) || !context_->setTensorAddress("keypoints", keypoints_) || !context_->setTensorAddress("keypoint_scores", keypoint_scores_) || !context_->setTensorAddress("instance_scores", instance_scores_) || !context_->setTensorAddress("boxes", boxes_) || !context_->setTensorAddress("candidate_valid", candidate_valid_))
             throw std::runtime_error("TensorRT rejected one or more tensor addresses");
         if (!context_->enqueueV3(stream_)) throw std::runtime_error("TensorRT enqueueV3 failed: " + logger_.last_error);
-        check_cuda(cudaMemcpyAsync(result.poses_3d.data(), poses_, sizeof(float) * 510, cudaMemcpyDeviceToHost, stream_), "copy poses_3d");
-        check_cuda(cudaMemcpyAsync(result.joint_valid.data(), valid_, sizeof(unsigned char) * 170, cudaMemcpyDeviceToHost, stream_), "copy joint_valid");
-        check_cuda(cudaMemcpyAsync(result.joint_scores.data(), scores_, sizeof(float) * 510, cudaMemcpyDeviceToHost, stream_), "copy joint_scores");
+        check_cuda(cudaMemcpyAsync(result.keypoints.data(), keypoints_, sizeof(float) * result.keypoints.size(), cudaMemcpyDeviceToHost, stream_), "copy keypoints");
+        check_cuda(cudaMemcpyAsync(result.keypoint_scores.data(), keypoint_scores_, sizeof(float) * result.keypoint_scores.size(), cudaMemcpyDeviceToHost, stream_), "copy keypoint_scores");
+        check_cuda(cudaMemcpyAsync(result.instance_scores.data(), instance_scores_, sizeof(float) * result.instance_scores.size(), cudaMemcpyDeviceToHost, stream_), "copy instance_scores");
+        check_cuda(cudaMemcpyAsync(result.boxes.data(), boxes_, sizeof(float) * result.boxes.size(), cudaMemcpyDeviceToHost, stream_), "copy boxes");
+        check_cuda(cudaMemcpyAsync(result.candidate_valid.data(), candidate_valid_, sizeof(unsigned char) * result.candidate_valid.size(), cudaMemcpyDeviceToHost, stream_), "copy candidate_valid");
         check_cuda(cudaStreamSynchronize(stream_), "synchronize TensorRT inference");
 #endif
     }
@@ -133,18 +133,19 @@ class TensorRtMultiviewEngine::Impl {
         if (engine_->getTensorDataType(name) != type) throw std::runtime_error(std::string("unexpected TensorRT data type: ") + name);
         const auto dims = engine_->getTensorShape(name);
         if (dims.nbDims != expected.nbDims) throw std::runtime_error(std::string("unexpected TensorRT rank: ") + name);
-        for (int i = 0; i < dims.nbDims; ++i) if (dims.d[i] != expected.d[i]) throw std::runtime_error(std::string("unexpected TensorRT shape: ") + name);
+        for (int i = 0; i < dims.nbDims; ++i)
+            if (dims.d[i] != -1 && dims.d[i] != expected.d[i])
+                throw std::runtime_error(std::string("unexpected TensorRT shape: ") + name);
     }
     Logger logger_;
     TrtPtr<nvinfer1::IRuntime> runtime_;
     TrtPtr<nvinfer1::ICudaEngine> engine_;
     TrtPtr<nvinfer1::IExecutionContext> context_;
     cudaStream_t stream_{};
-    void *images_{}, *r_{}, *t_{}, *k_{}, *poses_{}, *valid_{}, *scores_{};
+    void *images_{}, *keypoints_{}, *keypoint_scores_{}, *instance_scores_{}, *boxes_{}, *candidate_valid_{};
     void *source_ptrs_{}, *strides_{}, *widths_{}, *heights_{}, *source_k_{}, *target_k_{}, *distortion_{};
-    std::array<float, 27> calibration_r_{}, calibration_k_{};
+    std::array<float, 27> calibration_k_{};
     std::array<float, 15> calibration_distortion_{};
-    std::array<float, 9> calibration_t_{};
 #endif
 };
 

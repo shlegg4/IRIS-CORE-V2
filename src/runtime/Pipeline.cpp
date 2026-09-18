@@ -61,17 +61,34 @@ class Pipeline::Impl {
             } else for (const auto& calibration : pose_config.multiview_calibration)
                 if (calibration.calibrated && std::ranges::find(config.cameras, calibration.camera_id, &CameraCaptureConfig::camera_id) == config.cameras.end()) throw std::invalid_argument("multiview calibration camera ID is not configured for capture");
             const int cuda_device = config.cameras.front().capture.cuda_device;
-            for (const auto& camera : config.cameras) {
-                if (camera.capture.rotation != FrameRotation::None)
-                    throw std::invalid_argument("multiview pose currently requires unrotated capture frames");
+            for (std::size_t index = 0; index < config.cameras.size(); ++index) {
+                const auto& camera = config.cameras[index];
                 if (camera.capture.cuda_device != cuda_device)
                     throw std::invalid_argument("multiview pose requires all frames on the same CUDA device");
+                auto calibration = std::ranges::find(
+                    pose_config.multiview_calibration, camera.camera_id,
+                    &PoseConfig::CameraCalibration::camera_id);
+                // When using the live rig store, the local array is only a
+                // placeholder until MultiviewPoseStage refreshes it.  Give
+                // those placeholders capture IDs so rotation metadata can be
+                // carried through to that refresh.
+                if (calibration == pose_config.multiview_calibration.end() &&
+                    index < pose_config.multiview_calibration.size() &&
+                    !pose_config.multiview_calibration[index].calibrated) {
+                    calibration = pose_config.multiview_calibration.begin() + index;
+                    calibration->camera_id = camera.camera_id;
+                }
+                if (calibration == pose_config.multiview_calibration.end())
+                    throw std::invalid_argument("multiview calibration camera ID is not configured for capture");
+                calibration->source_extent = camera.capture.extent;
+                calibration->image_rotation_degrees = rotation_degrees(camera.capture.rotation);
+                if (calibration->calibrated) apply_capture_rotation(*calibration);
             }
         }
         if (!pose_config.multiview_engine_path.empty())
-            pose_ = std::make_unique<MultiviewPoseStage>(tap_to_pose_, &pose_to_output_, std::move(pose_config));
+            pose_ = std::make_unique<MultiviewPoseStage>(tap_to_pose_, &pose_to_output_, std::move(pose_config), &metrics);
         else
-            pose_ = std::make_unique<PoseStage>(tap_to_pose_, &pose_to_output_, std::move(pose_config));
+            pose_ = std::make_unique<PoseStage>(tap_to_pose_, &pose_to_output_, std::move(pose_config), &metrics);
         if (config.sync_queue_capacity == 0 || config.sync_tolerance.count() < 0) {
             throw std::invalid_argument("invalid multi-camera synchronizer configuration");
         }

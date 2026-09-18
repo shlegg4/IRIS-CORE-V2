@@ -141,7 +141,10 @@ void print_snapshot(const RuntimeSnapshot& snapshot, std::ostream& output) {
     output << "preview:   " << (snapshot.preview.enabled ? "enabled" : "disabled")
            << " " << snapshot.preview.bind_address << ':' << snapshot.preview.port
            << " published=" << snapshot.preview.published_packets
-           << " dropped=" << snapshot.preview.dropped_packets << '\n';
+           << " dropped=" << snapshot.preview.dropped_packets
+           << " clients=" << snapshot.preview.connected_clients;
+    if (!snapshot.preview.last_error.empty()) output << " error=" << snapshot.preview.last_error;
+    output << '\n';
     output << "cameras:   " << snapshot.cameras.size() << '\n';
     for (const auto& camera : snapshot.cameras) {
         output << "  [" << camera.camera_id << "] ";
@@ -263,9 +266,9 @@ std::optional<RuntimeCommand> InteractiveCli::parse(std::string line, std::strin
         if (tokens.size() == 3 && tokens[1] == "monocular")
             return ConfigurePoseCommand{ConfigurePoseCommand::Backend::Monocular, tokens[2], {}};
         if (tokens.size() == 3 && tokens[1] == "multiview")
-            return ConfigurePoseCommand{ConfigurePoseCommand::Backend::Multiview, {}, "@assets/rtmo_s_full_epipolar_fp16.engine", tokens[2]};
+            return ConfigurePoseCommand{ConfigurePoseCommand::Backend::Multiview, {}, "@assets/rtmo_s.engine", tokens[2]};
         if (tokens.size() == 2 && tokens[1] == "multiview")
-            return ConfigurePoseCommand{ConfigurePoseCommand::Backend::Multiview, {}, "@assets/rtmo_s_full_epipolar_fp16.engine", {}};
+            return ConfigurePoseCommand{ConfigurePoseCommand::Backend::Multiview, {}, "@assets/rtmo_s.engine", {}};
         if (tokens.size() == 4 && tokens[1] == "multiview")
             return ConfigurePoseCommand{ConfigurePoseCommand::Backend::Multiview, {}, tokens[2], tokens[3]};
         error = "pose requires: status | off | monocular [model-path] | multiview [engine-path] <calibration.json>";
