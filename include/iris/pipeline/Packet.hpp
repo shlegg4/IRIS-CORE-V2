@@ -11,9 +11,12 @@ inline constexpr std::size_t coco_joint_count = 17;
 
 struct MultiviewPose {
     bool active{};
+    std::array<CameraId, 3> view_camera_ids{};
     std::array<std::array<float, 3>, coco_joint_count> joints_3d{};
     std::array<bool, coco_joint_count> joint_valid{};
     std::array<std::array<float, coco_joint_count>, 3> joint_scores{};
+    std::array<std::array<std::array<float, 2>, coco_joint_count>, 3> points_2d_px{};
+    std::array<std::array<bool, coco_joint_count>, 3> point_valid{};
 };
 
 // The PEAR EHM TorchScript model regresses SMPL-X and FLAME parameters, rather than joint XYZ

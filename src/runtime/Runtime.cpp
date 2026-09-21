@@ -327,9 +327,11 @@ class Runtime::Impl {
             for (std::size_t i = 0; i < current.cameras.size(); ++i) {
                 if (i) result += ',';
                 const auto& camera = current.cameras[i];
+                const auto width = swaps_axes(camera.capture.rotation) ? camera.capture.extent.height : camera.capture.extent.width;
+                const auto height = swaps_axes(camera.capture.rotation) ? camera.capture.extent.width : camera.capture.extent.height;
                 result += "{\"camera_id\":" + std::to_string(camera.camera_id) +
-                          ",\"width\":" + std::to_string(camera.capture.extent.width) +
-                          ",\"height\":" + std::to_string(camera.capture.extent.height) +
+                          ",\"width\":" + std::to_string(width) +
+                          ",\"height\":" + std::to_string(height) +
                           ",\"fps\":" + std::to_string(camera.capture.frame_rate.value()) +
                           ",\"reconnect\":" + (camera.capture.reconnect ? "true" : "false") + "}";
             }

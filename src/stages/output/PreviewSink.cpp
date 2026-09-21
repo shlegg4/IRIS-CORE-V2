@@ -70,11 +70,23 @@ std::string pose_event(std::uint64_t sequence, const std::array<std::array<float
 }
 std::string pose_event(const Packet&, const Pose& pose) { std::array<bool,panoptic_joint_count> valid{}; for(std::size_t i=0;i<valid.size();++i)valid[i]=pose.joint_confidence[i]>0.0F; return pose_event(pose.source_sequence,pose.joints_3d_mm,valid); }
 std::string multiview_pose_event(const Packet& packet) {
-    std::ostringstream out; out << "{\"version\":1,\"type\":\"pose\",\"data\":{\"sequence\":" << packet.sequence << ",\"people\":[";
+    std::ostringstream out; out << "{\"version\":1,\"type\":\"pose\",\"data\":{\"sequence\":" << packet.sequence << ",\"views\":[";
     bool first=true; std::size_t id=0;
     if(packet.multiview_poses)for(const auto& pose:*packet.multiview_poses){
-        if(!pose.active){++id;continue;} if(!first)out<<','; first=false;
-        append_pose_json(out,pose.joints_3d,pose.joint_valid,id++);
+        if(!pose.active){++id;continue;}
+        for(std::size_t view=0; view<pose.points_2d_px.size(); ++view) {
+            bool has_point=false; for(const auto valid:pose.point_valid[view]) has_point |= valid;
+            if(!has_point) continue; if(!first)out<<','; first=false;
+            const auto camera_id = pose.view_camera_ids[view];
+            const auto frame = std::find_if(packet.frames.begin(), packet.frames.end(), [camera_id](const Frame& value) { return value.camera == camera_id; });
+            if (frame == packet.frames.end()) continue;
+            out << "{\"camera_id\":" << camera_id << ",\"person_id\":" << id
+                << ",\"width\":" << frame->extent.width << ",\"height\":" << frame->extent.height << ",\"points\":[";
+            for(std::size_t joint=0;joint<pose.points_2d_px[view].size();++joint){if(joint)out<<','; const auto& p=pose.points_2d_px[view][joint]; out<<'['<<p[0]<<','<<p[1]<<']';}
+            out << "],\"scores\":["; for(std::size_t joint=0;joint<pose.joint_scores[view].size();++joint){if(joint)out<<',';out<<pose.joint_scores[view][joint];}
+            out << "],\"valid\":["; for(std::size_t joint=0;joint<pose.point_valid[view].size();++joint){if(joint)out<<',';out<<(pose.point_valid[view][joint]?"true":"false");} out << "]}";
+        }
+        ++id;
     }
     out << "]}}"; return out.str();
 }

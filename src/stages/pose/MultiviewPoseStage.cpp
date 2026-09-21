@@ -4,6 +4,7 @@
 #include "iris/calibration/RigCalibration.hpp"
 
 #include <filesystem>
+#include <algorithm>
 #include <chrono>
 #include <stdexcept>
 #include <utility>
@@ -84,6 +85,8 @@ class MultiviewPoseStage::Impl {
 
         std::array<MultiviewPose, 10> poses{};
         auto& pose = poses[0];
+        for (std::size_t view = 0; view < pose.view_camera_ids.size(); ++view)
+            pose.view_camera_ids[view] = config_.multiview_calibration[view].camera_id;
         for (std::size_t joint = 0; joint < 17; ++joint) {
             Eigen::Matrix<float, 6, 4> equations;
             int rows = 0;
@@ -99,6 +102,22 @@ class MultiviewPoseStage::Impl {
                 const float x = result.keypoints[point_index];
                 const float y = result.keypoints[point_index + 1];
                 if (!std::isfinite(x) || !std::isfinite(y)) continue;
+                const auto& source = *std::ranges::find(packet.frames, config_.multiview_calibration[view].camera_id, &Frame::camera);
+                const float scale = std::min(640.0F / static_cast<float>(source.extent.width), 640.0F / static_cast<float>(source.extent.height));
+                const float resized_width = static_cast<float>(std::max(1, static_cast<int>(source.extent.width * scale + 0.5F)));
+                const float resized_height = static_cast<float>(std::max(1, static_cast<int>(source.extent.height * scale + 0.5F)));
+                const float model_x = (x - (640.0F - resized_width) * 0.5F) / scale;
+                const float model_y = (y - (640.0F - resized_height) * 0.5F) / scale;
+                const auto& calibration = config_.multiview_calibration[view];
+                const float fx = calibration.intrinsics[0], fy = calibration.intrinsics[4];
+                const float cx = calibration.intrinsics[2], cy = calibration.intrinsics[5];
+                const float xu = (model_x - cx) / fx, yu = (model_y - cy) / fy;
+                const float r2 = xu * xu + yu * yu;
+                const float radial = 1.0F + calibration.distortion[0] * r2 + calibration.distortion[1] * r2 * r2 + calibration.distortion[4] * r2 * r2 * r2;
+                const float xd = xu * radial + 2.0F * calibration.distortion[2] * xu * yu + calibration.distortion[3] * (r2 + 2.0F * xu * xu);
+                const float yd = yu * radial + calibration.distortion[2] * (r2 + 2.0F * yu * yu) + 2.0F * calibration.distortion[3] * xu * yu;
+                pose.points_2d_px[view][joint] = {fx * xd + cx, fy * yd + cy};
+                pose.point_valid[view][joint] = true;
                 Eigen::Matrix<float, 3, 4> extrinsic;
                 const auto& camera = config_.multiview_calibration[view];
                 for (int r = 0; r < 3; ++r) {
