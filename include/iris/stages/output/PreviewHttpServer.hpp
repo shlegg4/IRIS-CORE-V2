@@ -13,7 +13,12 @@ namespace iris::output {
 class PreviewHttpServer final {
   public:
     using StatusProvider = std::function<std::string()>;
-    PreviewHttpServer(std::string bind_address, std::uint16_t port, StatusProvider status);
+    // A handler is deliberately scoped to one WebSocket.  This keeps WebRTC
+    // peer state out of the HTTP server while allowing more than one browser.
+    using WebRtcMessageHandler = std::function<std::string(const std::string& message)>;
+    using WebRtcHandlerFactory = std::function<WebRtcMessageHandler()>;
+    PreviewHttpServer(std::string bind_address, std::uint16_t port, StatusProvider status,
+                      WebRtcHandlerFactory webrtc_handler_factory = {});
     ~PreviewHttpServer();
     PreviewHttpServer(const PreviewHttpServer&) = delete;
     void start();

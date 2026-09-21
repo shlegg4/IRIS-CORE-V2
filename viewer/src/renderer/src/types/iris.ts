@@ -43,7 +43,12 @@ export interface RuntimeStatus {
   cameras?: CameraStatus[]
   previewDropped?: number
   previewPublished?: number
-  preview?: { port?: number; enabled?: boolean; last_error?: string }
+  preview?: {
+    port?: number
+    enabled?: boolean
+    last_error?: string
+    webrtc?: { enabled?: boolean; connected_clients?: number; published_packets?: number; dropped_packets?: number; last_error?: string }
+  }
   lastError?: string
   calibration?: CalibrationSnapshot
 }

@@ -5,13 +5,19 @@ const props = defineProps<{ status: RuntimeStatus }>()
 const playing = ref(true)
 const selectedCamera = ref<number | null>(null)
 const failedStreams = ref(new Set<number>())
-const streamNonce = ref(new Map<number, number>())
-const frameTimes = ref(new Map<number, number[]>())
 const measuredFps = ref(new Map<number, number>())
 const cameras = computed<CameraStatus[]>(() => props.status.cameras ?? [])
 const previewPort = computed(() => props.status.preview?.port || 8080)
-const streamUrl = (camera: CameraStatus): string =>
-  `http://127.0.0.1:${previewPort.value}/api/preview/${camera.camera_id}.mjpeg`
+  const videoElements = new Map<number, HTMLVideoElement>()
+let peer: RTCPeerConnection | undefined
+let socket: WebSocket | undefined
+let reconnectTimer: number | undefined
+  let cameraOrder: number[] = []
+  let reconnectDelay = 1000
+  const fatalError = ref('')
+  let connecting = false
+  let connectionGeneration = 0
+  let answerApplied = false
 function markFailed(cameraId: number): void {
   failedStreams.value = new Set(failedStreams.value).add(cameraId)
 }
@@ -19,9 +25,7 @@ function retry(cameraId: number): void {
   const next = new Set(failedStreams.value)
   next.delete(cameraId)
   failedStreams.value = next
-  const nonces = new Map(streamNonce.value)
-  nonces.set(cameraId, (nonces.get(cameraId) ?? 0) + 1)
-  streamNonce.value = nonces
+  void connect()
 }
 function markLive(cameraId: number): void {
   if (!failedStreams.value.has(cameraId)) return
@@ -29,51 +33,99 @@ function markLive(cameraId: number): void {
   next.delete(cameraId)
   failedStreams.value = next
 }
-function recordFrame(cameraId: number): void {
-  const now = Date.now()
-  const next = new Map(frameTimes.value)
-  next.set(cameraId, [...(next.get(cameraId) ?? []), now].filter((time) => now - time <= 2000))
-  frameTimes.value = next
-}
 function fps(cameraId: number): number { return measuredFps.value.get(cameraId) ?? 0 }
 function resetStreams(): void {
-  const next = new Map(streamNonce.value)
-  for (const camera of cameras.value) next.set(camera.camera_id, (next.get(camera.camera_id) ?? 0) + 1)
-  streamNonce.value = next
-  frameTimes.value = new Map()
   measuredFps.value = new Map()
+  void connect()
+}
+function setVideo(cameraId: number, element: Element | { $el?: Element } | null): void {
+  if (element instanceof HTMLVideoElement) videoElements.set(cameraId, element)
+  else if (element && '$el' in element && element.$el instanceof HTMLVideoElement) videoElements.set(cameraId, element.$el)
+  else videoElements.delete(cameraId)
+}
+  function scheduleReconnect(): void {
+    if (reconnectTimer || !playing.value || connecting || !cameras.value.length) return
+    reconnectTimer = window.setTimeout(() => { reconnectTimer = undefined; void connect() }, reconnectDelay)
+    reconnectDelay = Math.min(reconnectDelay * 2, 15000)
+  }
+  async function connect(): Promise<void> {
+    if (connecting || !playing.value || !cameras.value.length) return
+    connecting = true
+    const generation = ++connectionGeneration
+    answerApplied = false
+    socket?.close(); peer?.close(); socket = undefined; peer = undefined
+    fatalError.value = ''
+    const ws = new WebSocket(`ws://127.0.0.1:${previewPort.value}/api/webrtc/signaling`)
+  let connectionForSocket: RTCPeerConnection | undefined
+  socket = ws
+  ws.onopen = () => ws.send(JSON.stringify({
+    type: 'hello',
+    version: 1,
+    cameras: cameras.value.map((camera) => ({ camera_id: camera.camera_id, width: camera.width, height: camera.height }))
+  }))
+    ws.onmessage = async (event) => {
+      if (generation !== connectionGeneration || socket !== ws) return
+      const message = JSON.parse(String(event.data)) as { type: string; cameras?: number[]; sdp?: string; message?: string }
+      if (message.type === 'error') {
+        fatalError.value = message.message ?? 'WebRTC negotiation failed'
+        cameras.value.forEach((camera) => markFailed(camera.camera_id))
+        ws.close(); peer?.close(); connecting = false; scheduleReconnect(); return
+      }
+    if (message.type === 'tracks') {
+      cameraOrder = message.cameras?.length ? message.cameras : cameras.value.map((camera) => camera.camera_id)
+      const connection = new RTCPeerConnection({ bundlePolicy: 'max-bundle' }); connectionForSocket = connection; peer = connection
+      connection.onicecandidate = (candidate) => {
+        if (generation === connectionGeneration && peer === connection && candidate.candidate && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ice', candidate: candidate.candidate.candidate, sdpMid: candidate.candidate.sdpMid, sdpMLineIndex: candidate.candidate.sdpMLineIndex }))
+      }
+        connection.ontrack = (track) => {
+        const cameraId = cameraOrder[track.transceiver.mid === null ? 0 : Number(track.transceiver.mid)]
+        const video = videoElements.get(cameraId)
+        if (video) { video.srcObject = new MediaStream([track.track]); void video.play(); markLive(cameraId); reconnectDelay = 1000 }
+      }
+        connection.onconnectionstatechange = () => { if (connection.connectionState === 'failed' || connection.connectionState === 'disconnected') { connecting = false; scheduleReconnect() } }
+      cameraOrder.forEach(() => connection.addTransceiver('video', { direction: 'recvonly' }))
+      const offer = await connection.createOffer(); await connection.setLocalDescription(offer)
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'offer', sdp: offer.sdp }))
+    } else if (message.type === 'answer' && peer && message.sdp && peer === connectionForSocket) {
+      if (answerApplied || peer.signalingState !== 'have-local-offer') return
+      try {
+        await peer.setRemoteDescription({ type: 'answer', sdp: message.sdp })
+        answerApplied = true
+        connecting = false
+      } catch (error) {
+        fatalError.value = error instanceof Error ? error.message : 'Failed to apply WebRTC answer'
+        peer.close(); peer = undefined
+        ws.close(); connecting = false; scheduleReconnect()
+      }
+    }
+  }
+  ws.onerror = () => { connecting = false; scheduleReconnect() }
+  ws.onclose = () => { connecting = false; if (socket === ws) scheduleReconnect() }
 }
 watch(() => props.status.previewPublished, (current, previous) => {
   if (typeof current === 'number' && typeof previous === 'number' && current < previous) resetStreams()
 })
 let retryTimer: number | undefined
 let fpsTimer: number | undefined
-onMounted(() => {
+  onMounted(() => {
+  void connect()
   retryTimer = window.setInterval(() => {
     for (const camera of cameras.value) {
       if (failedStreams.value.has(camera.camera_id)) retry(camera.camera_id)
     }
   }, 2500)
-  fpsTimer = window.setInterval(() => {
-    const now = Date.now()
-    const next = new Map<number, number>()
-    for (const camera of cameras.value) {
-      const history = frameTimes.value.get(camera.camera_id) ?? []
-      const recent = history.filter((time) => now - time <= 1000)
-      next.set(camera.camera_id, recent.length)
-      // A feed that was live but has gone silent is usually an MJPEG
-      // connection left behind while the runtime recreated the preview server.
-      if (playing.value && history.length > 3 && !recent.length && !failedStreams.value.has(camera.camera_id)) {
-        markFailed(camera.camera_id)
-        retry(camera.camera_id)
-      }
-    }
+  fpsTimer = window.setInterval(async () => {
+    if (!peer) return
+    const stats = await peer.getStats(); const next = new Map<number, number>()
+    stats.forEach((value) => { if (value.type === 'inbound-rtp' && value.kind === 'video') { const cameraId = cameraOrder[Number(value.mid ?? 0)]; next.set(cameraId, Number(value.framesPerSecond ?? 0)); if (value.packetsLost > 0) markFailed(cameraId) } })
     measuredFps.value = next
   }, 1000)
 })
 onBeforeUnmount(() => {
   if (retryTimer) window.clearInterval(retryTimer)
   if (fpsTimer) window.clearInterval(fpsTimer)
+  if (reconnectTimer) window.clearTimeout(reconnectTimer)
+  socket?.close(); peer?.close()
 })
 </script>
 
@@ -83,7 +135,7 @@ onBeforeUnmount(() => {
       <div>
         <span class="eyebrow">SOURCE MONITOR</span>
         <h2>Camera streams</h2>
-        <p>{{ cameras.length ? `${cameras.length} configured view${cameras.length === 1 ? '' : 's'} from the active capture rig.` : 'No cameras configured.' }}</p>
+        <p>{{ fatalError || (cameras.length ? `${cameras.length} configured view${cameras.length === 1 ? '' : 's'} from the active capture rig.` : 'No cameras configured.') }}</p>
       </div>
       <button class="stream-button" @click="playing = !playing">
         {{ playing ? 'Ⅱ  PAUSE ALL STREAMS' : '▶  PLAY ALL STREAMS' }}
@@ -93,7 +145,7 @@ onBeforeUnmount(() => {
       <article v-for="camera in cameras" :key="camera.camera_id" class="camera-large" :class="{ selected: selectedCamera === camera.camera_id }" @dblclick="selectedCamera = selectedCamera === camera.camera_id ? null : camera.camera_id">
         <div class="camera-feed">
           <span class="feed-label">CAM_{{ String(camera.camera_id).padStart(2, '0') }}</span>
-          <img v-if="playing && !failedStreams.has(camera.camera_id)" :key="`${camera.camera_id}-${streamNonce.get(camera.camera_id) ?? 0}`" :src="streamUrl(camera)" :alt="`Live feed from camera ${camera.camera_id}`" @load="recordFrame(camera.camera_id); markLive(camera.camera_id)" @error="markFailed(camera.camera_id)" />
+          <video v-if="playing && !failedStreams.has(camera.camera_id)" :ref="(element) => setVideo(camera.camera_id, element)" autoplay muted playsinline @error="markFailed(camera.camera_id)" />
           <span v-if="!playing" class="feed-placeholder">Ⅱ</span>
           <div v-else-if="failedStreams.has(camera.camera_id)" class="feed-error"><strong>STREAM UNAVAILABLE</strong><button @click="retry(camera.camera_id)">↻ RETRY</button></div>
           <span class="feed-live" :class="{ paused: !playing }"
@@ -184,7 +236,7 @@ p {
   pointer-events: none;
   background: repeating-linear-gradient(0deg, transparent 0 9px, #8be7e422 10px 11px);
 }
-.camera-feed img {
+.camera-feed video {
   width: 100%;
   height: 100%;
   min-height: 180px;

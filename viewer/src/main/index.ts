@@ -78,7 +78,16 @@ function startIrisRuntime(window: BrowserWindow): void {
     const executable = runtimePath()
     const child = spawn(executable, [], {
       cwd: dirname(executable),
-      stdio: ['pipe', 'pipe', 'pipe']
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        PATH: [join(dirname(executable), 'gstreamer-runtime', 'bin'), dirname(executable), process.env.PATH]
+          .filter(Boolean)
+          .join(process.platform === 'win32' ? ';' : ':'),
+        GST_PLUGIN_PATH: join(dirname(executable), 'gstreamer-runtime', 'plugins'),
+        GST_PLUGIN_SYSTEM_PATH: '',
+        GST_REGISTRY: join(dirname(executable), 'gstreamer-runtime', 'registry.bin')
+      }
     })
     irisProcess = child
     const forward = (_channel: string, chunk: Buffer): void => {

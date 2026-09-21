@@ -29,10 +29,19 @@ struct HttpPreviewConfig {
     std::size_t queue_capacity{16};
 };
 
+struct WebRtcPreviewConfig {
+    bool enabled{true};
+    std::uint32_t max_fps{30};
+    std::uint32_t max_width{1280};
+    std::uint32_t bitrate{4'000'000};
+    std::size_t queue_capacity{2};
+};
+
 struct PreviewConfig {
     SharedMemoryOutputConfig shared_memory;
     MjpegPreviewConfig mjpeg;
     HttpPreviewConfig http;
+    WebRtcPreviewConfig webrtc;
     std::size_t shared_memory_queue_capacity{2};
 };
 
