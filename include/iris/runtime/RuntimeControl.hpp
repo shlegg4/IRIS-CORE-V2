@@ -16,7 +16,7 @@ enum class RuntimeState { Stopped, Starting, Running, Stopping, Failed, Shutdown
 struct StartPipelineCommand {};
 struct StopPipelineCommand {};
 struct ConfigurePoseCommand {
-    enum class Backend { Off, Monocular, Multiview } backend{Backend::Off};
+    enum class Backend { Off, Monocular, TwoDimensional, Multiview } backend{Backend::Off};
     std::filesystem::path model_path;
     std::filesystem::path engine_path;
     std::filesystem::path calibration_path;

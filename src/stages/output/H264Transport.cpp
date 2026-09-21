@@ -103,7 +103,9 @@ struct Encoder {
 
 class H264Transport::Impl {
   public:
-    Impl(H264PreviewConfig value, PreviewHttpServer& target) : config(std::move(value)), server(target), queue(config.queue_capacity, OverflowPolicy::DropOldest) { if (!config.queue_capacity || !config.max_fps || !config.max_width || !config.bitrate) throw std::invalid_argument("invalid H.264 preview configuration"); }
+    Impl(H264PreviewConfig value, PreviewHttpServer& target, H264Transport::PublishObserver publish_observer)
+        : config(std::move(value)), server(target), observer(std::move(publish_observer)),
+          queue(config.queue_capacity, OverflowPolicy::DropOldest) { if (!config.queue_capacity || !config.max_fps || !config.max_width || !config.bitrate) throw std::invalid_argument("invalid H.264 preview configuration"); }
     ~Impl() { stop(); }
     void start() { if (running.exchange(true)) return; worker = std::thread([this] { run(); }); }
     void stop() noexcept { if (running.exchange(false)) queue.close(); if (worker.joinable()) worker.join(); }
@@ -137,14 +139,16 @@ class H264Transport::Impl {
                     unit.timestamp_us = static_cast<std::uint64_t>(frame.timing.source_time.count() / 1000);
                     unit.payload = std::move(payload); server.publish_h264(std::move(unit)); ++published;
                 }
+                if (!encoded.empty() && observer)
+                    observer(frame.camera, frame.sequence, std::chrono::steady_clock::now());
             } catch (const std::exception& exception) {
                 std::scoped_lock lock(mutex); error = exception.what(); ++dropped;
                 std::cerr << "IRIS H.264 preview error: " << exception.what() << "\n";
             }
         }
     }
-    H264PreviewConfig config; PreviewHttpServer& server; Channel<PreviewPacket> queue; std::atomic_bool running{false}; std::thread worker; mutable std::mutex mutex; std::unordered_map<CameraId, std::unique_ptr<Encoder>> encoders; std::size_t published{}, dropped{}, clients{}; std::string error;
+    H264PreviewConfig config; PreviewHttpServer& server; H264Transport::PublishObserver observer; Channel<PreviewPacket> queue; std::atomic_bool running{false}; std::thread worker; mutable std::mutex mutex; std::unordered_map<CameraId, std::unique_ptr<Encoder>> encoders; std::size_t published{}, dropped{}, clients{}; std::string error;
 };
-H264Transport::H264Transport(H264PreviewConfig config, PreviewHttpServer& server) : impl_(std::make_unique<Impl>(std::move(config), server)) {}
+H264Transport::H264Transport(H264PreviewConfig config, PreviewHttpServer& server, PublishObserver observer) : impl_(std::make_unique<Impl>(std::move(config), server, std::move(observer))) {}
 H264Transport::~H264Transport() = default; void H264Transport::start() { impl_->start(); } void H264Transport::publish(PreviewPacket packet) noexcept { impl_->publish(std::move(packet)); } void H264Transport::stop() noexcept { impl_->stop(); } PreviewTransportHealth H264Transport::health() const { return impl_->health(); }
 }

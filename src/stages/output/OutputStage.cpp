@@ -202,7 +202,7 @@ class OutputStage::Impl {
   public:
     Impl(Channel<Packet>& input, MetricRegistry& registry, OutputConfig config)
         : input_(input), config_(std::move(config)), metrics_(registry),
-          preview_(make_preview_config(config_)),
+          preview_(make_preview_config(config_), &registry),
           shm_queue_(config_.shared_memory_queue_capacity, OverflowPolicy::DropOldest,
                      infrastructure::metrics::register_channel_metrics(
                          registry, "iris_channel_output_to_shm")),

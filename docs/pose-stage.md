@@ -27,3 +27,17 @@ tuple: camera transform, SMPL-X global/body/hand rotation matrices, hand/head sc
 shape/expression, and FLAME pose/expression/shape. `source_camera` identifies the input frame.
 This model does not produce world-space joint positions, 2-D keypoints, or confidence scores; the
 legacy Panoptic joint fields are consequently not populated and `score` is set to `1.0`.
+
+## Single-camera 2-D keypoints
+
+The RTMO-S TensorRT backend can also run against one configured camera without rig calibration or
+triangulation. From the interactive CLI, select the bundled engine with:
+
+```text
+pose 2d
+```
+
+Or provide an engine explicitly with `pose 2d <engine-path>`. The stage emits COCO-17 image-space
+keypoints and confidence scores through the same preview pose events used by multiview mode. The
+shipped engine has a fixed batch size of three, so the implementation duplicates the input frame
+inside the inference batch and ignores the two duplicate results.

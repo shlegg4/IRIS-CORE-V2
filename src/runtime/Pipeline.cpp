@@ -53,9 +53,20 @@ class Pipeline::Impl {
         if (!pose_config.model_path.empty() && !pose_config.multiview_engine_path.empty())
             throw std::invalid_argument("configure either monocular model_path or multiview_engine_path, not both");
         if (!pose_config.multiview_engine_path.empty()) {
-            if (config.cameras.size() != 3 || config.incomplete_batch_policy != IncompleteBatchPolicy::DropBatch)
-                throw std::invalid_argument("multiview pose requires exactly three cameras and drop-partial synchronization");
-            if (const auto rig=pose_config.calibration_store ? pose_config.calibration_store->snapshot() : nullptr) {
+            const auto required_cameras = pose_config.two_d_only ? 1U : 3U;
+            if (config.cameras.size() != required_cameras ||
+                (!pose_config.two_d_only && config.incomplete_batch_policy != IncompleteBatchPolicy::DropBatch))
+                throw std::invalid_argument(pose_config.two_d_only
+                    ? "2-D pose requires exactly one camera"
+                    : "multiview pose requires exactly three cameras and drop-partial synchronization");
+            if (pose_config.two_d_only) {
+                auto& calibration = pose_config.multiview_calibration[0];
+                calibration.camera_id = config.cameras.front().camera_id;
+                calibration.intrinsics = {1.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 1.0F};
+                calibration.distortion = {};
+                calibration.source_extent = config.cameras.front().capture.extent;
+                calibration.calibrated = true;
+            } else if (const auto rig=pose_config.calibration_store ? pose_config.calibration_store->snapshot() : nullptr) {
                 for (const auto& calibration : rig->cameras)
                     if (std::ranges::find(config.cameras, calibration.camera_id, &CameraCaptureConfig::camera_id) == config.cameras.end()) throw std::invalid_argument("runtime calibration camera ID is not configured for capture");
             } else for (const auto& calibration : pose_config.multiview_calibration)
@@ -65,6 +76,7 @@ class Pipeline::Impl {
                 const auto& camera = config.cameras[index];
                 if (camera.capture.cuda_device != cuda_device)
                     throw std::invalid_argument("multiview pose requires all frames on the same CUDA device");
+                if (pose_config.two_d_only) continue;
                 auto calibration = std::ranges::find(
                     pose_config.multiview_calibration, camera.camera_id,
                     &PoseConfig::CameraCalibration::camera_id);

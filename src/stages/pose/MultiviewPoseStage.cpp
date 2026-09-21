@@ -29,8 +29,11 @@ class MultiviewPoseStage::Impl {
         if (!std::filesystem::is_regular_file(config_.multiview_engine_path))
             throw std::runtime_error("multiview TensorRT engine does not exist: " + config_.multiview_engine_path.string());
         refresh_calibration();
-        for (const auto& calibration : config_.multiview_calibration)
-            if (!calibration.calibrated)
+        if (config_.two_d_only)
+            for (std::size_t i = 1; i < config_.multiview_calibration.size(); ++i)
+                config_.multiview_calibration[i] = config_.multiview_calibration[0];
+        for (std::size_t i = 0; i < (config_.two_d_only ? 1U : 3U); ++i)
+            if (const auto& calibration = config_.multiview_calibration[i]; !calibration.calibrated)
                 throw std::runtime_error("multiview TensorRT requires calibration for all three cameras");
 #ifndef IRIS_HAS_TENSORRT
         throw std::runtime_error("multiview TensorRT was configured, but IRIS was built without TensorRT support; set IRIS_TENSORRT_ROOT and rebuild");
@@ -45,8 +48,11 @@ class MultiviewPoseStage::Impl {
         if (config_.multiview_engine_path.empty()) return;
         if (!started_) throw std::logic_error("multiview pose stage was not started");
         refresh_calibration();
-        if (packet.frames.size() != 3)
-            throw std::runtime_error("multiview TensorRT engine requires exactly three synchronized frames");
+        const auto view_count = config_.two_d_only ? 1U : 3U;
+        if (packet.frames.size() != view_count)
+            throw std::runtime_error(config_.two_d_only
+                ? "2-D TensorRT pose requires exactly one frame"
+                : "multiview TensorRT engine requires exactly three synchronized frames");
 #ifndef IRIS_HAS_TENSORRT
         (void)packet;
         throw std::runtime_error("multiview TensorRT inference is unavailable in this build");
@@ -55,7 +61,7 @@ class MultiviewPoseStage::Impl {
         std::array<std::size_t, 3> strides{};
         std::array<std::uint32_t, 3> widths{};
         std::array<std::uint32_t, 3> heights{};
-        for (std::size_t i = 0; i < 3; ++i) {
+        for (std::size_t i = 0; i < view_count; ++i) {
             const auto id = config_.multiview_calibration[i].camera_id;
             const auto frame = std::ranges::find(packet.frames, id, &Frame::camera);
             if (frame == packet.frames.end() || frame->format != PixelFormat::Bgr8 || !frame->buffer.data)
@@ -68,6 +74,14 @@ class MultiviewPoseStage::Impl {
             widths[i] = frame->extent.width;
             heights[i] = frame->extent.height;
         }
+        // The shipped RTMO engine has a fixed batch of three. In 2-D mode the
+        // extra batch entries are harmless copies and their outputs are ignored.
+        for (std::size_t i = view_count; i < 3; ++i) {
+            buffers[i] = buffers[0];
+            strides[i] = strides[0];
+            widths[i] = widths[0];
+            heights[i] = heights[0];
+        }
         TensorRtMultiviewResult result;
         engine_->infer(buffers, strides, widths, heights, result);
         // RTMO candidates are local to each camera.  Select the strongest valid
@@ -75,7 +89,7 @@ class MultiviewPoseStage::Impl {
         // across views before triangulation.
         std::array<int, 3> selected{};
         selected.fill(-1);
-        for (std::size_t view = 0; view < 3; ++view)
+        for (std::size_t view = 0; view < view_count; ++view)
             for (std::size_t candidate = 0; candidate < 10; ++candidate) {
                 const auto index = view * 10 + candidate;
                 if (result.candidate_valid[index] && std::isfinite(result.instance_scores[index]) &&
@@ -85,12 +99,12 @@ class MultiviewPoseStage::Impl {
 
         std::array<MultiviewPose, 10> poses{};
         auto& pose = poses[0];
-        for (std::size_t view = 0; view < pose.view_camera_ids.size(); ++view)
+        for (std::size_t view = 0; view < view_count; ++view)
             pose.view_camera_ids[view] = config_.multiview_calibration[view].camera_id;
         for (std::size_t joint = 0; joint < 17; ++joint) {
             Eigen::Matrix<float, 6, 4> equations;
             int rows = 0;
-            for (std::size_t view = 0; view < 3; ++view) {
+            for (std::size_t view = 0; view < view_count; ++view) {
                 if (selected[view] < 0) continue;
                 const auto candidate = static_cast<std::size_t>(selected[view]);
                 const auto score_index = (view * 10 + candidate) * 17 + joint;
@@ -118,6 +132,7 @@ class MultiviewPoseStage::Impl {
                 const float yd = yu * radial + calibration.distortion[2] * (r2 + 2.0F * yu * yu) + 2.0F * calibration.distortion[3] * xu * yu;
                 pose.points_2d_px[view][joint] = {fx * xd + cx, fy * yd + cy};
                 pose.point_valid[view][joint] = true;
+                if (config_.two_d_only) continue;
                 Eigen::Matrix<float, 3, 4> extrinsic;
                 const auto& camera = config_.multiview_calibration[view];
                 for (int r = 0; r < 3; ++r) {
@@ -138,7 +153,9 @@ class MultiviewPoseStage::Impl {
             pose.joints_3d[joint] = {homogeneous[0] / homogeneous[3], homogeneous[1] / homogeneous[3], homogeneous[2] / homogeneous[3]};
             pose.joint_valid[joint] = true;
         }
-        pose.active = std::ranges::count(pose.joint_valid, true) >= 5;
+        pose.active = config_.two_d_only
+            ? std::ranges::count(pose.point_valid[0], true) >= 5
+            : std::ranges::count(pose.joint_valid, true) >= 5;
         packet.multiview_poses = std::move(poses);
         const auto finished = std::chrono::steady_clock::now();
         if (metrics_enabled_) {
@@ -155,6 +172,7 @@ class MultiviewPoseStage::Impl {
     }
   private:
     void refresh_calibration() {
+        if (config_.two_d_only) return;
         if (!config_.calibration_store) return;
         const auto rig=config_.calibration_store->snapshot();
         if (!rig || rig->revision==calibration_revision_) return;

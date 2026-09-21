@@ -26,6 +26,10 @@ struct PoseConfig {
     // instead of the monocular backend and currently requires three cameras.
     std::filesystem::path multiview_engine_path;
     std::filesystem::path multiview_calibration_path;
+    // Run the RTMO engine on a single camera and emit only its 2-D keypoints.
+    // The fixed-batch engine is fed three copies internally; no rig calibration
+    // or triangulation is required.
+    bool two_d_only{};
     struct CameraCalibration {
         CameraId camera_id{};
         std::array<float, 9> R_w2c{};
@@ -87,7 +91,7 @@ inline void apply_capture_rotation(PoseConfig::CameraCalibration& calibration) {
 }
 
 inline const char* pose_backend_name(const PoseConfig& config) noexcept {
-    if (!config.multiview_engine_path.empty()) return "multiview";
+    if (!config.multiview_engine_path.empty()) return config.two_d_only ? "2d" : "multiview";
     if (!config.model_path.empty()) return "monocular";
     return "off";
 }

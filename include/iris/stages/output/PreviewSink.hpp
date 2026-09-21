@@ -3,6 +3,7 @@
 #include "iris/pipeline/Packet.hpp"
 #include "iris/stages/output/OutputCommand.hpp"
 #include "iris/stages/output/OutputConfig.hpp"
+#include "iris/infrastructure/metrics/MetricRegistry.hpp"
 
 #include <cstddef>
 #include <memory>
@@ -36,7 +37,8 @@ class PreviewTransport {
 
 class PreviewSink final {
   public:
-    explicit PreviewSink(PreviewConfig config = {});
+    explicit PreviewSink(PreviewConfig config = {},
+                         infrastructure::metrics::MetricRegistry* metrics = nullptr);
     ~PreviewSink();
     PreviewSink(const PreviewSink&) = delete;
     PreviewSink& operator=(const PreviewSink&) = delete;

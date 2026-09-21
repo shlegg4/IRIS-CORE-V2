@@ -65,7 +65,7 @@ class PreviewHttpServer::Impl {
         { std::scoped_lock lock(mutex_); frames_[camera] = std::move(jpeg); ++generation_; }
         changed_.notify_all();
     }
-    void event(std::string message) { { std::scoped_lock lock(mutex_); events_.push_back(std::move(message)); if (events_.size() > 64) events_.pop_front(); ++generation_; } changed_.notify_all(); }
+    void event(std::string message) { { std::scoped_lock lock(mutex_); latest_event_ = std::move(message); ++event_generation_; } changed_.notify_all(); }
     void h264(H264PreviewAccessUnit unit) { { std::scoped_lock lock(mutex_); h264_packets_.push_back(std::move(unit)); if (h264_packets_.size() > 128) h264_packets_.pop_front(); ++generation_; } changed_.notify_all(); }
     void h264_config(H264PreviewStreamConfig config) { { std::scoped_lock lock(mutex_); h264_configs_[config.camera] = std::move(config); ++generation_; } changed_.notify_all(); }
     PreviewTransportHealth health() const { std::scoped_lock lock(mutex_); return {running_, clients_, published_, 0, error_}; }
@@ -95,8 +95,8 @@ class PreviewHttpServer::Impl {
     }
     void websocket_session(tcp::socket socket, http::request<http::string_body> request) {
         { std::scoped_lock lock(mutex_); ++clients_; }
-        struct Guard { Impl* self; ~Guard(){std::scoped_lock lock(self->mutex_);--self->clients_;} } guard{this}; websocket::stream<tcp::socket> ws(std::move(socket)); ws.accept(request); ws.text(true); std::size_t sent{};
-        while(running_) { std::vector<std::string> messages; { std::unique_lock lock(mutex_); changed_.wait_for(lock,std::chrono::seconds(1),[&]{return !running_ || generation_ != sent;}); sent=generation_; messages.assign(events_.begin(),events_.end()); } ws.write(asio::buffer(std::string("{\"version\":1,\"type\":\"status\",\"data\":" + status_() + "}"))); for(const auto& message:messages) ws.write(asio::buffer(message)); }
+        struct Guard { Impl* self; ~Guard(){std::scoped_lock lock(self->mutex_);--self->clients_;} } guard{this}; websocket::stream<tcp::socket> ws(std::move(socket)); ws.accept(request); ws.text(true); std::uint64_t seen_event_generation{};
+        while(running_) { std::optional<std::string> message; { std::unique_lock lock(mutex_); changed_.wait_for(lock,std::chrono::seconds(1),[&]{return !running_ || event_generation_ != seen_event_generation;}); if(event_generation_ != seen_event_generation){seen_event_generation=event_generation_;message=latest_event_;} } ws.write(asio::buffer(std::string("{\"version\":1,\"type\":\"status\",\"data\":" + status_() + "}"))); if(message)ws.write(asio::buffer(*message)); }
         std::cerr << "IRIS preview events session ended\n";
     }
     void h264_session(tcp::socket socket, http::request<http::string_body> request) {
@@ -173,7 +173,7 @@ class PreviewHttpServer::Impl {
         }
     }
     void set_error(std::string error) { std::scoped_lock lock(mutex_); error_=std::move(error); }
-    std::string bind_; std::uint16_t port_; StatusProvider status_; asio::io_context context_; tcp::acceptor acceptor_; std::atomic_bool running_{false}; std::thread accept_thread_; std::mutex session_mutex_; std::vector<std::thread> session_threads_; mutable std::mutex mutex_; std::condition_variable changed_; std::unordered_map<CameraId,std::shared_ptr<const std::vector<std::uint8_t>>> frames_; std::deque<std::string> events_; std::deque<H264PreviewAccessUnit> h264_packets_; std::unordered_map<CameraId,H264PreviewStreamConfig> h264_configs_; std::size_t generation_{},clients_{},published_{}; std::string error_;
+    std::string bind_; std::uint16_t port_; StatusProvider status_; asio::io_context context_; tcp::acceptor acceptor_; std::atomic_bool running_{false}; std::thread accept_thread_; std::mutex session_mutex_; std::vector<std::thread> session_threads_; mutable std::mutex mutex_; std::condition_variable changed_; std::unordered_map<CameraId,std::shared_ptr<const std::vector<std::uint8_t>>> frames_; std::optional<std::string> latest_event_; std::uint64_t event_generation_{}; std::deque<H264PreviewAccessUnit> h264_packets_; std::unordered_map<CameraId,H264PreviewStreamConfig> h264_configs_; std::size_t generation_{},clients_{},published_{}; std::string error_;
 };
 PreviewHttpServer::PreviewHttpServer(std::string bind, std::uint16_t port, StatusProvider status):impl_(std::make_unique<Impl>(std::move(bind),port,std::move(status))){} PreviewHttpServer::~PreviewHttpServer()=default; void PreviewHttpServer::start(){impl_->start();} void PreviewHttpServer::stop() noexcept{impl_->stop();} void PreviewHttpServer::set_frame(CameraId c,std::shared_ptr<const std::vector<std::uint8_t>> j){impl_->set_frame(c,std::move(j));} void PreviewHttpServer::publish_event(std::string e){impl_->event(std::move(e));} void PreviewHttpServer::publish_h264(H264PreviewAccessUnit u){impl_->h264(std::move(u));} void PreviewHttpServer::set_h264_stream_config(H264PreviewStreamConfig c){impl_->h264_config(std::move(c));} PreviewTransportHealth PreviewHttpServer::health()const{return impl_->health();}
 } // namespace iris::output

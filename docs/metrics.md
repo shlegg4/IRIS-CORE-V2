@@ -5,3 +5,10 @@ Metrics are registered once and updated by lightweight handles. `Runtime` takes 
 Capture exposes sample outcomes, queue drops/depth, pool exhaustion, decode/source failures, clock drift/residuals, inter-frame timing, queue wait, decode submission and capture-to-emit latency. Names are stable and labels are intentionally absent until a bounded multi-camera label model is introduced.
 
 Channels own their transport metrics directly. Instrumented channels report sent, received, aggregate drops, drop policy outcomes, rejected sends to closed channels, current depth and peak depth under an `iris_channel_<name>_*` prefix. Stages do not duplicate queue depth or drop accounting.
+
+The H.264 preview path correlates pose events and encoded video access units using camera and frame
+sequence. `iris_preview_pose_video_publish_abs_skew_ms` is a histogram of the absolute publication
+time difference for matching frames. Its `_sum / _count` gives the mean; Prometheus
+`histogram_quantile(0.5, ...)` and `histogram_quantile(0.9, ...)` give the median and p90.
+`iris_preview_last_pose_video_publish_skew_ms` is the most recent signed difference: positive means
+the pose event was published after its video frame, while negative means pose led video.

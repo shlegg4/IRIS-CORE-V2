@@ -8,8 +8,9 @@
 
 namespace iris {
 
-// Runs batched RTMO-S detection, selects one person per camera, then
-// triangulates its COCO-17 keypoints.  It is deliberately separate from
+// Runs RTMO-S detection and emits COCO-17 image keypoints. In multiview mode it
+// selects one person per camera and triangulates the keypoints; in 2-D mode it
+// accepts one camera and skips triangulation. It is deliberately separate from
 // PoseStage: PoseStage remains the monocular TorchScript HMR path.
 class MultiviewPoseStage final : public Stage {
   public:

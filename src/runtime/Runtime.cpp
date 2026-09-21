@@ -393,6 +393,10 @@ class Runtime::Impl {
         PoseConfig requested;
         if (command.backend == ConfigurePoseCommand::Backend::Monocular)
             requested.model_path = resolve_pose_asset(command.model_path);
+        else if (command.backend == ConfigurePoseCommand::Backend::TwoDimensional) {
+            requested.multiview_engine_path = resolve_pose_asset(command.engine_path);
+            requested.two_d_only = true;
+        }
         else if (command.backend == ConfigurePoseCommand::Backend::Multiview)
         {
             requested.multiview_engine_path = resolve_pose_asset(command.engine_path);

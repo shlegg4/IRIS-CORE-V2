@@ -265,13 +265,17 @@ std::optional<RuntimeCommand> InteractiveCli::parse(std::string line, std::strin
             return ConfigurePoseCommand{ConfigurePoseCommand::Backend::Monocular, "@assets/pear_ehm_libtorch.pt", {}, {}};
         if (tokens.size() == 3 && tokens[1] == "monocular")
             return ConfigurePoseCommand{ConfigurePoseCommand::Backend::Monocular, tokens[2], {}};
+        if (tokens.size() == 2 && tokens[1] == "2d")
+            return ConfigurePoseCommand{ConfigurePoseCommand::Backend::TwoDimensional, {}, "@assets/rtmo_s.engine", {}};
+        if (tokens.size() == 3 && tokens[1] == "2d")
+            return ConfigurePoseCommand{ConfigurePoseCommand::Backend::TwoDimensional, {}, tokens[2], {}};
         if (tokens.size() == 3 && tokens[1] == "multiview")
             return ConfigurePoseCommand{ConfigurePoseCommand::Backend::Multiview, {}, "@assets/rtmo_s.engine", tokens[2]};
         if (tokens.size() == 2 && tokens[1] == "multiview")
             return ConfigurePoseCommand{ConfigurePoseCommand::Backend::Multiview, {}, "@assets/rtmo_s.engine", {}};
         if (tokens.size() == 4 && tokens[1] == "multiview")
             return ConfigurePoseCommand{ConfigurePoseCommand::Backend::Multiview, {}, tokens[2], tokens[3]};
-        error = "pose requires: status | off | monocular [model-path] | multiview [engine-path] <calibration.json>";
+        error = "pose requires: status | off | monocular [model-path] | 2d [engine-path] | multiview [engine-path] <calibration.json>";
         return std::nullopt;
     }
     if (tokens[0] == "rig") {
@@ -500,6 +504,7 @@ std::string InteractiveCli::help() {
            "pose status\n"
            "pose off\n"
            "pose monocular [model-path]\n"
+           "pose 2d [engine-path]\n"
            "pose multiview [calibration.json]\n"
            "pose multiview <engine-path> <calibration.json>\n"
            "rig status\n"

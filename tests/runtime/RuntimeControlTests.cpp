@@ -21,6 +21,12 @@ int main() {
     assert(!invalid);
     assert(!error.empty());
 
+    auto pose_2d = iris::InteractiveCli::parse("pose 2d custom.engine", error);
+    assert(pose_2d && std::holds_alternative<iris::ConfigurePoseCommand>(*pose_2d));
+    const auto& pose_2d_command = std::get<iris::ConfigurePoseCommand>(*pose_2d);
+    assert(pose_2d_command.backend == iris::ConfigurePoseCommand::Backend::TwoDimensional);
+    assert(pose_2d_command.engine_path == "custom.engine");
+
     auto capture = iris::InteractiveCli::parse(
         "capture configure --device-index 0 --width 1280 --height 720 --fps 30000/1001 "
         "--format yuy2 --cuda-device 0 --sample-queue 2 --frame-pool 8 "

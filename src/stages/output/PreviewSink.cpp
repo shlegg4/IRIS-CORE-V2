@@ -10,6 +10,8 @@
 #include <cmath>
 #include <cstring>
 #include <mutex>
+#include <map>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <thread>
@@ -81,6 +83,7 @@ std::string multiview_pose_event(const Packet& packet) {
             const auto frame = std::find_if(packet.frames.begin(), packet.frames.end(), [camera_id](const Frame& value) { return value.camera == camera_id; });
             if (frame == packet.frames.end()) continue;
             out << "{\"camera_id\":" << camera_id << ",\"person_id\":" << id
+                << ",\"frame_sequence\":" << frame->sequence
                 << ",\"width\":" << frame->extent.width << ",\"height\":" << frame->extent.height << ",\"points\":[";
             for(std::size_t joint=0;joint<pose.points_2d_px[view].size();++joint){if(joint)out<<','; const auto& p=pose.points_2d_px[view][joint]; out<<'['<<p[0]<<','<<p[1]<<']';}
             out << "],\"scores\":["; for(std::size_t joint=0;joint<pose.joint_scores[view].size();++joint){if(joint)out<<',';out<<pose.joint_scores[view][joint];}
@@ -150,13 +153,15 @@ class MjpegTransport final : public PreviewTransport {
 
 class PreviewSink::Impl {
  public:
-  explicit Impl(PreviewConfig c): config(std::move(c)), queue(config.shared_memory_queue_capacity,OverflowPolicy::DropOldest), event_queue(config.http.queue_capacity,OverflowPolicy::DropOldest) { if (config.shared_memory_queue_capacity == 0 || config.http.queue_capacity == 0 || !config.h264.queue_capacity) throw std::invalid_argument("preview queue capacity must be greater than zero"); }
+  explicit Impl(PreviewConfig c, infrastructure::metrics::MetricRegistry* metrics): config(std::move(c)), queue(config.shared_memory_queue_capacity,OverflowPolicy::DropOldest), event_queue(config.http.queue_capacity,OverflowPolicy::DropOldest), metrics_enabled(metrics != nullptr),
+      pose_video_skew_ms(metrics ? metrics->histogram("iris_preview_pose_video_publish_abs_skew_ms", {1,2,5,10,20,33,50,75,100,150,250,500,1000,2000}) : infrastructure::metrics::Histogram{}),
+      last_pose_video_skew_ms(metrics ? metrics->gauge("iris_preview_last_pose_video_publish_skew_ms") : infrastructure::metrics::Gauge{}) { if (config.shared_memory_queue_capacity == 0 || config.http.queue_capacity == 0 || !config.h264.queue_capacity) throw std::invalid_argument("preview queue capacity must be greater than zero"); }
   ~Impl(){stop();}
   void start(){if(running.exchange(true))return; {std::scoped_lock l(lock); configure_locked(config.shared_memory);} start_network(); worker=std::thread([this]{while(auto p=queue.receive()){try{std::scoped_lock l(lock); if(!config.shared_memory.enabled)continue; auto b=v2(**p);
 #ifdef _WIN32
 if(v2map)v2map->write((*p)->sequence,b); if(v1map)v1map->write((*p)->sequence,v1(**p));
 #endif
-++published;}catch(const std::exception& e){std::scoped_lock l(lock); error=e.what();}}}); event_worker=std::thread([this]{while(auto packet=event_queue.receive()){std::scoped_lock l(lock); if(!server)continue; if((*packet)->poses)for(const auto& pose:*(*packet)->poses)server->publish_event(pose_event(**packet,pose)); if((*packet)->multiview_poses)server->publish_event(multiview_pose_event(**packet)); }});}
+++published;}catch(const std::exception& e){std::scoped_lock l(lock); error=e.what();}}}); event_worker=std::thread([this]{std::unordered_map<CameraId,std::uint64_t> last_frame_sequence; while(auto packet=event_queue.receive()){{std::scoped_lock l(lock); if(!server)continue; bool in_order=true; for(const auto& frame:(*packet)->frames){const auto previous=last_frame_sequence.find(frame.camera); if(previous!=last_frame_sequence.end()&&frame.sequence<=previous->second){in_order=false;break;}} if(!in_order)continue; for(const auto& frame:(*packet)->frames)last_frame_sequence[frame.camera]=frame.sequence; if((*packet)->poses)for(const auto& pose:*(*packet)->poses)server->publish_event(pose_event(**packet,pose)); if((*packet)->multiview_poses)server->publish_event(multiview_pose_event(**packet)); } if((*packet)->poses||(*packet)->multiview_poses){const auto published_at=std::chrono::steady_clock::now();for(const auto& frame:(*packet)->frames)record_pose_publish(frame.camera,frame.sequence,published_at);}}});}
   void stop() noexcept {if(running.exchange(false)){queue.close();event_queue.close();} if(worker.joinable())worker.join();if(event_worker.joinable())event_worker.join();stop_network();}
   void publish(PreviewPacket p) noexcept {if(!running)return; try{std::scoped_lock l(lock);if(config.shared_memory.enabled){const auto result=queue.send(p);if(result==SendResult::ReplacedOldest||result==SendResult::DroppedNewest)++dropped;if(result!=SendResult::Closed)++submitted;}if(mjpeg)mjpeg->publish(p);if(h264)h264->publish(p);if(server){const auto result=event_queue.send(std::move(p));if(result==SendResult::ReplacedOldest||result==SendResult::DroppedNewest)++event_dropped;}}catch(...){++dropped;}}
   OutputCommandResult configure(SharedMemoryOutputConfig c){std::scoped_lock l(lock);try{configure_locked(c);config.shared_memory=std::move(c);return {OutputCommandStatus::Applied,"shared-memory configuration applied"};}catch(const std::exception&e){error=e.what();return {OutputCommandStatus::Failed,error};}}
@@ -164,7 +169,7 @@ if(v2map)v2map->write((*p)->sequence,b); if(v1map)v1map->write((*p)->sequence,v1
   void set_status(std::function<std::string()> provider){std::scoped_lock l(lock);status_provider=std::move(provider);}
   PreviewTransportHealth health()const{std::scoped_lock l(lock);auto result=PreviewTransportHealth{config.shared_memory.enabled || config.mjpeg.enabled || config.http.enabled || config.h264.enabled,0,published.load(),dropped.load(),error};if(mjpeg){const auto video=mjpeg->health();result.published_packets+=video.published_packets;result.dropped_packets+=video.dropped_packets;if(!video.last_error.empty())result.last_error=video.last_error;}if(h264){const auto video=h264->health();result.published_packets+=video.published_packets;result.dropped_packets+=video.dropped_packets;if(!video.last_error.empty())result.last_error=video.last_error;result.codec=video.codec;}if(server){auto web=server->health();result.connected_clients=web.connected_clients;if(!web.last_error.empty())result.last_error=web.last_error;}return result;}
  private:
-  void start_network(){std::scoped_lock l(lock);if(!config.http.enabled)return;server=std::make_unique<output::PreviewHttpServer>(config.http.bind_address,config.http.port,[this]{return status_provider?status_provider():std::string("{}");});server->start();if(config.h264.enabled){h264=std::make_unique<output::H264Transport>(config.h264,*server);h264->start();}if(config.mjpeg.enabled){mjpeg=std::make_unique<MjpegTransport>(config.mjpeg,*server);mjpeg->start();}}
+  void start_network(){std::scoped_lock l(lock);if(!config.http.enabled)return;server=std::make_unique<output::PreviewHttpServer>(config.http.bind_address,config.http.port,[this]{return status_provider?status_provider():std::string("{}");});server->start();if(config.h264.enabled){h264=std::make_unique<output::H264Transport>(config.h264,*server,[this](CameraId camera,std::uint64_t sequence,std::chrono::steady_clock::time_point at){record_video_publish(camera,sequence,at);});h264->start();}if(config.mjpeg.enabled){mjpeg=std::make_unique<MjpegTransport>(config.mjpeg,*server);mjpeg->start();}}
   void stop_network() noexcept {std::unique_ptr<MjpegTransport> old_mjpeg;std::unique_ptr<output::H264Transport> old_h264;std::unique_ptr<output::PreviewHttpServer> old_server;{std::scoped_lock l(lock);old_mjpeg=std::move(mjpeg);old_h264=std::move(h264);old_server=std::move(server);}if(old_mjpeg)old_mjpeg->stop();if(old_h264)old_h264->stop();if(old_server)old_server->stop();}
   void configure_locked(const SharedMemoryOutputConfig& c){
 #ifdef _WIN32
@@ -173,10 +178,19 @@ std::unique_ptr<Mapping> legacy,versioned; if(c.enabled){versioned=std::make_uni
 if(c.enabled) throw std::runtime_error("shared-memory output is currently implemented for Windows only");
 #endif
 }
+  struct PublishPair { std::optional<std::chrono::steady_clock::time_point> pose, video; };
+  void record_pose_publish(CameraId camera, std::uint64_t sequence, std::chrono::steady_clock::time_point at) { record_publish(camera,sequence,at,true); }
+  void record_video_publish(CameraId camera, std::uint64_t sequence, std::chrono::steady_clock::time_point at) { record_publish(camera,sequence,at,false); }
+  void record_publish(CameraId camera, std::uint64_t sequence, std::chrono::steady_clock::time_point at, bool is_pose) {
+      std::scoped_lock l(timing_lock); auto& pair=publish_pairs[{camera,sequence}]; if(is_pose)pair.pose=at;else pair.video=at;
+      if(pair.pose&&pair.video){const auto signed_ms=std::chrono::duration<double,std::milli>(*pair.pose-*pair.video).count();if(metrics_enabled){pose_video_skew_ms.observe(std::abs(signed_ms));last_pose_video_skew_ms.set(signed_ms);}publish_pairs.erase({camera,sequence});}
+      while(publish_pairs.size()>512)publish_pairs.erase(publish_pairs.begin());
+  }
   PreviewConfig config; Channel<PreviewPacket> queue,event_queue; std::atomic_bool running{false}; std::thread worker,event_worker; mutable std::mutex lock; std::atomic_size_t submitted{0},published{0},dropped{0},event_dropped{0};std::string error;std::function<std::string()> status_provider;std::unique_ptr<output::PreviewHttpServer> server;std::unique_ptr<MjpegTransport> mjpeg;std::unique_ptr<output::H264Transport> h264;
+  bool metrics_enabled{};std::mutex timing_lock;std::map<std::pair<CameraId,std::uint64_t>,PublishPair> publish_pairs;infrastructure::metrics::Histogram pose_video_skew_ms;infrastructure::metrics::Gauge last_pose_video_skew_ms;
 #ifdef _WIN32
 std::unique_ptr<Mapping> v1map,v2map;
 #endif
  };
-PreviewSink::PreviewSink(PreviewConfig c):impl_(std::make_unique<Impl>(std::move(c))){} PreviewSink::~PreviewSink()=default; void PreviewSink::start(){impl_->start();} void PreviewSink::publish(PreviewPacket p) noexcept{impl_->publish(std::move(p));} void PreviewSink::stop() noexcept{impl_->stop();} OutputCommandResult PreviewSink::configure(PreviewConfig c){return impl_->configure_preview(std::move(c));} void PreviewSink::set_status_provider(std::function<std::string()> p){impl_->set_status(std::move(p));} OutputCommandResult PreviewSink::configure_shared_memory(SharedMemoryOutputConfig c){return impl_->configure(std::move(c));} PreviewTransportHealth PreviewSink::shared_memory_health()const{return impl_->health();}
+PreviewSink::PreviewSink(PreviewConfig c,infrastructure::metrics::MetricRegistry* metrics):impl_(std::make_unique<Impl>(std::move(c),metrics)){} PreviewSink::~PreviewSink()=default; void PreviewSink::start(){impl_->start();} void PreviewSink::publish(PreviewPacket p) noexcept{impl_->publish(std::move(p));} void PreviewSink::stop() noexcept{impl_->stop();} OutputCommandResult PreviewSink::configure(PreviewConfig c){return impl_->configure_preview(std::move(c));} void PreviewSink::set_status_provider(std::function<std::string()> p){impl_->set_status(std::move(p));} OutputCommandResult PreviewSink::configure_shared_memory(SharedMemoryOutputConfig c){return impl_->configure(std::move(c));} PreviewTransportHealth PreviewSink::shared_memory_health()const{return impl_->health();}
 } // namespace iris
