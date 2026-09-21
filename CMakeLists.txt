@@ -8,49 +8,17 @@ option(IRIS_BUILD_TESTS "Build IRIS tests" ON)
 option(IRIS_BUILD_TOOLS "Build IRIS diagnostic tools" ON)
 option(IRIS_BUILD_HARDWARE_TESTS "Build tests requiring a camera and CUDA GPU" OFF)
 option(IRIS_ENABLE_TENSORRT "Enable TensorRT multiview inference" ON)
-option(IRIS_ENABLE_WEBRTC "Enable GStreamer WebRTC preview transport" ON)
+option(IRIS_ENABLE_H264_PREVIEW "Enable FFmpeg NVENC H.264 preview transport" ON)
 set(IRIS_TENSORRT_ROOT "" CACHE PATH "TensorRT SDK root")
 set(IRIS_VCPKG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/vcpkg_installed/x64-windows"
     CACHE PATH "IRIS_V2 local vcpkg x64-windows install root")
 set(IRIS_FFMPEG_ROOT "${IRIS_VCPKG_ROOT}"
     CACHE PATH "FFmpeg x64-windows package root")
 set(IRIS_TORCH_ROOT "C:/libtorch" CACHE PATH "LibTorch installation root")
-set(IRIS_GSTREAMER_RUNTIME_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/build/gstreamer-1.26.5-official/PFiles64/gstreamer/1.0/msvc_x86_64"
-    CACHE PATH "Official GStreamer 1.26.5 MSVC x64 runtime/development root")
-set(IRIS_GSTREAMER_DEV_ROOT "${IRIS_GSTREAMER_RUNTIME_ROOT}"
-    CACHE PATH "Official GStreamer 1.26.5 MSVC x64 development package root")
 find_package(CUDAToolkit REQUIRED)
 list(PREPEND CMAKE_PREFIX_PATH "${IRIS_TORCH_ROOT}" "${IRIS_VCPKG_ROOT}" "${IRIS_FFMPEG_ROOT}")
 find_package(Boost CONFIG REQUIRED COMPONENTS system)
 find_package(Torch REQUIRED)
-if(IRIS_ENABLE_WEBRTC)
-  unset(IRIS_GSTREAMER_INCLUDE_DIR CACHE)
-  unset(IRIS_GLIB_INCLUDE_DIR CACHE)
-  unset(IRIS_GLIB_CONFIG_INCLUDE_DIR CACHE)
-  foreach(component gstreamer-1.0 gstapp-1.0 gstvideo-1.0 gstwebrtc-1.0 gstsdp-1.0
-                    glib-2.0 gobject-2.0 gio-2.0 nice srtp2)
-    unset(IRIS_GSTREAMER_${component}_LIBRARY CACHE)
-  endforeach()
-  foreach(_gst_required IN ITEMS bin lib/gstreamer-1.0)
-    if(NOT EXISTS "${IRIS_GSTREAMER_RUNTIME_ROOT}/${_gst_required}")
-      message(FATAL_ERROR "Official GStreamer runtime is incomplete: missing ${IRIS_GSTREAMER_RUNTIME_ROOT}/${_gst_required}")
-    endif()
-  endforeach()
-  find_path(IRIS_GSTREAMER_INCLUDE_DIR gst/gst.h
-    PATHS "${IRIS_GSTREAMER_DEV_ROOT}/include/gstreamer-1.0" NO_DEFAULT_PATH NO_CACHE REQUIRED)
-  find_path(IRIS_GLIB_INCLUDE_DIR glib.h
-    PATHS "${IRIS_GSTREAMER_DEV_ROOT}/include/glib-2.0" NO_DEFAULT_PATH NO_CACHE REQUIRED)
-  find_path(IRIS_GLIB_CONFIG_INCLUDE_DIR glibconfig.h
-    PATHS "${IRIS_GSTREAMER_DEV_ROOT}/lib/glib-2.0/include" NO_DEFAULT_PATH NO_CACHE REQUIRED)
-  foreach(component gstreamer-1.0 gstapp-1.0 gstvideo-1.0 gstwebrtc-1.0 gstsdp-1.0
-                    glib-2.0 gobject-2.0 gio-2.0 nice srtp2)
-    find_library(IRIS_GSTREAMER_${component}_LIBRARY NAMES ${component}
-      PATHS "${IRIS_GSTREAMER_DEV_ROOT}/lib" NO_DEFAULT_PATH NO_CACHE REQUIRED)
-    list(APPEND IRIS_GSTREAMER_LIBRARIES "${IRIS_GSTREAMER_${component}_LIBRARY}")
-  endforeach()
-  message(STATUS "GStreamer WebRTC enabled: ${IRIS_GSTREAMER_INCLUDE_DIR}")
-  message(STATUS "Using official GStreamer headers, libraries, runtime DLLs, and plugins")
-endif()
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
 
 if(IRIS_ENABLE_TENSORRT AND IRIS_TENSORRT_ROOT)
@@ -92,7 +60,8 @@ add_library(iris
   src/stages/capture/decoding/BgrRotate.cu src/stages/pose/MultiviewPreprocess.cu
   src/stages/pose/PoseStage.cpp src/stages/pose/MultiviewPoseStage.cpp src/stages/pose/TensorRtMultiviewEngine.cpp src/stages/output/OutputStage.cpp src/stages/output/PreviewSink.cpp
   src/stages/output/PreviewHttpServer.cpp
-  src/stages/output/WebRtcTransport.cpp
+  src/stages/output/H264PreviewProtocol.cpp
+  src/stages/output/H264Transport.cpp
   src/stages/output/MjpegResize.cu
   src/stages/output/disk/GpuMp4Writer.cpp src/stages/output/disk/BgrToNv12.cu)
 add_library(iris::iris ALIAS iris)
@@ -100,10 +69,8 @@ target_compile_features(iris PUBLIC cxx_std_20)
 target_compile_definitions(iris PRIVATE IRIS_BUILD_ASSET_DIRECTORY="${IRIS_BUILD_ASSET_DIRECTORY}")
 set_target_properties(iris PROPERTIES CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED YES)
 target_include_directories(iris PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include> PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src "${IRIS_VCPKG_ROOT}/include")
-if(IRIS_ENABLE_WEBRTC)
-  target_compile_definitions(iris PRIVATE IRIS_HAS_WEBRTC=1 GST_USE_UNSTABLE_API=1)
-  target_include_directories(iris PRIVATE "${IRIS_GSTREAMER_INCLUDE_DIR}" "${IRIS_GLIB_INCLUDE_DIR}" "${IRIS_GLIB_CONFIG_INCLUDE_DIR}")
-  target_link_libraries(iris PRIVATE ${IRIS_GSTREAMER_LIBRARIES})
+if(IRIS_ENABLE_H264_PREVIEW)
+  target_compile_definitions(iris PRIVATE IRIS_HAS_H264_PREVIEW=1)
 endif()
 if(IRIS_HAS_TENSORRT)
   target_sources(iris PRIVATE src/tools/da3/src/preprocess.cpp src/tools/da3/src/tensor_rt.cpp)
@@ -159,17 +126,6 @@ if(WIN32 AND IRIS_HAS_TENSORRT)
       COMMAND_EXPAND_LISTS COMMENT "Copying TensorRT runtime")
   endif()
 endif()
-if(WIN32 AND IRIS_ENABLE_WEBRTC)
-  set(_iris_gst_runtime "$<TARGET_FILE_DIR:iris_app>/gstreamer-runtime")
-  add_custom_command(TARGET iris_app POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-      "${IRIS_GSTREAMER_RUNTIME_ROOT}/bin"
-      "${_iris_gst_runtime}/bin"
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-      "${IRIS_GSTREAMER_RUNTIME_ROOT}/lib/gstreamer-1.0"
-      "${_iris_gst_runtime}/plugins"
-    COMMENT "Copying official GStreamer WebRTC runtime bundle")
-endif()
 if(WIN32)
   file(GLOB _iris_opencv_dlls "${IRIS_VCPKG_ROOT}/bin/opencv_*.dll")
   if(_iris_opencv_dlls)
@@ -188,16 +144,9 @@ if(IRIS_BUILD_TOOLS)
   add_executable(iris_mf_probe tools/mf_probe.cpp)
   target_link_libraries(iris_mf_probe PRIVATE iris::iris)
   target_include_directories(iris_mf_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-  if(IRIS_ENABLE_WEBRTC)
-    add_executable(webrtc_runtime_probe src/tools/WebRtcRuntimeProbe.cpp)
-    target_compile_definitions(webrtc_runtime_probe PRIVATE GST_USE_UNSTABLE_API=1)
-    target_include_directories(webrtc_runtime_probe PRIVATE "${IRIS_GSTREAMER_INCLUDE_DIR}" "${IRIS_GLIB_INCLUDE_DIR}" "${IRIS_GLIB_CONFIG_INCLUDE_DIR}")
-    target_link_libraries(webrtc_runtime_probe PRIVATE ${IRIS_GSTREAMER_LIBRARIES})
-    add_test(NAME webrtc_runtime_probe COMMAND webrtc_runtime_probe)
-    set_tests_properties(webrtc_runtime_probe PROPERTIES ENVIRONMENT
-      "GST_PLUGIN_PATH=$<TARGET_FILE_DIR:iris_app>/gstreamer-runtime/plugins;GST_PLUGIN_SYSTEM_PATH=;GST_REGISTRY=$<TARGET_FILE_DIR:iris_app>/gstreamer-runtime/registry.bin"
-      ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:iris_app>/gstreamer-runtime/bin")
-  endif()
+  add_executable(h264_preview_runtime_probe src/tools/H264PreviewRuntimeProbe.cpp)
+  target_link_libraries(h264_preview_runtime_probe PRIVATE FFmpeg::avcodec FFmpeg::avutil)
+  add_test(NAME h264_preview_runtime_probe COMMAND h264_preview_runtime_probe)
 endif()
 if(IRIS_BUILD_TESTS)
   include(CTest)

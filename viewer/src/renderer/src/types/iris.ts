@@ -47,7 +47,7 @@ export interface RuntimeStatus {
     port?: number
     enabled?: boolean
     last_error?: string
-    webrtc?: { enabled?: boolean; connected_clients?: number; published_packets?: number; dropped_packets?: number; last_error?: string }
+    h264?: { enabled?: boolean; connected_clients?: number; published_packets?: number; dropped_packets?: number; last_error?: string; codec?: string; bitrate?: number; max_fps?: number; max_width?: number }
   }
   lastError?: string
   calibration?: CalibrationSnapshot

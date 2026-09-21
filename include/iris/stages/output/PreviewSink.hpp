@@ -20,6 +20,9 @@ struct PreviewTransportHealth {
     std::size_t published_packets{};
     std::size_t dropped_packets{};
     std::string last_error;
+    std::string codec;
+    int cuda_device{-1};
+    std::uint32_t latency_ms{};
 };
 
 class PreviewTransport {

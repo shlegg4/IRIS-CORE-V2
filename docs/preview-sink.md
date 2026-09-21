@@ -30,3 +30,11 @@ It binds only to loopback (default `127.0.0.1:8080`). Each available camera is e
 CUDA readiness event, rate limited to 10 FPS, resized to 960 pixels maximum width, and encoded
 with nvJPEG quality 75. `/api/events` upgrades to a WebSocket and sends version-1 JSON envelopes
 for pose events plus a transport/runtime status envelope at least once per second.
+
+The Electron H.264 preview uses `/api/preview/stream`. The client sends a version-1
+JSON `hello` containing requested camera IDs. The server replies with `config`, then
+sends binary little-endian `IRWS` access-unit envelopes containing flags, camera ID,
+sequence, timestamp in microseconds, payload length, and an H.264 access unit. Bit 0
+marks keyframes and bit 1 marks discontinuities. The renderer decodes each camera
+independently with WebCodecs `VideoDecoder`; bounded queues drop stale preview data so
+a slow renderer cannot block capture, inference, or recording.

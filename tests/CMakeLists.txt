@@ -11,6 +11,7 @@ iris_test(frame_synchronizer_tests capture/FrameSynchronizerTests.cpp)
 iris_test(metrics_tests infrastructure/metrics/MetricsTests.cpp)
 iris_test(output_stage_tests stages/OutputStageTests.cpp)
 iris_test(runtime_control_tests runtime/RuntimeControlTests.cpp)
+iris_test(h264_preview_protocol_tests stages/H264PreviewProtocolTests.cpp)
 
 if(IRIS_BUILD_HARDWARE_TESTS)
   add_subdirectory(hardware)

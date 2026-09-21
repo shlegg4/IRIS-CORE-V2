@@ -29,7 +29,7 @@ struct HttpPreviewConfig {
     std::size_t queue_capacity{16};
 };
 
-struct WebRtcPreviewConfig {
+struct H264PreviewConfig {
     bool enabled{true};
     std::uint32_t max_fps{30};
     std::uint32_t max_width{1280};
@@ -41,7 +41,7 @@ struct PreviewConfig {
     SharedMemoryOutputConfig shared_memory;
     MjpegPreviewConfig mjpeg;
     HttpPreviewConfig http;
-    WebRtcPreviewConfig webrtc;
+    H264PreviewConfig h264;
     std::size_t shared_memory_queue_capacity{2};
 };
 

@@ -338,11 +338,15 @@ class Runtime::Impl {
                       (current.preview.enabled ? "true" : "false") +
                       ",\"port\":" + std::to_string(current.preview.port) +
                       ",\"last_error\":" + json_quote(current.preview.last_error) +
-                      ",\"webrtc\":{\"enabled\":" + (preview_config_.webrtc.enabled ? "true" : "false") +
+                      ",\"h264\":{\"enabled\":" + (preview_config_.h264.enabled ? "true" : "false") +
                       ",\"connected_clients\":" + std::to_string(current.preview.connected_clients) +
                       ",\"published_packets\":" + std::to_string(current.preview.published_packets) +
                       ",\"dropped_packets\":" + std::to_string(current.preview.dropped_packets) +
-                      ",\"last_error\":" + json_quote(current.preview.last_error) + "}}";
+                      ",\"last_error\":" + json_quote(current.preview.last_error) +
+                      ",\"codec\":\"H264/NVENC\"" +
+                      ",\"bitrate\":" + std::to_string(preview_config_.h264.bitrate) +
+                      ",\"max_fps\":" + std::to_string(preview_config_.h264.max_fps) +
+                      ",\"max_width\":" + std::to_string(preview_config_.h264.max_width) + "}}";
             if (const auto rig = calibration_store_->snapshot()) {
                 result += ",\"calibration\":{\"revision\":" + std::to_string(rig->revision) + ",\"cameras\":[";
                 for (std::size_t i = 0; i < rig->cameras.size(); ++i) {
@@ -517,11 +521,11 @@ class Runtime::Impl {
               command.config.http.bind_address == "localhost")) {
             return {RuntimeCommandStatus::Rejected, "preview server must bind to loopback", std::nullopt};
         }
-        if (command.config.webrtc.enabled &&
-            (!command.config.webrtc.bitrate || !command.config.webrtc.max_fps ||
-             !command.config.webrtc.max_width || !command.config.webrtc.queue_capacity)) {
+        if (command.config.h264.enabled &&
+            (!command.config.h264.bitrate || !command.config.h264.max_fps ||
+             !command.config.h264.max_width || !command.config.h264.queue_capacity)) {
             return {RuntimeCommandStatus::Rejected,
-                    "WebRTC bitrate, FPS, width, and queue capacity must be greater than zero", std::nullopt};
+                    "H.264 bitrate, FPS, width, and queue capacity must be greater than zero", std::nullopt};
         }
         if (pipeline_running()) {
             auto requested = command.config;
@@ -727,7 +731,7 @@ class Runtime::Impl {
         result.recording_path = disk_config_.destination;
         result.shared_memory_destination = shm_config_.destination;
         result.shared_memory_enabled = shm_config_.enabled;
-        result.preview.enabled = preview_config_.http.enabled || preview_config_.mjpeg.enabled || preview_config_.webrtc.enabled ||
+        result.preview.enabled = preview_config_.http.enabled || preview_config_.mjpeg.enabled || preview_config_.h264.enabled ||
                                  preview_config_.shared_memory.enabled;
         result.preview.bind_address = preview_config_.http.bind_address;
         result.preview.port = preview_config_.http.port;

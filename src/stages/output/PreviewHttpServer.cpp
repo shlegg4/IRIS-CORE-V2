@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <thread>
 #include <unordered_map>
+#include <algorithm>
 #include <iostream>
 #include <nlohmann/json.hpp>
 
@@ -24,6 +25,7 @@ namespace beast = boost::beast;
 namespace http = beast::http;
 namespace websocket = beast::websocket;
 using tcp = asio::ip::tcp;
+std::string base64_encode(const std::vector<std::uint8_t>& input) { static constexpr char table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"; std::string out; for (std::size_t i = 0; i < input.size(); i += 3) { const auto a = input[i]; const auto b = i + 1 < input.size() ? input[i + 1] : 0; const auto c = i + 2 < input.size() ? input[i + 2] : 0; out += table[a >> 2]; out += table[((a & 3) << 4) | (b >> 4)]; out += i + 1 < input.size() ? table[((b & 15) << 2) | (c >> 6)] : '='; out += i + 2 < input.size() ? table[c & 63] : '='; } return out; }
 
 bool is_loopback_address(const std::string& value) noexcept {
     if (value == "localhost") return true;
@@ -34,8 +36,8 @@ bool is_loopback_address(const std::string& value) noexcept {
 
 class PreviewHttpServer::Impl {
   public:
-    Impl(std::string bind, std::uint16_t port, StatusProvider provider, WebRtcHandlerFactory webrtc_factory)
-        : bind_(std::move(bind)), port_(port), status_(std::move(provider)), webrtc_factory_(std::move(webrtc_factory)), acceptor_(context_) {}
+    Impl(std::string bind, std::uint16_t port, StatusProvider provider)
+        : bind_(std::move(bind)), port_(port), status_(std::move(provider)), acceptor_(context_) {}
     ~Impl() { stop(); }
     void start() {
         if (running_.exchange(true)) return;
@@ -64,6 +66,8 @@ class PreviewHttpServer::Impl {
         changed_.notify_all();
     }
     void event(std::string message) { { std::scoped_lock lock(mutex_); events_.push_back(std::move(message)); if (events_.size() > 64) events_.pop_front(); ++generation_; } changed_.notify_all(); }
+    void h264(H264PreviewAccessUnit unit) { { std::scoped_lock lock(mutex_); h264_packets_.push_back(std::move(unit)); if (h264_packets_.size() > 128) h264_packets_.pop_front(); ++generation_; } changed_.notify_all(); }
+    void h264_config(H264PreviewStreamConfig config) { { std::scoped_lock lock(mutex_); h264_configs_[config.camera] = std::move(config); ++generation_; } changed_.notify_all(); }
     PreviewTransportHealth health() const { std::scoped_lock lock(mutex_); return {running_, clients_, published_, 0, error_}; }
   private:
     void accept_loop() noexcept {
@@ -77,7 +81,7 @@ class PreviewHttpServer::Impl {
     void session(tcp::socket socket) noexcept {
         try { beast::flat_buffer buffer; http::request<http::string_body> request; http::read(socket, buffer, request);
             if (websocket::is_upgrade(request) && request.target() == "/api/events") { websocket_session(std::move(socket), std::move(request)); return; }
-            if (websocket::is_upgrade(request) && request.target() == "/api/webrtc/signaling") { webrtc_session(std::move(socket), std::move(request)); return; }
+            if (websocket::is_upgrade(request) && request.target() == "/api/preview/stream") { h264_session(std::move(socket), std::move(request)); return; }
             const auto camera=camera_from_target(request.target()); if (request.method()!=http::verb::get || !camera) { http::response<http::string_body> r{http::status::not_found,request.version()}; r.set(http::field::content_type,"text/plain"); r.body()="not found"; r.prepare_payload(); http::write(socket,r); return; }
             mjpeg_session(std::move(socket), request.version(), *camera);
         } catch (const std::exception& exception) { std::cerr << "IRIS preview session error: " << exception.what() << "\n"; }
@@ -95,46 +99,81 @@ class PreviewHttpServer::Impl {
         while(running_) { std::vector<std::string> messages; { std::unique_lock lock(mutex_); changed_.wait_for(lock,std::chrono::seconds(1),[&]{return !running_ || generation_ != sent;}); sent=generation_; messages.assign(events_.begin(),events_.end()); } ws.write(asio::buffer(std::string("{\"version\":1,\"type\":\"status\",\"data\":" + status_() + "}"))); for(const auto& message:messages) ws.write(asio::buffer(message)); }
         std::cerr << "IRIS preview events session ended\n";
     }
-    void webrtc_session(tcp::socket socket, http::request<http::string_body> request) {
-        if (!webrtc_factory_) {
-            http::response<http::string_body> response{http::status::service_unavailable, request.version()};
-            response.body() = "WebRTC preview is disabled"; response.prepare_payload(); http::write(socket, response); return;
+    void h264_session(tcp::socket socket, http::request<http::string_body> request) {
+        websocket::stream<tcp::socket> ws(std::move(socket));
+        ws.accept(request);
+        ws.text(true);
+        beast::flat_buffer hello_buffer;
+        boost::system::error_code error;
+        ws.read(hello_buffer, error);
+        if (error) return;
+        std::vector<CameraId> cameras;
+        try {
+            const auto hello = nlohmann::json::parse(beast::buffers_to_string(hello_buffer.data()));
+            std::cerr << "IRIS preview H.264 hello: " << hello.dump() << "\n";
+            if (hello.value("type", "") != "hello" || hello.value("version", 0) != 1) {
+                ws.write(asio::buffer(std::string(R"({"version":1,"type":"error","message":"invalid preview hello"})")), error);
+                return;
+            }
+            if (hello.contains("cameras") && hello["cameras"].is_array()) {
+                for (const auto& value : hello["cameras"]) if (value.is_number_unsigned()) cameras.push_back(value.get<CameraId>());
+            }
+        } catch (...) {
+            ws.write(asio::buffer(std::string(R"({"version":1,"type":"error","message":"malformed preview hello"})")), error);
+            return;
         }
-        const auto peer = next_peer_++;
-        auto handler = webrtc_factory_();
+        {
+            std::unique_lock lock(mutex_);
+            changed_.wait_for(lock, std::chrono::seconds(2), [&] { if (!running_) return true; if (cameras.empty()) return !h264_configs_.empty(); return std::all_of(cameras.begin(), cameras.end(), [&](const auto camera) { return h264_configs_.contains(camera); }); });
+        }
+        nlohmann::json streams = nlohmann::json::array();
+        { std::scoped_lock lock(mutex_); for (const auto camera : cameras) { auto it = h264_configs_.find(camera); if (it == h264_configs_.end()) { streams.push_back({{"camera_id", camera}, {"codec", "avc1.42E01E"}, {"format", "avc"}}); continue; } const auto& config = it->second; streams.push_back({{"camera_id", camera}, {"width", config.width}, {"height", config.height}, {"fps", config.fps}, {"codec", config.codec}, {"format", "avc"}, {"description", base64_encode(config.description)}}); } }
+        ws.write(asio::buffer(nlohmann::json{{"version", 1}, {"type", "config"}, {"streams", streams}}.dump()), error);
+        std::cerr << "IRIS preview H.264 config streams=" << streams.size() << "\n";
+        if (error) return;
         { std::scoped_lock lock(mutex_); ++clients_; }
-        struct Guard { Impl* self; WebRtcMessageHandler handler; ~Guard(){ try { if(handler) handler("{\"type\":\"close\"}"); } catch (...) {} std::scoped_lock lock(self->mutex_);--self->clients_;} } guard{this, std::move(handler)};
-        websocket::stream<tcp::socket> ws(std::move(socket)); ws.accept(request); ws.text(true);
+        struct Guard { Impl* self; ~Guard(){ std::scoped_lock lock(self->mutex_); --self->clients_; } } guard{this};
+        std::uint64_t seen_generation = 0;
+        std::unordered_map<CameraId, std::uint64_t> last_sequence;
+        std::unordered_map<CameraId, bool> awaiting_keyframe;
         while (running_) {
-            beast::flat_buffer input; boost::system::error_code error; ws.read(input, error);
-            if (error == websocket::error::closed) { std::cerr << "peer=" << peer << " disconnected reason=closed\n"; break; }
-            if (error) { std::cerr << "peer=" << peer << " disconnected reason=" << error.message() << "\n"; set_error(error.message()); break; }
-            const auto message = beast::buffers_to_string(input.data());
-            std::string type;
-            try { type = nlohmann::json::parse(message).value("type", ""); } catch (...) { type = "malformed"; }
-            const auto response = guard.handler(message);
-            if (type == "hello") std::cerr << "peer=" << peer << " received hello\n";
-            else if (type == "offer") std::cerr << "peer=" << peer << " received offer bytes=" << message.size() << "\n";
-            else if (type == "ice") { try { std::cerr << "peer=" << peer << " received ICE mline=" << nlohmann::json::parse(message).value("sdpMLineIndex", 0) << "\n"; } catch (...) {} }
-            if (!response.empty()) {
-                try {
-                    const auto parsed = nlohmann::json::parse(response);
-                    if (parsed.value("type", "") == "answer") std::cerr << "peer=" << peer << " sent answer bytes=" << response.size() << "\n";
-                    if (parsed.value("type", "") == "error") {
-                        ws.write(asio::buffer(response), error);
-                        ws.close(websocket::close_reason(websocket::close_code::policy_error), error);
-                        std::cerr << "peer=" << peer << " disconnected reason=signalling error\n";
-                        break;
+            std::vector<std::vector<std::uint8_t>> outgoing;
+            std::unordered_map<CameraId, std::vector<H264PreviewAccessUnit>> pending;
+            {
+                std::unique_lock lock(mutex_);
+                changed_.wait_for(lock, std::chrono::seconds(1), [&] { return !running_ || generation_ != seen_generation; });
+                seen_generation = generation_;
+                for (const auto& packet : h264_packets_) {
+                    if (!cameras.empty() && std::find(cameras.begin(), cameras.end(), packet.camera) == cameras.end()) continue;
+                    const auto previous = last_sequence.find(packet.camera);
+                    if (previous != last_sequence.end() && packet.sequence <= previous->second) continue;
+                    if (awaiting_keyframe[packet.camera] && !(packet.flags & h264_flag_keyframe)) continue;
+                    auto next = packet;
+                    if (previous == last_sequence.end() && !(packet.flags & h264_flag_keyframe)) { awaiting_keyframe[packet.camera] = true; continue; }
+                    if (previous != last_sequence.end() && packet.sequence > previous->second + 1) { awaiting_keyframe[packet.camera] = true; if (!(packet.flags & h264_flag_keyframe)) continue; }
+                    if (packet.flags & h264_flag_discontinuity) { awaiting_keyframe[packet.camera] = true; if (!(packet.flags & h264_flag_keyframe)) continue; }
+                    awaiting_keyframe[packet.camera] = false;
+                    last_sequence[packet.camera] = packet.sequence;
+                    auto& client_queue = pending[packet.camera];
+                    if (client_queue.size() >= 2) {
+                        client_queue.erase(client_queue.begin());
+                        awaiting_keyframe[packet.camera] = true;
                     }
-                } catch (...) {}
-                ws.write(asio::buffer(response), error);
-                if (error) { std::cerr << "IRIS WebRTC write error: " << error.message() << "\n"; break; }
+                    if (awaiting_keyframe[packet.camera] && !(next.flags & h264_flag_keyframe)) continue;
+                    if (awaiting_keyframe[packet.camera]) { next.flags |= h264_flag_discontinuity; awaiting_keyframe[packet.camera] = false; }
+                    client_queue.push_back(std::move(next));
+                }
+            }
+            for (auto& [camera, packets] : pending) for (auto& packet : packets) outgoing.push_back(encode_h264_preview_access_unit(packet));
+            for (const auto& packet : outgoing) {
+                ws.binary(true);
+                ws.write(asio::buffer(packet), error);
+                if (error) return;
             }
         }
-        std::cerr << "IRIS preview WebRTC session ended\n";
     }
     void set_error(std::string error) { std::scoped_lock lock(mutex_); error_=std::move(error); }
-    std::string bind_; std::uint16_t port_; StatusProvider status_; WebRtcHandlerFactory webrtc_factory_; asio::io_context context_; tcp::acceptor acceptor_; std::atomic_bool running_{false}; std::atomic_uint64_t next_peer_{1}; std::thread accept_thread_; std::mutex session_mutex_; std::vector<std::thread> session_threads_; mutable std::mutex mutex_; std::condition_variable changed_; std::unordered_map<CameraId,std::shared_ptr<const std::vector<std::uint8_t>>> frames_; std::deque<std::string> events_; std::size_t generation_{},clients_{},published_{}; std::string error_;
+    std::string bind_; std::uint16_t port_; StatusProvider status_; asio::io_context context_; tcp::acceptor acceptor_; std::atomic_bool running_{false}; std::thread accept_thread_; std::mutex session_mutex_; std::vector<std::thread> session_threads_; mutable std::mutex mutex_; std::condition_variable changed_; std::unordered_map<CameraId,std::shared_ptr<const std::vector<std::uint8_t>>> frames_; std::deque<std::string> events_; std::deque<H264PreviewAccessUnit> h264_packets_; std::unordered_map<CameraId,H264PreviewStreamConfig> h264_configs_; std::size_t generation_{},clients_{},published_{}; std::string error_;
 };
-PreviewHttpServer::PreviewHttpServer(std::string bind, std::uint16_t port, StatusProvider status, WebRtcHandlerFactory factory):impl_(std::make_unique<Impl>(std::move(bind),port,std::move(status),std::move(factory))){} PreviewHttpServer::~PreviewHttpServer()=default; void PreviewHttpServer::start(){impl_->start();} void PreviewHttpServer::stop() noexcept{impl_->stop();} void PreviewHttpServer::set_frame(CameraId c,std::shared_ptr<const std::vector<std::uint8_t>> j){impl_->set_frame(c,std::move(j));} void PreviewHttpServer::publish_event(std::string e){impl_->event(std::move(e));} PreviewTransportHealth PreviewHttpServer::health()const{return impl_->health();}
+PreviewHttpServer::PreviewHttpServer(std::string bind, std::uint16_t port, StatusProvider status):impl_(std::make_unique<Impl>(std::move(bind),port,std::move(status))){} PreviewHttpServer::~PreviewHttpServer()=default; void PreviewHttpServer::start(){impl_->start();} void PreviewHttpServer::stop() noexcept{impl_->stop();} void PreviewHttpServer::set_frame(CameraId c,std::shared_ptr<const std::vector<std::uint8_t>> j){impl_->set_frame(c,std::move(j));} void PreviewHttpServer::publish_event(std::string e){impl_->event(std::move(e));} void PreviewHttpServer::publish_h264(H264PreviewAccessUnit u){impl_->h264(std::move(u));} void PreviewHttpServer::set_h264_stream_config(H264PreviewStreamConfig c){impl_->h264_config(std::move(c));} PreviewTransportHealth PreviewHttpServer::health()const{return impl_->health();}
 } // namespace iris::output
