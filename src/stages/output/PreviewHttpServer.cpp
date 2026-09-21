@@ -132,7 +132,17 @@ class PreviewHttpServer::Impl {
         std::cerr << "IRIS preview H.264 config streams=" << streams.size() << "\n";
         if (error) return;
         const auto session_id = next_session_id_.fetch_add(1);
-        { std::scoped_lock lock(mutex_); ++clients_; ++h264_clients_; }
+        bool h264_busy = false;
+        { std::scoped_lock lock(mutex_);
+            h264_busy = h264_clients_ != 0;
+            if (!h264_busy) { ++clients_; ++h264_clients_; }
+        }
+        if (h264_busy) {
+            boost::system::error_code busy_error;
+            ws.write(asio::buffer(std::string(R"({"version":1,"type":"error","message":"preview H.264 stream already has an active client"})")), busy_error);
+            std::cerr << "IRIS preview H.264 connection rejected: active client exists\n";
+            return;
+        }
         std::cerr << "IRIS preview H.264 session " << session_id << " opened cameras=" << cameras.size() << "\n";
         struct Guard { Impl* self; ~Guard(){ std::scoped_lock lock(self->mutex_); --self->clients_; --self->h264_clients_; } } guard{this};
         std::atomic_bool peer_closed{false};

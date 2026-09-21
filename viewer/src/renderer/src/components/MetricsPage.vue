@@ -16,7 +16,7 @@ const metricValue = (names: string[]): number | null => {
 }
 const stageTimings = computed(() => {
   const stages = [
-    { name: 'CAPTURE', description: 'Acquire and decode synchronized frames', value: average('iris_capture_capture_to_emit_ms'), tone: 'cyan' },
+    { name: 'CAPTURE', description: 'Latest acquire/decode completion', value: metricValue(['iris_capture_last_capture_to_emit_ms']) ?? average('iris_capture_capture_to_emit_ms'), tone: 'cyan' },
     { name: 'POSE', description: 'Run pose estimation on the packet', value: metricValue(['iris_pose_last_process_ms']) ?? average('iris_pose_process_ms'), tone: 'green' },
     { name: 'OUTPUT', description: 'Deliver the processed packet downstream', value: average('iris_channel_pose_to_output_residence_ms'), tone: 'orange' }
   ]
@@ -26,7 +26,7 @@ const stageTimings = computed(() => {
 const metrics = computed(() => {
   const interval = average('iris_capture_interframe_interval_ms')
   const captureRate = interval && interval > 0 ? 1000 / interval : null
-  const captureLatency = average('iris_capture_capture_to_emit_ms')
+  const captureLatency = metricValue(['iris_capture_last_capture_to_emit_ms']) ?? average('iris_capture_capture_to_emit_ms')
   const decodeSubmit = average('iris_capture_decode_submit_ms')
   const frameAge = metricValue(['iris_capture_last_frame_age_ms'])
   const poseQueue = metricValue(['iris_channel_capture_to_pose_depth'])

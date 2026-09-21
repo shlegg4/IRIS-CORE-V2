@@ -154,8 +154,10 @@ struct CaptureStage::Impl {
                 }
                 result.frame->camera = camera_id;
                 auto now = steady_clock::now();
-                metrics.capture_to_emit_ms.observe(
-                    duration<double, std::milli>(now - estimate.capture_time).count());
+                const auto capture_to_emit_ms =
+                    duration<double, std::milli>(now - estimate.capture_time).count();
+                metrics.capture_to_emit_ms.observe(capture_to_emit_ms);
+                metrics.last_capture_to_emit_ms.set(capture_to_emit_ms);
                 metrics.last_frame_age_ms.set(
                     duration<double, std::milli>(now - estimate.capture_time).count());
                 Packet packet{result.frame->sequence, FrameBatch{std::move(*result.frame)},

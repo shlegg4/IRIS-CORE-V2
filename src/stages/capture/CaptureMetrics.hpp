@@ -8,7 +8,7 @@ struct CaptureMetrics {
         decode_exceptions, source_errors, timestamp_regressions, clock_resets, pool_exhaustions,
         rotation_frames, rotation_failures, rotation_pool_exhaustions;
     infrastructure::metrics::Gauge up, pool_available, clock_drift_ppm, clock_residual_us,
-        last_frame_age_ms, rotation_degrees, rotation_pool_available;
+        last_frame_age_ms, last_capture_to_emit_ms, rotation_degrees, rotation_pool_available;
     infrastructure::metrics::Histogram interframe_ms, queue_wait_ms, decode_submit_ms,
         capture_to_emit_ms, rotation_submit_ms;
     explicit CaptureMetrics(infrastructure::metrics::MetricRegistry& r,
@@ -32,6 +32,7 @@ struct CaptureMetrics {
           clock_drift_ppm(r.gauge(prefix + "_clock_drift_ppm")),
           clock_residual_us(r.gauge(prefix + "_clock_residual_us")),
           last_frame_age_ms(r.gauge(prefix + "_last_frame_age_ms")),
+          last_capture_to_emit_ms(r.gauge(prefix + "_last_capture_to_emit_ms")),
           rotation_degrees(r.gauge(prefix + "_rotation_degrees")),
           rotation_pool_available(r.gauge(prefix + "_rotation_pool_available")),
           interframe_ms(r.histogram(prefix + "_interframe_interval_ms",
