@@ -251,6 +251,7 @@ void MediaFoundationSource::on_sample(HRESULT status, DWORD flags, LONGLONG ts, 
     if (FAILED(b->Lock(&p, nullptr, &len))) {
         return;
     }
+    const auto copy_begin = std::chrono::steady_clock::now();
     CaptureSample out;
     out.camera = camera_;
     out.sequence = sequence_++;
@@ -259,6 +260,7 @@ void MediaFoundationSource::on_sample(HRESULT status, DWORD flags, LONGLONG ts, 
     out.extent = format_.extent;
     out.source_timestamp = std::chrono::nanoseconds(ts * 100);
     out.host_arrival = std::chrono::steady_clock::now();
+    out.host_copy_ms = std::chrono::duration<double, std::milli>(out.host_arrival - copy_begin).count();
     out.discontinuity = (flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) != 0;
     b->Unlock();
     {

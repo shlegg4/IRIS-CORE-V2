@@ -9,8 +9,10 @@ struct CaptureMetrics {
         rotation_frames, rotation_failures, rotation_pool_exhaustions;
     infrastructure::metrics::Gauge up, pool_available, clock_drift_ppm, clock_residual_us,
         last_frame_age_ms, last_capture_to_emit_ms, rotation_degrees, rotation_pool_available;
-    infrastructure::metrics::Histogram interframe_ms, queue_wait_ms, decode_submit_ms,
-        capture_to_emit_ms, rotation_submit_ms;
+    infrastructure::metrics::Histogram interframe_ms, queue_wait_ms, sample_copy_ms,
+        decode_submit_ms, decode_header_ms, decode_gpu_submit_ms, nvjpeg_host_ms,
+        nvjpeg_device_ms, capture_to_emit_ms,
+        rotation_submit_ms;
     explicit CaptureMetrics(infrastructure::metrics::MetricRegistry& r,
                             const std::string& prefix = "iris_capture")
         : samples_received(r.counter(prefix + "_samples_received_total")),
@@ -38,8 +40,13 @@ struct CaptureMetrics {
           interframe_ms(r.histogram(prefix + "_interframe_interval_ms",
                                     {5, 10, 16.7, 20, 33.4, 40, 50, 100})),
           queue_wait_ms(r.histogram(prefix + "_queue_wait_ms", {0.1, 0.25, 0.5, 1, 2, 5, 10, 20})),
+          sample_copy_ms(r.histogram(prefix + "_sample_copy_ms", {0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5})),
           decode_submit_ms(
               r.histogram(prefix + "_decode_submit_ms", {0.1, 0.25, 0.5, 1, 2, 5, 10})),
+          decode_header_ms(r.histogram(prefix + "_decode_header_ms", {0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5})),
+          decode_gpu_submit_ms(r.histogram(prefix + "_decode_gpu_submit_ms", {0.1, 0.25, 0.5, 1, 2, 5, 10})),
+          nvjpeg_host_ms(r.histogram(prefix + "_nvjpeg_host_decode_ms", {0.1, 0.25, 0.5, 1, 2, 5, 10})),
+          nvjpeg_device_ms(r.histogram(prefix + "_nvjpeg_device_decode_ms", {0.1, 0.25, 0.5, 1, 2, 5, 10})),
           capture_to_emit_ms(
               r.histogram(prefix + "_capture_to_emit_ms", {1, 2, 5, 10, 16.7, 33.4, 50, 100})),
           rotation_submit_ms(

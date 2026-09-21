@@ -133,6 +133,13 @@ if(WIN32)
   endif()
 endif()
 if(IRIS_BUILD_TOOLS)
+  add_executable(iris_decode_benchmark tools/decode_benchmark.cpp
+    src/stages/capture/media_foundation/MediaFoundationSource.cpp)
+  target_compile_features(iris_decode_benchmark PRIVATE cxx_std_20)
+  target_compile_definitions(iris_decode_benchmark PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_include_directories(iris_decode_benchmark PRIVATE include src)
+  target_link_libraries(iris_decode_benchmark PRIVATE CUDA::cudart CUDA::nvjpeg
+    windowscodecs mf mfplat mfreadwrite mfuuid ole32 strmiids)
   include(CTest)
   add_executable(iris_list_cameras tools/list_cameras.cpp)
   target_link_libraries(iris_list_cameras PRIVATE iris::iris)

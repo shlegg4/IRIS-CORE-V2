@@ -1,6 +1,7 @@
 #pragma once
 #include "iris/pipeline/Frame.hpp"
 #include <cstdint>
+#include <chrono>
 #include <vector>
 namespace iris::capture {
 struct CaptureSample {
@@ -11,6 +12,7 @@ struct CaptureSample {
     Extent2D extent{};
     std::chrono::nanoseconds source_timestamp{};
     MonotonicTime host_arrival{};
+    double host_copy_ms{};
     bool discontinuity{};
 };
 } // namespace iris::capture

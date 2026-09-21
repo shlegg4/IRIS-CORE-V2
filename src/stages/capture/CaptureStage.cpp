@@ -96,6 +96,7 @@ struct CaptureStage::Impl {
                 auto received = steady_clock::now();
                 metrics.queue_wait_ms.observe(
                     duration<double, std::milli>(received - sample->host_arrival).count());
+                metrics.sample_copy_ms.observe(sample->host_copy_ms);
                 const bool discontinuity =
                     sample->discontinuity || reset_clock_after_reconnect.exchange(false);
                 auto estimate =
@@ -118,6 +119,18 @@ struct CaptureStage::Impl {
                 auto result = decoder->decode(*sample, timing);
                 metrics.decode_submit_ms.observe(
                     duration<double, std::milli>(steady_clock::now() - begin).count());
+                if (result.header_parse_ms > 0) {
+                    metrics.decode_header_ms.observe(result.header_parse_ms);
+                }
+                if (result.gpu_submit_ms > 0) {
+                    metrics.decode_gpu_submit_ms.observe(result.gpu_submit_ms);
+                }
+                if (result.nvjpeg_host_ms > 0) {
+                    metrics.nvjpeg_host_ms.observe(result.nvjpeg_host_ms);
+                }
+                if (result.nvjpeg_device_ms > 0) {
+                    metrics.nvjpeg_device_ms.observe(result.nvjpeg_device_ms);
+                }
                 metrics.pool_available.set(static_cast<double>(decoder->pool_available()));
                 metrics.rotation_pool_available.set(
                     static_cast<double>(decoder->rotation_pool_available()));
