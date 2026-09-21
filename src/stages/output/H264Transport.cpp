@@ -110,7 +110,39 @@ class H264Transport::Impl {
     void publish(PreviewPacket packet) noexcept { if (!running) return; const auto result = queue.send(std::move(packet)); if (result != SendResult::Sent) ++dropped; }
     PreviewTransportHealth health() const { std::scoped_lock lock(mutex); return {config.enabled, clients, published, dropped, error, "H264/NVENC", 0, 0}; }
   private:
-    void run() noexcept { while (auto packet = queue.receive()) for (const auto& frame : (*packet)->frames) try { if (frame.format != PixelFormat::Bgr8 || !frame.buffer.data) continue; auto& encoder = encoders[frame.camera]; if (!encoder) encoder = std::make_unique<Encoder>(); const bool was_open = encoder->codec != nullptr; auto encoded = encoder->encode(frame, config.max_fps, config.bitrate, config.max_width); if (!was_open && encoder->codec) { H264PreviewStreamConfig stream; stream.camera = frame.camera; stream.width = encoder->width; stream.height = encoder->height; stream.fps = encoder->fps; stream.codec = "avc1.42E01E"; if (encoder->codec->extradata && encoder->codec->extradata_size > 0) { std::vector<std::uint8_t> extradata(encoder->codec->extradata, encoder->codec->extradata + encoder->codec->extradata_size); stream.description = to_avcc_description(extradata); } server.set_h264_stream_config(std::move(stream)); } for (auto& [payload, key] : encoded) { H264PreviewAccessUnit unit; unit.flags = key ? h264_flag_keyframe : 0; unit.camera = frame.camera; unit.sequence = frame.sequence; unit.timestamp_us = static_cast<std::uint64_t>(frame.timing.source_time.count() / 1000); unit.payload = std::move(payload); server.publish_h264(std::move(unit)); ++published; } } catch (const std::exception& exception) { std::scoped_lock lock(mutex); error = exception.what(); ++dropped; std::cerr << "IRIS H.264 preview error: " << exception.what() << "\n"; } }
+    void run() noexcept {
+        while (auto packet = queue.receive()) {
+            for (const auto& frame : (*packet)->frames) try {
+                if (frame.format != PixelFormat::Bgr8 || !frame.buffer.data) continue;
+                auto& encoder = encoders[frame.camera];
+                const auto target_width = frame.extent.width > config.max_width ? (config.max_width & ~1U) : (frame.extent.width & ~1U);
+                const auto target_height = static_cast<std::uint32_t>((static_cast<std::uint64_t>(frame.extent.height) * target_width / frame.extent.width) & ~1ULL);
+                if (encoder && (encoder->width != target_width || encoder->height != target_height)) encoder.reset();
+                if (!encoder) encoder = std::make_unique<Encoder>();
+                const bool was_open = encoder->codec != nullptr;
+                auto encoded = encoder->encode(frame, config.max_fps, config.bitrate, config.max_width);
+                if (!was_open && encoder->codec) {
+                    H264PreviewStreamConfig stream;
+                    stream.camera = frame.camera; stream.width = encoder->width; stream.height = encoder->height;
+                    stream.fps = encoder->fps; stream.codec = "avc1.42E01E";
+                    if (encoder->codec->extradata && encoder->codec->extradata_size > 0) {
+                        std::vector<std::uint8_t> extradata(encoder->codec->extradata, encoder->codec->extradata + encoder->codec->extradata_size);
+                        stream.description = to_avcc_description(extradata);
+                    }
+                    server.set_h264_stream_config(std::move(stream));
+                }
+                for (auto& [payload, key] : encoded) {
+                    H264PreviewAccessUnit unit;
+                    unit.flags = key ? h264_flag_keyframe : 0; unit.camera = frame.camera; unit.sequence = frame.sequence;
+                    unit.timestamp_us = static_cast<std::uint64_t>(frame.timing.source_time.count() / 1000);
+                    unit.payload = std::move(payload); server.publish_h264(std::move(unit)); ++published;
+                }
+            } catch (const std::exception& exception) {
+                std::scoped_lock lock(mutex); error = exception.what(); ++dropped;
+                std::cerr << "IRIS H.264 preview error: " << exception.what() << "\n";
+            }
+        }
+    }
     H264PreviewConfig config; PreviewHttpServer& server; Channel<PreviewPacket> queue; std::atomic_bool running{false}; std::thread worker; mutable std::mutex mutex; std::unordered_map<CameraId, std::unique_ptr<Encoder>> encoders; std::size_t published{}, dropped{}, clients{}; std::string error;
 };
 H264Transport::H264Transport(H264PreviewConfig config, PreviewHttpServer& server) : impl_(std::make_unique<Impl>(std::move(config), server)) {}
