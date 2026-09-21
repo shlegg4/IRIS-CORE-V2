@@ -4,7 +4,7 @@
     {
       "label": "IRIS: install dependencies",
       "type": "shell",
-      "command": "call \"C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\Common7\\Tools\\VsDevCmd.bat\" -arch=x64 && powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\\ensure-gstreamer-dev.ps1 && set VCPKG_ROOT=C:\\vcpkg && C:\\vcpkg\\vcpkg.exe install --triplet x64-windows --overlay-triplets vcpkg-triplets --x-manifest-root . --x-install-root vcpkg_installed",
+      "command": "call \"C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\Common7\\Tools\\VsDevCmd.bat\" -arch=x64 && set VCPKG_ROOT=C:\\vcpkg && C:\\vcpkg\\vcpkg.exe install --triplet x64-windows --overlay-triplets vcpkg-triplets --x-manifest-root . --x-install-root vcpkg_installed",
       "options": {
         "shell": {
           "executable": "C:\\Windows\\System32\\cmd.exe",
