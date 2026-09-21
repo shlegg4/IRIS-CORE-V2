@@ -110,7 +110,7 @@ class H264Transport::Impl {
     void start() { if (running.exchange(true)) return; worker = std::thread([this] { run(); }); }
     void stop() noexcept { if (running.exchange(false)) queue.close(); if (worker.joinable()) worker.join(); }
     void publish(PreviewPacket packet) noexcept { if (!running) return; const auto result = queue.send(std::move(packet)); if (result != SendResult::Sent) ++dropped; }
-    PreviewTransportHealth health() const { std::scoped_lock lock(mutex); return {config.enabled, clients, published, dropped, error, "H264/NVENC", 0, 0}; }
+    PreviewTransportHealth health() const { std::scoped_lock lock(mutex); return {config.enabled, clients, 0, clients, 0, published, dropped, error, "H264/NVENC", 0, 0}; }
   private:
     void run() noexcept {
         while (auto packet = queue.receive()) {

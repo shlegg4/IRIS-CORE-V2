@@ -99,6 +99,9 @@ struct RuntimeSnapshot {
         std::size_t published_packets{};
         std::size_t dropped_packets{};
         std::size_t connected_clients{};
+        std::size_t event_clients{};
+        std::size_t h264_clients{};
+        std::size_t mjpeg_clients{};
         std::string last_error;
     } preview;
     std::size_t processed_packets{};

@@ -342,6 +342,9 @@ class Runtime::Impl {
                       ",\"last_error\":" + json_quote(current.preview.last_error) +
                       ",\"h264\":{\"enabled\":" + (preview_config_.h264.enabled ? "true" : "false") +
                       ",\"connected_clients\":" + std::to_string(current.preview.connected_clients) +
+                      ",\"event_clients\":" + std::to_string(current.preview.event_clients) +
+                      ",\"h264_clients\":" + std::to_string(current.preview.h264_clients) +
+                      ",\"mjpeg_clients\":" + std::to_string(current.preview.mjpeg_clients) +
                       ",\"published_packets\":" + std::to_string(current.preview.published_packets) +
                       ",\"dropped_packets\":" + std::to_string(current.preview.dropped_packets) +
                       ",\"last_error\":" + json_quote(current.preview.last_error) +
@@ -747,6 +750,9 @@ class Runtime::Impl {
             result.preview.published_packets = preview.published_packets;
             result.preview.dropped_packets = preview.dropped_packets;
             result.preview.connected_clients = preview.connected_clients;
+            result.preview.event_clients = preview.event_clients;
+            result.preview.h264_clients = preview.h264_clients;
+            result.preview.mjpeg_clients = preview.mjpeg_clients;
             result.preview.last_error = preview.last_error;
         }
         result.processed_packets = pipeline_ ? pipeline_->processed_count() : 0;

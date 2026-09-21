@@ -142,7 +142,10 @@ void print_snapshot(const RuntimeSnapshot& snapshot, std::ostream& output) {
            << " " << snapshot.preview.bind_address << ':' << snapshot.preview.port
            << " published=" << snapshot.preview.published_packets
            << " dropped=" << snapshot.preview.dropped_packets
-           << " clients=" << snapshot.preview.connected_clients;
+           << " clients=" << snapshot.preview.connected_clients
+           << " (events=" << snapshot.preview.event_clients
+           << " h264=" << snapshot.preview.h264_clients
+           << " mjpeg=" << snapshot.preview.mjpeg_clients << ")";
     if (!snapshot.preview.last_error.empty()) output << " error=" << snapshot.preview.last_error;
     output << '\n';
     output << "cameras:   " << snapshot.cameras.size() << '\n';
