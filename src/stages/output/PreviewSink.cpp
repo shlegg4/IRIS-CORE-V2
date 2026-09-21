@@ -72,7 +72,19 @@ std::string pose_event(std::uint64_t sequence, const std::array<std::array<float
 }
 std::string pose_event(const Packet&, const Pose& pose) { std::array<bool,panoptic_joint_count> valid{}; for(std::size_t i=0;i<valid.size();++i)valid[i]=pose.joint_confidence[i]>0.0F; return pose_event(pose.source_sequence,pose.joints_3d_mm,valid); }
 std::string multiview_pose_event(const Packet& packet) {
-    std::ostringstream out; out << "{\"version\":1,\"type\":\"pose\",\"data\":{\"sequence\":" << packet.sequence << ",\"views\":[";
+    const auto* pose3d = packet.multiview_poses && !packet.multiview_poses->empty() ? &(*packet.multiview_poses)[0] : nullptr;
+    std::ostringstream out; out << "{\"version\":1,\"type\":\"pose\",\"data\":{\"sequence\":" << packet.sequence << ",\"joints3d\":[";
+    for (std::size_t joint = 0; joint < coco_joint_count; ++joint) {
+        if (joint) out << ',';
+        const auto& value = pose3d ? pose3d->joints_3d[joint] : std::array<float, 3>{};
+        out << '[' << value[0] << ',' << value[1] << ',' << value[2] << ']';
+    }
+    out << "],\"valid\":[";
+    for (std::size_t joint = 0; joint < coco_joint_count; ++joint) {
+        if (joint) out << ',';
+        out << (pose3d && pose3d->joint_valid[joint] ? "true" : "false");
+    }
+    out << "],\"views\":[";
     bool first=true; std::size_t id=0;
     if(packet.multiview_poses)for(const auto& pose:*packet.multiview_poses){
         if(!pose.active){++id;continue;}

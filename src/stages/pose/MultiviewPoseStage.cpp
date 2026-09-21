@@ -16,6 +16,9 @@
 #endif
 
 namespace iris {
+namespace {
+constexpr float keypoint_confidence_threshold = 0.1F;
+}
 
 class MultiviewPoseStage::Impl {
   public:
@@ -110,7 +113,11 @@ class MultiviewPoseStage::Impl {
                 const auto score_index = (view * 10 + candidate) * 17 + joint;
                 const float score = result.keypoint_scores[score_index];
                 pose.joint_scores[view][joint] = score;
-                if (!std::isfinite(score) || score <= 0.0F) continue;
+                // RTMO emits small positive scores for effectively absent joints.
+                // Treating every positive value as an observation lets a single
+                // reliable view triangulate against noise from another camera,
+                // producing a coherent-looking skeleton in the wrong location.
+                if (!std::isfinite(score) || score < keypoint_confidence_threshold) continue;
 
                 const auto point_index = score_index * 2;
                 const float x = result.keypoints[point_index];
@@ -179,23 +186,20 @@ class MultiviewPoseStage::Impl {
         if (rig->cameras.size()!=3) throw std::runtime_error("multiview pose requires a three-camera runtime calibration");
         for (std::size_t i = 0; i < 3; ++i) {
             const auto& source = rig->cameras[i];
-            auto previous = std::ranges::find(
-                config_.multiview_calibration, source.camera_id,
-                &PoseConfig::CameraCalibration::camera_id);
-            const auto source_extent = previous == config_.multiview_calibration.end()
-                ? Extent2D{} : previous->source_extent;
-            const auto image_rotation_degrees = previous == config_.multiview_calibration.end()
-                ? 0 : previous->image_rotation_degrees;
             auto& target = config_.multiview_calibration[i];
             target.camera_id = source.camera_id;
             target.intrinsics = source.intrinsics;
             target.distortion = source.distortion;
             target.R_w2c = source.R_w2c;
             target.t_w2c = source.t_w2c;
-            target.source_extent = source_extent;
-            target.image_rotation_degrees = image_rotation_degrees;
+            // RigCalibrationTool observes frames after CaptureStage has applied
+            // its configured rotation.  The stored calibration is therefore
+            // already expressed in the inference image coordinate system.
+            // Applying capture rotation here again would rotate K and [R|t]
+            // twice and make triangulation disagree with the viewer snapshot.
+            target.source_extent = {};
+            target.image_rotation_degrees = 0;
             target.calibrated = true;
-            apply_capture_rotation(target);
         }
         calibration_revision_=rig->revision;
 #ifdef IRIS_HAS_TENSORRT

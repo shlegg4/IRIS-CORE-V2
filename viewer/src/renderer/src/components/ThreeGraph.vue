@@ -28,6 +28,15 @@ onMounted(() => {
   const grid = new THREE.GridHelper(4, 16, 0x2b666d, 0x163439)
   const poseGroup = new THREE.Group(), cameraGroup = new THREE.Group()
   scene.add(grid, poseGroup, cameraGroup)
+  const rigCenter = new THREE.Vector3()
+  let rigScale = 1
+
+  const normalizePoint = (point: THREE.Vector3): THREE.Vector3 => point.sub(rigCenter).multiplyScalar(rigScale)
+  const cameraCenter = (r: number[], t: number[]): THREE.Vector3 => toScene([
+    -(r[0]*t[0]+r[3]*t[1]+r[6]*t[2]),
+    -(r[1]*t[0]+r[4]*t[1]+r[7]*t[2]),
+    -(r[2]*t[0]+r[5]*t[1]+r[8]*t[2])
+  ])
 
   const disposeGroup = (group: THREE.Group): void => {
     for (const child of [...group.children]) {
@@ -45,7 +54,7 @@ onMounted(() => {
       const incoming = person.joints ?? person.joints3d ?? person.joints_3d
       if (!incoming || incoming.length < 17) return
       const valid = person.valid ?? person.jointValid ?? incoming.map(() => true)
-      const points = incoming.map(toScene), color = colors[personIndex % colors.length]
+      const points = incoming.map((point) => normalizePoint(toScene(point))), color = colors[personIndex % colors.length]
       const linePoints = links.filter(([a,b]) => valid[a] !== false && valid[b] !== false).flatMap(([a,b]) => [points[a], points[b]])
       if (linePoints.length) poseGroup.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(linePoints), new THREE.LineBasicMaterial({ color })))
       points.forEach((point, index) => {
@@ -57,10 +66,23 @@ onMounted(() => {
   }
   const updateCameras = (): void => {
     disposeGroup(cameraGroup)
-    for (const calibration of props.calibration?.cameras ?? []) {
+    const calibrated = (props.calibration?.cameras ?? []).flatMap((calibration) => {
       const r = calibration.R_w2c, t = calibration.t_w2c
-      if (r.length < 9 || t.length < 3) continue
-      const center = toScene([-(r[0]*t[0]+r[3]*t[1]+r[6]*t[2]), -(r[1]*t[0]+r[4]*t[1]+r[7]*t[2]), -(r[2]*t[0]+r[5]*t[1]+r[8]*t[2])])
+      return r.length < 9 || t.length < 3 ? [] : [{ r, center: cameraCenter(r, t) }]
+    })
+    if (calibrated.length > 1) {
+      const bounds = new THREE.Box3().setFromPoints(calibrated.map(({ center }) => center))
+      bounds.getCenter(rigCenter)
+      const size = bounds.getSize(new THREE.Vector3())
+      const span = Math.max(size.x, size.y, size.z)
+      // The grid is four scene units wide; make the rig occupy roughly 70% of it.
+      rigScale = span > 1e-6 ? 2.8 / span : 1
+    } else {
+      rigCenter.set(0, 0, 0)
+      rigScale = 1
+    }
+    for (const { r, center: sourceCenter } of calibrated) {
+      const center = normalizePoint(sourceCenter.clone())
       const direction = toScene([r[6], r[7], r[8]]).normalize()
       const viewCamera = new THREE.PerspectiveCamera(45, 1, 0.05, 0.35)
       viewCamera.position.copy(center); viewCamera.lookAt(center.clone().add(direction)); viewCamera.updateMatrixWorld()
@@ -68,8 +90,9 @@ onMounted(() => {
       frustum.setColors(new THREE.Color(0xffb86b), new THREE.Color(0xff7b72), new THREE.Color(0xffd166), new THREE.Color(0xffb86b), new THREE.Color(0xffb86b))
       cameraGroup.add(frustum)
     }
+    updatePoses()
   }
-  updatePoses(); updateCameras()
+  updateCameras()
   const stopPoseWatch = watch(() => props.pose, updatePoses, { deep: true })
   const stopCalibrationWatch = watch(() => props.calibration, updateCameras, { deep: true })
   const resize = (): void => {
