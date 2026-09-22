@@ -2,55 +2,776 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import type { CameraStatus, RuntimeStatus } from '../types/iris'
 const props = defineProps<{ status: RuntimeStatus }>()
-const playing = ref(true), fatalError = ref(''), failed = ref(new Set<number>()), fps = ref(new Map<number, number>())
-const cameras = computed<CameraStatus[]>(() => (props.status.cameras ?? []).map((camera) => ({ ...camera, fps: camera.fps ?? camera.frame_rate?.value ?? (camera.frame_rate ? camera.frame_rate.numerator / camera.frame_rate.denominator : 0) }))), port = computed(() => props.status.preview?.port || 8080)
-  type OverlayPerson = { personId:number; points:number[][]; scores:number[]; valid:boolean[] }
-  type Overlay = { sequence:number; frameSequence:number; width:number; height:number; people:OverlayPerson[] }
-const canvases = new Map<number, HTMLCanvasElement>(), decoders = new Map<number, VideoDecoder>(), decoderConfigs = new Map<number, VideoDecoderConfig>(); const overlays = new Map<number, Overlay>(), pendingVideoSequences = new Map<number, Map<number, number>>(); const sequenceDeltas = ref(new Map<number, number>()), sequenceHistories = ref(new Map<number, number[]>()); const sequenceHistoryLimit=180; type TransportState='stopped'|'connecting'|'connected'|'closing'; let socket: WebSocket|undefined, eventsSocket: WebSocket|undefined, timer: number|undefined, eventsTimer: number|undefined, fpsTimer: number|undefined, retryDelay=1000, transportState:TransportState='stopped', generation = 0, eventsGeneration = 0, mounted = false, last = new Map<number, number>(), awaitingKeyframe = new Set<number>(), decodeBacklogStreak = new Map<number, number>()
-function setCanvas(id:number, value:unknown):void { if(value instanceof HTMLCanvasElement) canvases.set(id,value); else canvases.delete(id) }
-function disposeDecoder(id:number, decoder:VideoDecoder):void { if(decoders.get(id)!==decoder)return; decoders.delete(id); if(decoder.state!=='closed')try{decoder.close()}catch{} }
-function closeDecoders():void { for(const [id,decoder] of decoders)disposeDecoder(id,decoder); decoderConfigs.clear(); awaitingKeyframe.clear(); decodeBacklogStreak.clear(); overlays.clear(); pendingVideoSequences.clear(); sequenceDeltas.value=new Map(); sequenceHistories.value=new Map() }
-function resetDecoder(id:number, decoder:VideoDecoder):void { const config=decoderConfigs.get(id); if(!config||decoders.get(id)!==decoder)return; try{decoder.reset();decoder.configure(config)}catch{disposeDecoder(id,decoder)} pendingVideoSequences.get(id)?.clear(); awaitingKeyframe.add(id) }
-const confidenceThreshold = 0.05
-const confidenceRevision = ref(0)
-function confidenceStats(id:number):{bins:number[]; count:number; average:number; maximum:number} { void confidenceRevision.value; const scores:number[]=[]; const overlay=overlays.get(id); for(const person of overlay?.people??[]) for(let i=0;i<person.scores.length;i++) if(person.valid[i] && Number.isFinite(person.scores[i])) scores.push(Math.max(0,Math.min(1,person.scores[i]))); const bins=Array.from({length:10},()=>0); for(const score of scores)bins[Math.min(9,Math.floor(score*10))]++; return {bins,count:scores.length,average:scores.length?scores.reduce((a,b)=>a+b,0)/scores.length:0,maximum:scores.length?Math.max(...scores):0} }
-const skeleton:ReadonlyArray<readonly [number,number]> = [[5,6],[5,11],[6,12],[11,12],[5,7],[7,9],[6,8],[8,10],[11,13],[13,15],[12,14],[14,16]]
-function drawOverlay(context:CanvasRenderingContext2D, id:number, videoSequence:number|undefined):void { const overlay=overlays.get(id); if(!overlay)return; if(videoSequence!==undefined){const delta=overlay.frameSequence-videoSequence;const next=new Map(sequenceDeltas.value);next.set(id,delta);sequenceDeltas.value=next;const histories=new Map(sequenceHistories.value), history=[...(histories.get(id)??[]),delta].slice(-sequenceHistoryLimit);histories.set(id,history);sequenceHistories.value=histories} const scaleX=context.canvas.width/overlay.width, scaleY=context.canvas.height/overlay.height; context.save(); context.lineWidth=Math.max(2,context.canvas.width/500); overlay.people.forEach((person,personIndex)=>{const color=['#70e3e0','#ffb86b','#bd93f9','#50fa7b','#ff79c6','#f1fa8c'][personIndex%6];const visible=(index:number)=>person.valid[index]&&person.scores[index]>=confidenceThreshold; context.strokeStyle=color; for(const [a,b] of skeleton){if(!visible(a)||!visible(b))continue;context.beginPath();context.moveTo(person.points[a][0]*scaleX,person.points[a][1]*scaleY);context.lineTo(person.points[b][0]*scaleX,person.points[b][1]*scaleY);context.stroke()} context.fillStyle=color; for(let i=0;i<person.points.length;i++){if(!visible(i))continue;context.beginPath();context.arc(person.points[i][0]*scaleX,person.points[i][1]*scaleY,Math.max(3,context.canvas.width/240),0,Math.PI*2);context.fill()}}); context.restore() }
-function sequenceRange(id:number):{low:number;high:number}{const values=sequenceHistories.value.get(id)??[0];return{low:Math.min(0,...values),high:Math.max(0,...values)}}
-function sequenceChartPoints(id:number):string{const values=sequenceHistories.value.get(id)??[];if(!values.length)return'';const {low,high}=sequenceRange(id),range=high-low||1;return values.map((value,index)=>`${(index/Math.max(1,values.length-1))*100},${48-((value-low)/range)*44}`).join(' ')}
-function sequenceZeroY(id:number):number{const {low,high}=sequenceRange(id);return 48-((0-low)/(high-low||1))*44}
-function connectEvents():void { if(!mounted||!playing.value)return; eventsSocket?.close(); const current=++eventsGeneration; const ws=new WebSocket(`ws://127.0.0.1:${port.value}/api/events`); eventsSocket=ws; ws.onmessage=(event)=>{if(current!==eventsGeneration)return;try{const message=JSON.parse(event.data);if(message.type!=='pose')return;const views=message.data?.views||[],present=new Set<number>(),nextOverlays=new Map<number,Overlay>();for(const view of views){present.add(view.camera_id);const overlay:Overlay=nextOverlays.get(view.camera_id)??{sequence:message.data.sequence,frameSequence:view.frame_sequence,width:view.width,height:view.height,people:[]};overlay.people.push({personId:view.person_id??overlay.people.length,points:view.points,scores:view.scores,valid:view.valid});nextOverlays.set(view.camera_id,overlay)}for(const [camera,overlay] of nextOverlays)overlays.set(camera,overlay);const deltas=new Map(sequenceDeltas.value);for(const camera of overlays.keys())if(!present.has(camera)){overlays.delete(camera);deltas.delete(camera)}sequenceDeltas.value=deltas;confidenceRevision.value++}catch{}}; ws.onclose=()=>{if(mounted&&playing.value&&current===eventsGeneration&&!eventsTimer)eventsTimer=window.setTimeout(()=>{eventsTimer=undefined;connectEvents()},1000)} }
-function retry():void { if(!mounted||!playing.value||timer) return; const delay=retryDelay; retryDelay=Math.min(8000,retryDelay*2); timer=window.setTimeout(()=>{timer=undefined;if(mounted&&playing.value)connect()},delay) }
-function connect():void {
-  if(!mounted||!playing.value || !cameras.value.length) return; if(transportState==='connecting'||transportState==='connected') return; transportState='connecting'; const current=++generation; if(socket && socket.readyState!==WebSocket.CLOSED){transportState='closing';socket.close();transportState='connecting'} closeDecoders(); fatalError.value=''
-  const ws=new WebSocket(`ws://127.0.0.1:${port.value}/api/preview/stream`); ws.binaryType='arraybuffer'; socket=ws
-  ws.onopen=()=>{if(current!==generation){ws.close();return} transportState='connected';console.info('[preview] websocket open');retryDelay=1000;ws.send(JSON.stringify({version:1,type:'hello',cameras:cameras.value.map(camera=>camera.camera_id)}))}
-  ws.onmessage=(event)=>{
-    if(current!==generation) return
-    if(typeof event.data==='string') { try {
-      const message=JSON.parse(event.data) as {type:string;message?:string;streams?:Array<{camera_id:number;width?:number;height?:number;codec?:string;description?:string}>};
-      console.info('[preview] message',message.type,message);
-      if(message.type==='error'){fatalError.value=message.message||'Preview connection failed';retry();return}
-      if(message.type==='config') for(const stream of message.streams||[]){
-        const canvas=canvases.get(stream.camera_id), context=canvas?.getContext('2d');
-        if(!canvas||!context||!('VideoDecoder' in window)) throw new Error('WebCodecs VideoDecoder is unavailable');
-        const id=stream.camera_id; const codec=stream.codec||'avc1.42E01E';
-        const decoder=new VideoDecoder({output:(frame)=>{
-          const width=frame.codedWidth, height=frame.codedHeight;
-          if(canvas.width!==width||canvas.height!==height){canvas.width=width;canvas.height=height}
-          const videoSequence=pendingVideoSequences.get(id)?.get(frame.timestamp);pendingVideoSequences.get(id)?.delete(frame.timestamp);context.drawImage(frame,0,0,canvas.width,canvas.height);drawOverlay(context,id,videoSequence);frame.close();last.set(id,performance.now())
-        },error:(error)=>{console.error('[preview] decoder error',id,error);if(current===generation&&decoders.get(id)===decoder){failed.value=new Set(failed.value).add(id);const recovery=decoderConfigs.get(id);try{if(!recovery)throw new Error('missing decoder configuration');decoder.reset();decoder.configure(recovery);pendingVideoSequences.get(id)?.clear();awaitingKeyframe.add(id)}catch{disposeDecoder(id,decoder);decoderConfigs.delete(id);awaitingKeyframe.add(id)}}}});
-        console.info('[preview] configuring decoder',id,codec,stream.width,stream.height);
-        const config:VideoDecoderConfig={codec,description:stream.description?Uint8Array.from(atob(stream.description),c=>c.charCodeAt(0)):undefined}; decoder.configure(config); decoders.set(id,decoder); decoderConfigs.set(id,config)
-      }
-    } catch(error) { console.error('[preview] message/configuration error',error); fatalError.value='Preview decoder configuration failed'; retry() } return }
-    const data=new Uint8Array(event.data as ArrayBuffer); if(data.length<32||String.fromCharCode(...data.slice(0,4))!=='IRWS') return; const view=new DataView(data.buffer,data.byteOffset,data.byteLength), camera=view.getUint32(8,true), sequence=Number(view.getBigUint64(12,true)), timestamp=Number(view.getBigUint64(20,true)), flags=view.getUint16(6,true), length=view.getUint32(28,true), decoder=decoders.get(camera); if(!decoder||length+32>data.length||!playing.value)return; const backlog=decoder.decodeQueueSize>24?(decodeBacklogStreak.get(camera)??0)+1:0; decodeBacklogStreak.set(camera,backlog); if(backlog>=10){resetDecoder(camera,decoder);decodeBacklogStreak.set(camera,0);return} if(flags&2){awaitingKeyframe.add(camera);if(!(flags&1))return} if(awaitingKeyframe.has(camera)&&!(flags&1))return; if(flags&1)awaitingKeyframe.delete(camera); if(decoders.get(camera)!==decoder||decoder.state==='closed')return; try{let pending=pendingVideoSequences.get(camera);if(!pending){pending=new Map();pendingVideoSequences.set(camera,pending)}pending.set(timestamp,sequence);while(pending.size>32)pending.delete(pending.keys().next().value as number);decoder.decode(new EncodedVideoChunk({type:(flags&1)?'key':'delta',timestamp,data:data.slice(32,32+length)}))}catch{pendingVideoSequences.get(camera)?.delete(timestamp);if(current===generation&&decoders.get(camera)===decoder){resetDecoder(camera,decoder)}}
-  }
-  ws.onerror=()=>{console.error('[preview] websocket error');fatalError.value='Preview WebSocket unavailable';retry()}; ws.onclose=()=>{console.warn('[preview] websocket closed');if(current===generation){transportState='stopped';retry()}}
+const playing = ref(true),
+  fatalError = ref(''),
+  failed = ref(new Set<number>()),
+  fps = ref(new Map<number, number>())
+const cameras = computed<CameraStatus[]>(() =>
+    (props.status.cameras ?? []).map((camera) => ({
+      ...camera,
+      fps:
+        camera.fps ??
+        camera.frame_rate?.value ??
+        (camera.frame_rate ? camera.frame_rate.numerator / camera.frame_rate.denominator : 0)
+    }))
+  ),
+  port = computed(() => props.status.preview?.port || 8080)
+type OverlayPerson = { personId: number; points: number[][]; scores: number[]; valid: boolean[] }
+type Overlay = {
+  sequence: number
+  frameSequence: number
+  width: number
+  height: number
+  people: OverlayPerson[]
 }
-function toggle():void { playing.value=!playing.value; if(playing.value){transportState='stopped';connect();connectEvents()} else {generation++;eventsGeneration++;transportState='closing';if(timer)window.clearTimeout(timer);if(eventsTimer)window.clearTimeout(eventsTimer);timer=undefined;eventsTimer=undefined;socket?.close();eventsSocket?.close();transportState='stopped';closeDecoders()} }
-onMounted(()=>{mounted=true;connect();connectEvents();fpsTimer=window.setInterval(()=>{const now=performance.now(),next=new Map<number,number>();for(const camera of cameras.value)next.set(camera.camera_id,last.has(camera.camera_id)&&now-last.get(camera.camera_id)!<1500?30:0);fps.value=next},1000)})
-onBeforeUnmount(()=>{mounted=false;playing.value=false;generation++;eventsGeneration++;transportState='closing';if(timer)window.clearTimeout(timer);if(eventsTimer)window.clearTimeout(eventsTimer);if(fpsTimer)window.clearInterval(fpsTimer);timer=undefined;eventsTimer=undefined;fpsTimer=undefined;socket?.close();eventsSocket?.close();socket=undefined;eventsSocket=undefined;transportState='stopped';closeDecoders()})
+const canvases = new Map<number, HTMLCanvasElement>(),
+  decoders = new Map<number, VideoDecoder>(),
+  decoderConfigs = new Map<number, VideoDecoderConfig>()
+const overlays = new Map<number, Overlay>(),
+  pendingVideoSequences = new Map<number, Map<number, number>>()
+const sequenceDeltas = ref(new Map<number, number>()),
+  sequenceHistories = ref(new Map<number, number[]>())
+const sequenceHistoryLimit = 180
+type TransportState = 'stopped' | 'connecting' | 'connected' | 'closing'
+let socket: WebSocket | undefined,
+  eventsSocket: WebSocket | undefined,
+  timer: number | undefined,
+  eventsTimer: number | undefined,
+  fpsTimer: number | undefined,
+  retryDelay = 1000,
+  transportState: TransportState = 'stopped',
+  generation = 0,
+  eventsGeneration = 0,
+  mounted = false,
+  last = new Map<number, number>(),
+  awaitingKeyframe = new Set<number>(),
+  decodeBacklogStreak = new Map<number, number>()
+function setCanvas(id: number, value: unknown): void {
+  if (value instanceof HTMLCanvasElement) canvases.set(id, value)
+  else canvases.delete(id)
+}
+function disposeDecoder(id: number, decoder: VideoDecoder): void {
+  if (decoders.get(id) !== decoder) return
+  decoders.delete(id)
+  if (decoder.state !== 'closed')
+    try {
+      decoder.close()
+    } catch {}
+}
+function closeDecoders(): void {
+  for (const [id, decoder] of decoders) disposeDecoder(id, decoder)
+  decoderConfigs.clear()
+  awaitingKeyframe.clear()
+  decodeBacklogStreak.clear()
+  overlays.clear()
+  pendingVideoSequences.clear()
+  sequenceDeltas.value = new Map()
+  sequenceHistories.value = new Map()
+}
+function resetDecoder(id: number, decoder: VideoDecoder): void {
+  const config = decoderConfigs.get(id)
+  if (!config || decoders.get(id) !== decoder) return
+  try {
+    decoder.reset()
+    decoder.configure(config)
+  } catch {
+    disposeDecoder(id, decoder)
+  }
+  pendingVideoSequences.get(id)?.clear()
+  awaitingKeyframe.add(id)
+}
+const confidenceThreshold = 0.9
+const confidenceRevision = ref(0)
+function confidenceStats(id: number): {
+  bins: number[]
+  count: number
+  average: number
+  maximum: number
+} {
+  void confidenceRevision.value
+  const scores: number[] = []
+  const overlay = overlays.get(id)
+  for (const person of overlay?.people ?? [])
+    for (let i = 0; i < person.scores.length; i++)
+      if (
+        person.valid[i] &&
+        Number.isFinite(person.scores[i]) &&
+        person.scores[i] >= confidenceThreshold
+      )
+        scores.push(Math.min(1, person.scores[i]))
+  const bins = Array.from({ length: 10 }, () => 0)
+  for (const score of scores) bins[Math.min(9, Math.floor(score * 10))]++
+  return {
+    bins,
+    count: scores.length,
+    average: scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : 0,
+    maximum: scores.length ? Math.max(...scores) : 0
+  }
+}
+const skeleton: ReadonlyArray<readonly [number, number]> = [
+  [5, 6],
+  [5, 11],
+  [6, 12],
+  [11, 12],
+  [5, 7],
+  [7, 9],
+  [6, 8],
+  [8, 10],
+  [11, 13],
+  [13, 15],
+  [12, 14],
+  [14, 16]
+]
+function drawOverlay(
+  context: CanvasRenderingContext2D,
+  id: number,
+  videoSequence: number | undefined
+): void {
+  const overlay = overlays.get(id)
+  if (!overlay) return
+  if (videoSequence !== undefined) {
+    const delta = overlay.frameSequence - videoSequence
+    const next = new Map(sequenceDeltas.value)
+    next.set(id, delta)
+    sequenceDeltas.value = next
+    const histories = new Map(sequenceHistories.value),
+      history = [...(histories.get(id) ?? []), delta].slice(-sequenceHistoryLimit)
+    histories.set(id, history)
+    sequenceHistories.value = histories
+  }
+  const scaleX = context.canvas.width / overlay.width,
+    scaleY = context.canvas.height / overlay.height
+  context.save()
+  context.lineWidth = Math.max(2, context.canvas.width / 500)
+  overlay.people.forEach((person, personIndex) => {
+    const color = ['#70e3e0', '#ffb86b', '#bd93f9', '#50fa7b', '#ff79c6', '#f1fa8c'][
+      personIndex % 6
+    ]
+    const visible = (index: number) =>
+      person.valid[index] && person.scores[index] >= confidenceThreshold
+    context.strokeStyle = color
+    for (const [a, b] of skeleton) {
+      if (!visible(a) || !visible(b)) continue
+      context.beginPath()
+      context.moveTo(person.points[a][0] * scaleX, person.points[a][1] * scaleY)
+      context.lineTo(person.points[b][0] * scaleX, person.points[b][1] * scaleY)
+      context.stroke()
+    }
+    context.fillStyle = color
+    for (let i = 0; i < person.points.length; i++) {
+      if (!visible(i)) continue
+      context.beginPath()
+      context.arc(
+        person.points[i][0] * scaleX,
+        person.points[i][1] * scaleY,
+        Math.max(3, context.canvas.width / 240),
+        0,
+        Math.PI * 2
+      )
+      context.fill()
+    }
+  })
+  context.restore()
+}
+function sequenceRange(id: number): { low: number; high: number } {
+  const values = sequenceHistories.value.get(id) ?? [0]
+  return { low: Math.min(0, ...values), high: Math.max(0, ...values) }
+}
+function sequenceChartPoints(id: number): string {
+  const values = sequenceHistories.value.get(id) ?? []
+  if (!values.length) return ''
+  const { low, high } = sequenceRange(id),
+    range = high - low || 1
+  return values
+    .map(
+      (value, index) =>
+        `${(index / Math.max(1, values.length - 1)) * 100},${48 - ((value - low) / range) * 44}`
+    )
+    .join(' ')
+}
+function sequenceZeroY(id: number): number {
+  const { low, high } = sequenceRange(id)
+  return 48 - ((0 - low) / (high - low || 1)) * 44
+}
+function connectEvents(): void {
+  if (!mounted || !playing.value) return
+  eventsSocket?.close()
+  const current = ++eventsGeneration
+  const ws = new WebSocket(`ws://127.0.0.1:${port.value}/api/events`)
+  eventsSocket = ws
+  ws.onmessage = (event) => {
+    if (current !== eventsGeneration) return
+    try {
+      const message = JSON.parse(event.data)
+      if (message.type !== 'pose') return
+      const views = message.data?.views || [],
+        present = new Set<number>(),
+        nextOverlays = new Map<number, Overlay>()
+      for (const view of views) {
+        present.add(view.camera_id)
+        const overlay: Overlay = nextOverlays.get(view.camera_id) ?? {
+          sequence: message.data.sequence,
+          frameSequence: view.frame_sequence,
+          width: view.width,
+          height: view.height,
+          people: []
+        }
+        overlay.people.push({
+          personId: view.person_id ?? overlay.people.length,
+          points: view.points,
+          scores: view.scores,
+          valid: view.valid
+        })
+        nextOverlays.set(view.camera_id, overlay)
+      }
+      for (const [camera, overlay] of nextOverlays) overlays.set(camera, overlay)
+      const deltas = new Map(sequenceDeltas.value)
+      for (const camera of overlays.keys())
+        if (!present.has(camera)) {
+          overlays.delete(camera)
+          deltas.delete(camera)
+        }
+      sequenceDeltas.value = deltas
+      confidenceRevision.value++
+    } catch {}
+  }
+  ws.onclose = () => {
+    if (mounted && playing.value && current === eventsGeneration && !eventsTimer)
+      eventsTimer = window.setTimeout(() => {
+        eventsTimer = undefined
+        connectEvents()
+      }, 1000)
+  }
+}
+function retry(): void {
+  if (!mounted || !playing.value || timer) return
+  const delay = retryDelay
+  retryDelay = Math.min(8000, retryDelay * 2)
+  timer = window.setTimeout(() => {
+    timer = undefined
+    if (mounted && playing.value) connect()
+  }, delay)
+}
+function connect(): void {
+  if (!mounted || !playing.value || !cameras.value.length) return
+  if (transportState === 'connecting' || transportState === 'connected') return
+  transportState = 'connecting'
+  const current = ++generation
+  if (socket && socket.readyState !== WebSocket.CLOSED) {
+    transportState = 'closing'
+    socket.close()
+    transportState = 'connecting'
+  }
+  closeDecoders()
+  fatalError.value = ''
+  const ws = new WebSocket(`ws://127.0.0.1:${port.value}/api/preview/stream`)
+  ws.binaryType = 'arraybuffer'
+  socket = ws
+  ws.onopen = () => {
+    if (current !== generation) {
+      ws.close()
+      return
+    }
+    transportState = 'connected'
+    console.info('[preview] websocket open')
+    retryDelay = 1000
+    ws.send(
+      JSON.stringify({
+        version: 1,
+        type: 'hello',
+        cameras: cameras.value.map((camera) => camera.camera_id)
+      })
+    )
+  }
+  ws.onmessage = (event) => {
+    if (current !== generation) return
+    if (typeof event.data === 'string') {
+      try {
+        const message = JSON.parse(event.data) as {
+          type: string
+          message?: string
+          streams?: Array<{
+            camera_id: number
+            width?: number
+            height?: number
+            codec?: string
+            description?: string
+          }>
+        }
+        console.info('[preview] message', message.type, message)
+        if (message.type === 'error') {
+          fatalError.value = message.message || 'Preview connection failed'
+          retry()
+          return
+        }
+        if (message.type === 'config')
+          for (const stream of message.streams || []) {
+            const canvas = canvases.get(stream.camera_id),
+              context = canvas?.getContext('2d')
+            if (!canvas || !context || !('VideoDecoder' in window))
+              throw new Error('WebCodecs VideoDecoder is unavailable')
+            const id = stream.camera_id
+            const codec = stream.codec || 'avc1.42E01E'
+            const decoder = new VideoDecoder({
+              output: (frame) => {
+                const width = frame.codedWidth,
+                  height = frame.codedHeight
+                if (canvas.width !== width || canvas.height !== height) {
+                  canvas.width = width
+                  canvas.height = height
+                }
+                const videoSequence = pendingVideoSequences.get(id)?.get(frame.timestamp)
+                pendingVideoSequences.get(id)?.delete(frame.timestamp)
+                context.drawImage(frame, 0, 0, canvas.width, canvas.height)
+                drawOverlay(context, id, videoSequence)
+                frame.close()
+                last.set(id, performance.now())
+              },
+              error: (error) => {
+                console.error('[preview] decoder error', id, error)
+                if (current === generation && decoders.get(id) === decoder) {
+                  failed.value = new Set(failed.value).add(id)
+                  const recovery = decoderConfigs.get(id)
+                  try {
+                    if (!recovery) throw new Error('missing decoder configuration')
+                    decoder.reset()
+                    decoder.configure(recovery)
+                    pendingVideoSequences.get(id)?.clear()
+                    awaitingKeyframe.add(id)
+                  } catch {
+                    disposeDecoder(id, decoder)
+                    decoderConfigs.delete(id)
+                    awaitingKeyframe.add(id)
+                  }
+                }
+              }
+            })
+            console.info('[preview] configuring decoder', id, codec, stream.width, stream.height)
+            const config: VideoDecoderConfig = {
+              codec,
+              description: stream.description
+                ? Uint8Array.from(atob(stream.description), (c) => c.charCodeAt(0))
+                : undefined
+            }
+            decoder.configure(config)
+            decoders.set(id, decoder)
+            decoderConfigs.set(id, config)
+          }
+      } catch (error) {
+        console.error('[preview] message/configuration error', error)
+        fatalError.value = 'Preview decoder configuration failed'
+        retry()
+      }
+      return
+    }
+    const data = new Uint8Array(event.data as ArrayBuffer)
+    if (data.length < 32 || String.fromCharCode(...data.slice(0, 4)) !== 'IRWS') return
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength),
+      camera = view.getUint32(8, true),
+      sequence = Number(view.getBigUint64(12, true)),
+      timestamp = Number(view.getBigUint64(20, true)),
+      flags = view.getUint16(6, true),
+      length = view.getUint32(28, true),
+      decoder = decoders.get(camera)
+    if (!decoder || length + 32 > data.length || !playing.value) return
+    const backlog = decoder.decodeQueueSize > 24 ? (decodeBacklogStreak.get(camera) ?? 0) + 1 : 0
+    decodeBacklogStreak.set(camera, backlog)
+    if (backlog >= 10) {
+      resetDecoder(camera, decoder)
+      decodeBacklogStreak.set(camera, 0)
+      return
+    }
+    if (flags & 2) {
+      awaitingKeyframe.add(camera)
+      if (!(flags & 1)) return
+    }
+    if (awaitingKeyframe.has(camera) && !(flags & 1)) return
+    if (flags & 1) awaitingKeyframe.delete(camera)
+    if (decoders.get(camera) !== decoder || decoder.state === 'closed') return
+    try {
+      let pending = pendingVideoSequences.get(camera)
+      if (!pending) {
+        pending = new Map()
+        pendingVideoSequences.set(camera, pending)
+      }
+      pending.set(timestamp, sequence)
+      while (pending.size > 32) pending.delete(pending.keys().next().value as number)
+      decoder.decode(
+        new EncodedVideoChunk({
+          type: flags & 1 ? 'key' : 'delta',
+          timestamp,
+          data: data.slice(32, 32 + length)
+        })
+      )
+    } catch {
+      pendingVideoSequences.get(camera)?.delete(timestamp)
+      if (current === generation && decoders.get(camera) === decoder) {
+        resetDecoder(camera, decoder)
+      }
+    }
+  }
+  ws.onerror = () => {
+    console.error('[preview] websocket error')
+    fatalError.value = 'Preview WebSocket unavailable'
+    retry()
+  }
+  ws.onclose = () => {
+    console.warn('[preview] websocket closed')
+    if (current === generation) {
+      transportState = 'stopped'
+      retry()
+    }
+  }
+}
+function toggle(): void {
+  playing.value = !playing.value
+  if (playing.value) {
+    transportState = 'stopped'
+    connect()
+    connectEvents()
+  } else {
+    generation++
+    eventsGeneration++
+    transportState = 'closing'
+    if (timer) window.clearTimeout(timer)
+    if (eventsTimer) window.clearTimeout(eventsTimer)
+    timer = undefined
+    eventsTimer = undefined
+    socket?.close()
+    eventsSocket?.close()
+    transportState = 'stopped'
+    closeDecoders()
+  }
+}
+onMounted(() => {
+  mounted = true
+  connect()
+  connectEvents()
+  fpsTimer = window.setInterval(() => {
+    const now = performance.now(),
+      next = new Map<number, number>()
+    for (const camera of cameras.value)
+      next.set(
+        camera.camera_id,
+        last.has(camera.camera_id) && now - last.get(camera.camera_id)! < 1500 ? 30 : 0
+      )
+    fps.value = next
+  }, 1000)
+})
+onBeforeUnmount(() => {
+  mounted = false
+  playing.value = false
+  generation++
+  eventsGeneration++
+  transportState = 'closing'
+  if (timer) window.clearTimeout(timer)
+  if (eventsTimer) window.clearTimeout(eventsTimer)
+  if (fpsTimer) window.clearInterval(fpsTimer)
+  timer = undefined
+  eventsTimer = undefined
+  fpsTimer = undefined
+  socket?.close()
+  eventsSocket?.close()
+  socket = undefined
+  eventsSocket = undefined
+  transportState = 'stopped'
+  closeDecoders()
+})
 </script>
-<template><div class="camera-page"><header class="camera-page-head"><div><span class="eyebrow">SOURCE MONITOR</span><h2>Camera streams</h2><p>{{ fatalError || (cameras.length ? `${cameras.length} configured view${cameras.length===1?'':'s'} from the active capture rig.` : 'No cameras configured.') }}</p></div><button class="stream-button" @click="toggle">{{ playing ? 'Ⅱ  PAUSE ALL STREAMS' : '▶  PLAY ALL STREAMS' }}</button></header><div v-if="cameras.length" class="camera-grid-large"><article v-for="camera in cameras" :key="camera.camera_id" class="camera-large"><div class="camera-feed"><canvas :ref="(element)=>setCanvas(camera.camera_id,element)" :width="camera.width" :height="camera.height"/><span class="feed-label">CAM_{{String(camera.camera_id).padStart(2,'0')}}</span><span class="feed-live"><i/>{{playing?'LIVE':'PAUSED'}}</span><div class="confidence-chart"><header><span>2D CONFIDENCE</span><strong>{{confidenceStats(camera.camera_id).count ? `${(confidenceStats(camera.camera_id).average*100).toFixed(0)}% AVG` : '—'}}</strong></header><div class="confidence-bars"><i v-for="(bin,index) in confidenceStats(camera.camera_id).bins" :key="index" :style="{height: `${bin ? Math.max(8, bin / Math.max(...confidenceStats(camera.camera_id).bins) * 100) : 2}%`}"/></div><footer><span>0</span><span>0.05 threshold</span><span>1.0</span></footer></div><div class="sequence-chart" :class="{ warning: Math.abs(sequenceDeltas.get(camera.camera_id) ?? 0) > 1 }"><header><span>POSEΔ</span><strong>{{sequenceDeltas.has(camera.camera_id) ? `${(sequenceDeltas.get(camera.camera_id) ?? 0) >= 0 ? '+' : ''}${sequenceDeltas.get(camera.camera_id)} FR` : '—'}}</strong></header><svg viewBox="0 0 100 52" preserveAspectRatio="none"><line class="zero" x1="0" :y1="sequenceZeroY(camera.camera_id)" x2="100" :y2="sequenceZeroY(camera.camera_id)"/><polyline :points="sequenceChartPoints(camera.camera_id)"/></svg><footer><span>{{sequenceRange(camera.camera_id).low}}</span><span>{{sequenceRange(camera.camera_id).high}}</span></footer></div><span class="feed-time">{{camera.width}} × {{camera.height}} · {{fps.get(camera.camera_id)||0}} FPS</span></div><div class="camera-info"><strong>CAMERA {{String(camera.camera_id).padStart(2,'0')}}</strong><span>{{camera.fps.toFixed(1)}} FPS · {{camera.width}} × {{camera.height}}</span></div></article></div><div v-else class="empty-state">Configure at least one capture camera to start previewing streams.</div></div></template>
-<style scoped>.camera-page{width:100%;min-width:0;min-height:0;flex:1;padding:28px 30px 36px;overflow:hidden auto;color:#d5e0e2}.camera-page-head{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;padding-bottom:24px;border-bottom:1px solid #1e292d}.eyebrow{color:#70e3e0;font-size:9px;letter-spacing:.14em}h2{margin:8px 0;font-size:24px;font-weight:400}p{margin:0;color:#718087}.stream-button{padding:9px 12px;border:1px solid #24545a;border-radius:3px;background:#132528;color:#70e3e0;font-size:9px;letter-spacing:.08em}.camera-grid-large{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-top:22px}.camera-large{overflow:hidden;border:1px solid #1e292d;background:#10181b}.camera-feed{position:relative;display:grid;place-items:center;aspect-ratio:16/9!important;overflow:hidden;background:#0b1518;min-width:0;min-height:0}.camera-feed canvas{width:auto;height:auto;max-width:100%;max-height:100%;min-width:0;min-height:0;display:block}.feed-label,.feed-live,.feed-time{position:absolute;z-index:1;font-size:9px}.feed-label{top:12px;left:12px}.feed-live{top:12px;right:12px;color:#79dbb0}.feed-live i{width:6px;height:6px;display:inline-block;margin-right:5px;border-radius:50%;background:currentColor}.feed-time{bottom:12px;left:12px;color:#9eb3b4}.sequence-chart{position:absolute;right:12px;bottom:30px;z-index:2;width:150px;padding:7px 8px 5px;border:1px solid #24545a;background:#0b1518d9;color:#79dbb0}.sequence-chart.warning{border-color:#765f2d;color:#ffcf70}.sequence-chart header,.sequence-chart footer{display:flex;justify-content:space-between;font-size:8px;line-height:1}.sequence-chart strong{font-weight:500}.sequence-chart svg{display:block;width:100%;height:48px;margin:4px 0}.sequence-chart line{stroke:#4b5b5f;stroke-width:.6;stroke-dasharray:3 2}.sequence-chart polyline{fill:none;stroke:currentColor;stroke-width:1.5;vector-effect:non-scaling-stroke}.sequence-chart footer{color:#718087}.camera-info{display:flex;gap:14px;padding:13px;font-size:9px}.camera-info span{color:#718087}.empty-state{margin-top:22px;padding:40px 20px;border:1px dashed #2a3b3f;color:#718087;text-align:center}@media(max-width:900px){.camera-grid-large{grid-template-columns:1fr}}</style>
+<style scoped>
+.confidence-chart {
+  position: absolute;
+  right: 12px;
+  bottom: 138px;
+  z-index: 2;
+  width: 150px;
+  padding: 7px 8px 5px;
+  border: 1px solid #24545a;
+  background: #0b1518e8;
+  color: #70e3e0;
+}
+.confidence-chart header,
+.confidence-chart footer {
+  display: flex;
+  justify-content: space-between;
+  font-size: 8px;
+  line-height: 1;
+}
+.confidence-chart strong {
+  font-weight: 500;
+}
+.confidence-bars {
+  height: 38px;
+  display: flex;
+  align-items: end;
+  gap: 2px;
+  margin: 5px 0;
+}
+.confidence-bars i {
+  display: block;
+  flex: 1;
+  min-height: 2px;
+  background: #70e3e0;
+}
+.confidence-chart footer {
+  color: #718087;
+}
+</style>
+<template>
+  <div class="camera-page">
+    <header class="camera-page-head">
+      <div>
+        <span class="eyebrow">SOURCE MONITOR</span>
+        <h2>Camera streams</h2>
+        <p>
+          {{
+            fatalError ||
+            (cameras.length
+              ? `${cameras.length} configured view${cameras.length === 1 ? '' : 's'} from the active capture rig.`
+              : 'No cameras configured.')
+          }}
+        </p>
+      </div>
+      <button class="stream-button" @click="toggle">
+        {{ playing ? 'Ⅱ  PAUSE ALL STREAMS' : '▶  PLAY ALL STREAMS' }}
+      </button>
+    </header>
+    <div v-if="cameras.length" class="camera-grid-large">
+      <article v-for="camera in cameras" :key="camera.camera_id" class="camera-large">
+        <div class="camera-feed">
+          <canvas
+            :ref="(element) => setCanvas(camera.camera_id, element)"
+            :width="camera.width"
+            :height="camera.height"
+          /><span class="feed-label">CAM_{{ String(camera.camera_id).padStart(2, '0') }}</span
+          ><span class="feed-live"><i />{{ playing ? 'LIVE' : 'PAUSED' }}</span>
+          <div class="confidence-chart">
+            <header>
+              <span>2D CONFIDENCE</span
+              ><strong>{{
+                confidenceStats(camera.camera_id).count
+                  ? `${(confidenceStats(camera.camera_id).average * 100).toFixed(0)}% AVG`
+                  : '—'
+              }}</strong>
+            </header>
+            <div class="confidence-bars">
+              <i
+                v-for="(bin, index) in confidenceStats(camera.camera_id).bins"
+                :key="index"
+                :style="{
+                  height: `${bin ? Math.max(8, (bin / Math.max(...confidenceStats(camera.camera_id).bins)) * 100) : 2}%`
+                }"
+              />
+            </div>
+            <footer><span>0</span><span>0.90 threshold</span><span>1.0</span></footer>
+          </div>
+          <div
+            class="sequence-chart"
+            :class="{ warning: Math.abs(sequenceDeltas.get(camera.camera_id) ?? 0) > 1 }"
+          >
+            <header>
+              <span>POSEΔ</span
+              ><strong>{{
+                sequenceDeltas.has(camera.camera_id)
+                  ? `${(sequenceDeltas.get(camera.camera_id) ?? 0) >= 0 ? '+' : ''}${sequenceDeltas.get(camera.camera_id)} FR`
+                  : '—'
+              }}</strong>
+            </header>
+            <svg viewBox="0 0 100 52" preserveAspectRatio="none">
+              <line
+                class="zero"
+                x1="0"
+                :y1="sequenceZeroY(camera.camera_id)"
+                x2="100"
+                :y2="sequenceZeroY(camera.camera_id)"
+              />
+              <polyline :points="sequenceChartPoints(camera.camera_id)" />
+            </svg>
+            <footer>
+              <span>{{ sequenceRange(camera.camera_id).low }}</span
+              ><span>{{ sequenceRange(camera.camera_id).high }}</span>
+            </footer>
+          </div>
+          <span class="feed-time"
+            >{{ camera.width }} × {{ camera.height }} ·
+            {{ fps.get(camera.camera_id) || 0 }} FPS</span
+          >
+        </div>
+        <div class="camera-info">
+          <strong>CAMERA {{ String(camera.camera_id).padStart(2, '0') }}</strong
+          ><span>{{ camera.fps.toFixed(1) }} FPS · {{ camera.width }} × {{ camera.height }}</span>
+        </div>
+      </article>
+    </div>
+    <div v-else class="empty-state">
+      Configure at least one capture camera to start previewing streams.
+    </div>
+  </div>
+</template>
+<style scoped>
+.camera-page {
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  padding: 28px 30px 36px;
+  overflow: hidden auto;
+  color: #d5e0e2;
+}
+.camera-page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  padding-bottom: 24px;
+  border-bottom: 1px solid #1e292d;
+}
+.eyebrow {
+  color: #70e3e0;
+  font-size: 9px;
+  letter-spacing: 0.14em;
+}
+h2 {
+  margin: 8px 0;
+  font-size: 24px;
+  font-weight: 400;
+}
+p {
+  margin: 0;
+  color: #718087;
+}
+.stream-button {
+  padding: 9px 12px;
+  border: 1px solid #24545a;
+  border-radius: 3px;
+  background: #132528;
+  color: #70e3e0;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+}
+.camera-grid-large {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 22px;
+}
+.camera-large {
+  overflow: hidden;
+  border: 1px solid #1e292d;
+  background: #10181b;
+}
+.camera-feed {
+  position: relative;
+  display: grid;
+  place-items: center;
+  aspect-ratio: 16/9 !important;
+  overflow: hidden;
+  background: #0b1518;
+  min-width: 0;
+  min-height: 0;
+}
+.camera-feed canvas {
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 100%;
+  min-width: 0;
+  min-height: 0;
+  display: block;
+}
+.feed-label,
+.feed-live,
+.feed-time {
+  position: absolute;
+  z-index: 1;
+  font-size: 9px;
+}
+.feed-label {
+  top: 12px;
+  left: 12px;
+}
+.feed-live {
+  top: 12px;
+  right: 12px;
+  color: #79dbb0;
+}
+.feed-live i {
+  width: 6px;
+  height: 6px;
+  display: inline-block;
+  margin-right: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.feed-time {
+  bottom: 12px;
+  left: 12px;
+  color: #9eb3b4;
+}
+.sequence-chart {
+  position: absolute;
+  right: 12px;
+  bottom: 30px;
+  z-index: 2;
+  width: 150px;
+  padding: 7px 8px 5px;
+  border: 1px solid #24545a;
+  background: #0b1518d9;
+  color: #79dbb0;
+}
+.sequence-chart.warning {
+  border-color: #765f2d;
+  color: #ffcf70;
+}
+.sequence-chart header,
+.sequence-chart footer {
+  display: flex;
+  justify-content: space-between;
+  font-size: 8px;
+  line-height: 1;
+}
+.sequence-chart strong {
+  font-weight: 500;
+}
+.sequence-chart svg {
+  display: block;
+  width: 100%;
+  height: 48px;
+  margin: 4px 0;
+}
+.sequence-chart line {
+  stroke: #4b5b5f;
+  stroke-width: 0.6;
+  stroke-dasharray: 3 2;
+}
+.sequence-chart polyline {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+.sequence-chart footer {
+  color: #718087;
+}
+.camera-info {
+  display: flex;
+  gap: 14px;
+  padding: 13px;
+  font-size: 9px;
+}
+.camera-info span {
+  color: #718087;
+}
+.empty-state {
+  margin-top: 22px;
+  padding: 40px 20px;
+  border: 1px dashed #2a3b3f;
+  color: #718087;
+  text-align: center;
+}
+@media (max-width: 900px) {
+  .camera-grid-large {
+    grid-template-columns: 1fr;
+  }
+}
+</style>

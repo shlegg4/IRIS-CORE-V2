@@ -108,6 +108,41 @@ class MultiviewPoseStage::Impl {
         const auto engine_start = std::chrono::steady_clock::now();
         engine_->infer(buffers, strides, widths, heights, result);
         const auto postprocess_start = std::chrono::steady_clock::now();
+        std::vector<ViewPose2d> view_poses_2d;
+        for (std::size_t view = 0; view < view_count; ++view) {
+            const auto& source = *std::ranges::find(packet.frames, config_.multiview_calibration[view].camera_id, &Frame::camera);
+            const auto& calibration = config_.multiview_calibration[view];
+            const float scale = std::min(640.0F / static_cast<float>(source.extent.width), 640.0F / static_cast<float>(source.extent.height));
+            const float resized_width = static_cast<float>(std::max(1, static_cast<int>(source.extent.width * scale + 0.5F)));
+            const float resized_height = static_cast<float>(std::max(1, static_cast<int>(source.extent.height * scale + 0.5F)));
+            for (std::size_t candidate = 0; candidate < std::min<std::size_t>(config_.max_persons, 10); ++candidate) {
+                if (!result.candidate_valid[view * 10 + candidate]) continue;
+                auto& observation = view_poses_2d.emplace_back();
+                observation.camera_id = calibration.camera_id;
+                observation.person_id = candidate;
+                for (std::size_t joint = 0; joint < 17; ++joint) {
+                    const auto score_index = (view * 10 + candidate) * 17 + joint;
+                    const auto point_index = score_index * 2;
+                    const float score = result.keypoint_scores[score_index];
+                    const float x = result.keypoints[point_index];
+                    const float y = result.keypoints[point_index + 1];
+                    observation.scores[joint] = score;
+                    if (!std::isfinite(score) || !std::isfinite(x) || !std::isfinite(y)) continue;
+                    const float model_x = (x - (640.0F - resized_width) * 0.5F) / scale;
+                    const float model_y = (y - (640.0F - resized_height) * 0.5F) / scale;
+                    const float fx = calibration.intrinsics[0], fy = calibration.intrinsics[4];
+                    const float cx = calibration.intrinsics[2], cy = calibration.intrinsics[5];
+                    const float xu = (model_x - cx) / fx, yu = (model_y - cy) / fy;
+                    const float r2 = xu * xu + yu * yu;
+                    const float radial = 1.0F + calibration.distortion[0] * r2 + calibration.distortion[1] * r2 * r2 + calibration.distortion[4] * r2 * r2 * r2;
+                    const float xd = xu * radial + 2.0F * calibration.distortion[2] * xu * yu + calibration.distortion[3] * (r2 + 2.0F * xu * xu);
+                    const float yd = yu * radial + calibration.distortion[2] * (r2 + 2.0F * yu * yu) + 2.0F * calibration.distortion[3] * xu * yu;
+                    observation.points_px[joint] = {fx * xd + cx, fy * yd + cy};
+                    observation.valid[joint] = true;
+                }
+            }
+        }
+        packet.view_poses_2d = std::move(view_poses_2d);
         std::vector<MultiviewPose> poses;
         poses.reserve(std::min<std::size_t>(config_.max_persons, 10));
         for (std::size_t person_index = 0; person_index < std::min<std::size_t>(config_.max_persons, 10); ++person_index) {

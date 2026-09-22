@@ -107,23 +107,17 @@ std::string multiview_pose_event(const Packet& packet) {
         }
     }
     out << "],\"views\":[";
-    bool first=true; std::size_t id=0;
-    if(packet.multiview_poses)for(const auto& pose:*packet.multiview_poses){
-        if(!pose.active){++id;continue;}
-        for(std::size_t view=0; view<pose.points_2d_px.size(); ++view) {
-            bool has_point=false; for(const auto valid:pose.point_valid[view]) has_point |= valid;
-            if(!has_point) continue; if(!first)out<<','; first=false;
-            const auto camera_id = pose.view_camera_ids[view];
-            const auto frame = std::find_if(packet.frames.begin(), packet.frames.end(), [camera_id](const Frame& value) { return value.camera == camera_id; });
-            if (frame == packet.frames.end()) continue;
-            out << "{\"camera_id\":" << camera_id << ",\"person_id\":" << id
-                << ",\"frame_sequence\":" << frame->sequence
-                << ",\"width\":" << frame->extent.width << ",\"height\":" << frame->extent.height << ",\"points\":[";
-            for(std::size_t joint=0;joint<pose.points_2d_px[view].size();++joint){if(joint)out<<','; const auto& p=pose.points_2d_px[view][joint]; out<<'['<<p[0]<<','<<p[1]<<']';}
-            out << "],\"scores\":["; for(std::size_t joint=0;joint<pose.joint_scores[view].size();++joint){if(joint)out<<',';out<<pose.joint_scores[view][joint];}
-            out << "],\"valid\":["; for(std::size_t joint=0;joint<pose.point_valid[view].size();++joint){if(joint)out<<',';out<<(pose.point_valid[view][joint]?"true":"false");} out << "]}";
-        }
-        ++id;
+    bool first=true;
+    if (packet.view_poses_2d) for (const auto& pose : *packet.view_poses_2d) {
+        const auto frame = std::find_if(packet.frames.begin(), packet.frames.end(), [&pose](const Frame& value) { return value.camera == pose.camera_id; });
+        if (frame == packet.frames.end()) continue;
+        if (!first) out << ','; first = false;
+        out << "{\"camera_id\":" << pose.camera_id << ",\"person_id\":" << pose.person_id
+            << ",\"frame_sequence\":" << frame->sequence
+            << ",\"width\":" << frame->extent.width << ",\"height\":" << frame->extent.height << ",\"points\":[";
+        for(std::size_t joint=0;joint<pose.points_px.size();++joint){if(joint)out<<','; const auto& p=pose.points_px[joint]; out<<'['<<p[0]<<','<<p[1]<<']';}
+        out << "],\"scores\":["; for(std::size_t joint=0;joint<pose.scores.size();++joint){if(joint)out<<',';out<<pose.scores[joint];}
+        out << "],\"valid\":["; for(std::size_t joint=0;joint<pose.valid.size();++joint){if(joint)out<<',';out<<(pose.valid[joint]?"true":"false");} out << "]}";
     }
     out << "]}}"; return out.str();
 }

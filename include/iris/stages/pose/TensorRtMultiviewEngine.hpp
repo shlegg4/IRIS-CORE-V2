@@ -16,8 +16,11 @@ struct TensorRtMultiviewResult {
         double download_host_ms{}, wait_host_ms{};
         double preprocess_stream_ms{}, engine_stream_ms{}, download_stream_ms{};
     } timings;
-    // Detector tensors remain device-resident; only selected observations and
-    // finalized triangulated joints cross the pose-stage boundary.
+    // Raw detector tensors are retained for camera-local 2-D output. Selected
+    // observations remain the input to epipolar triangulation only.
+    std::array<float, 3 * 10 * 17 * 2> keypoints{};
+    std::array<float, 3 * 10 * 17> keypoint_scores{};
+    std::array<unsigned char, 3 * 10> candidate_valid{};
     std::array<float, 10 * 17 * 3> triangulated_xyz{};
     std::array<unsigned char, 10 * 17> triangulated_valid{};
     std::array<unsigned char, 10 * 3> assignments{};

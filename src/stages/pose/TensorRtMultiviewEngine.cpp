@@ -197,6 +197,9 @@ class TensorRtMultiviewEngine::Impl {
         check_cuda(cudaMemcpyAsync(result.selected_keypoints.data(), selected_keypoints_, sizeof(float) * result.selected_keypoints.size(), cudaMemcpyDeviceToHost, stream_), "copy selected keypoints");
         check_cuda(cudaMemcpyAsync(result.selected_scores.data(), selected_scores_, sizeof(float) * result.selected_scores.size(), cudaMemcpyDeviceToHost, stream_), "copy selected scores");
         check_cuda(cudaMemcpyAsync(result.selected_valid.data(), selected_valid_, sizeof(unsigned char) * result.selected_valid.size(), cudaMemcpyDeviceToHost, stream_), "copy selected validity");
+        check_cuda(cudaMemcpyAsync(result.keypoints.data(), keypoints_, sizeof(float) * result.keypoints.size(), cudaMemcpyDeviceToHost, stream_), "copy raw keypoints");
+        check_cuda(cudaMemcpyAsync(result.keypoint_scores.data(), keypoint_scores_, sizeof(float) * result.keypoint_scores.size(), cudaMemcpyDeviceToHost, stream_), "copy raw keypoint scores");
+        check_cuda(cudaMemcpyAsync(result.candidate_valid.data(), candidate_valid_, sizeof(unsigned char) * result.candidate_valid.size(), cudaMemcpyDeviceToHost, stream_), "copy raw candidate validity");
         check_cuda(cudaMemcpyAsync(result.triangulated_xyz.data(), triangulated_xyz_, sizeof(float) * result.triangulated_xyz.size(), cudaMemcpyDeviceToHost, stream_), "copy triangulated xyz");
         check_cuda(cudaMemcpyAsync(result.triangulated_valid.data(), triangulated_valid_, sizeof(unsigned char) * result.triangulated_valid.size(), cudaMemcpyDeviceToHost, stream_), "copy triangulated valid");
         check_cuda(cudaMemcpyAsync(result.assignments.data(), assignments_, sizeof(unsigned char) * result.assignments.size(), cudaMemcpyDeviceToHost, stream_), "copy epipolar assignments");

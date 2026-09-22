@@ -19,6 +19,14 @@ struct MultiviewPose {
     std::array<std::array<bool, coco_joint_count>, 3> point_valid{};
 };
 
+struct ViewPose2d {
+    CameraId camera_id{};
+    std::size_t person_id{};
+    std::array<std::array<float, 2>, coco_joint_count> points_px{};
+    std::array<float, coco_joint_count> scores{};
+    std::array<bool, coco_joint_count> valid{};
+};
+
 // The PEAR EHM TorchScript model regresses SMPL-X and FLAME parameters, rather than joint XYZ
 // positions. Rotation matrices are row-major. The model does not return a detection confidence.
 struct HmrParameters {
@@ -57,5 +65,7 @@ struct Packet {
     // Results from the fixed three-view COCO-17 TensorRT engine. Coordinates
     // use the calibration world frame and units (e.g. centimetres for Panoptic).
     std::optional<std::vector<MultiviewPose>> multiview_poses;
+    // Raw per-camera RTMO detections, before epipolar assignment or triangulation.
+    std::optional<std::vector<ViewPose2d>> view_poses_2d;
 };
 } // namespace iris
