@@ -83,6 +83,8 @@ class TensorRtMultiviewEngine::Impl {
         check_cuda(cudaMalloc(&source_k_, sizeof(float) * 27), "cudaMalloc source intrinsics");
         check_cuda(cudaMalloc(&target_k_, sizeof(float) * 27), "cudaMalloc target intrinsics");
         check_cuda(cudaMalloc(&distortion_, sizeof(float) * 15), "cudaMalloc distortion");
+        bind_fixed_io();
+        initialize_cuda_graph();
         for (std::size_t i = 0; i < 3; ++i) {
             std::copy(config.multiview_calibration[i].intrinsics.begin(), config.multiview_calibration[i].intrinsics.end(), calibration_k_.begin() + i * 9);
             std::copy(config.multiview_calibration[i].distortion.begin(), config.multiview_calibration[i].distortion.end(), calibration_distortion_.begin() + i * 5);
@@ -95,6 +97,8 @@ class TensorRtMultiviewEngine::Impl {
     ~Impl() {
 #ifdef IRIS_HAS_TENSORRT
         if (stream_) cudaStreamSynchronize(stream_);
+        if (graph_exec_) cudaGraphExecDestroy(graph_exec_);
+        if (graph_) cudaGraphDestroy(graph_);
         cudaFree(images_);
         cudaFree(keypoints_); cudaFree(keypoint_scores_); cudaFree(instance_scores_); cudaFree(boxes_); cudaFree(candidate_valid_);
         cudaFree(source_ptrs_); cudaFree(strides_); cudaFree(widths_); cudaFree(heights_);
@@ -128,16 +132,16 @@ class TensorRtMultiviewEngine::Impl {
         check_cuda(cudaEventRecord(timing_events_[1].value, stream_), "time preprocessing end");
         result.timings.preprocess_host_ms = elapsed_ms(preprocess_start);
         const auto setup_start = TimingClock::now();
-        // The pipeline supplies one image for each of its three calibrated views.
-        // This is a no-op for a static engine and selects N=3 for a dynamic one.
-        if (!context_->setInputShape("images", nvinfer1::Dims4{3, 3, 640, 640}))
-            throw std::runtime_error("TensorRT rejected the RTMO batch shape [3,3,640,640]");
-        if (!context_->setTensorAddress("images", images_) || !context_->setTensorAddress("keypoints", keypoints_) || !context_->setTensorAddress("keypoint_scores", keypoint_scores_) || !context_->setTensorAddress("instance_scores", instance_scores_) || !context_->setTensorAddress("boxes", boxes_) || !context_->setTensorAddress("candidate_valid", candidate_valid_))
-            throw std::runtime_error("TensorRT rejected one or more tensor addresses");
+        // Shape and tensor addresses are fixed during construction so they remain
+        // invariant when the TensorRT CUDA graph is replayed.
         result.timings.setup_host_ms = elapsed_ms(setup_start);
         check_cuda(cudaEventRecord(timing_events_[2].value, stream_), "time engine begin");
         const auto enqueue_start = TimingClock::now();
-        if (!context_->enqueueV3(stream_)) throw std::runtime_error("TensorRT enqueueV3 failed: " + logger_.last_error);
+        if (graph_ready_) {
+            check_cuda(cudaGraphLaunch(graph_exec_, stream_), "launch TensorRT CUDA graph");
+        } else if (!context_->enqueueV3(stream_)) {
+            throw std::runtime_error("TensorRT enqueueV3 failed: " + logger_.last_error);
+        }
         result.timings.enqueue_host_ms = elapsed_ms(enqueue_start);
         check_cuda(cudaEventRecord(timing_events_[3].value, stream_), "time engine end");
         const auto download_start = TimingClock::now();
@@ -162,6 +166,55 @@ class TensorRtMultiviewEngine::Impl {
 #endif
     }
 #ifdef IRIS_HAS_TENSORRT
+    void bind_fixed_io() {
+        // The pipeline supplies one image for each of its three calibrated views.
+        // This is a no-op for a static engine and selects N=3 for a dynamic one.
+        if (!context_->setInputShape("images", nvinfer1::Dims4{3, 3, 640, 640}))
+            throw std::runtime_error("TensorRT rejected the RTMO batch shape [3,3,640,640]");
+        if (!context_->setTensorAddress("images", images_) ||
+            !context_->setTensorAddress("keypoints", keypoints_) ||
+            !context_->setTensorAddress("keypoint_scores", keypoint_scores_) ||
+            !context_->setTensorAddress("instance_scores", instance_scores_) ||
+            !context_->setTensorAddress("boxes", boxes_) ||
+            !context_->setTensorAddress("candidate_valid", candidate_valid_))
+            throw std::runtime_error("TensorRT rejected one or more tensor addresses");
+    }
+
+    void initialize_cuda_graph() {
+        // TensorRT graph capture is an optimization. If an engine/plugin rejects
+        // capture, retain the ordinary enqueueV3 path.
+        if (!context_->enqueueV3(stream_)) {
+            throw std::runtime_error("TensorRT warmup enqueue failed: " + logger_.last_error);
+        }
+        if (cudaStreamSynchronize(stream_) != cudaSuccess) {
+            cudaGetLastError();
+            return;
+        }
+
+        cudaError_t error = cudaStreamBeginCapture(stream_, cudaStreamCaptureModeGlobal);
+        if (error != cudaSuccess)
+            return;
+
+        error = context_->enqueueV3(stream_) ? cudaSuccess : cudaErrorUnknown;
+        cudaError_t end_error = cudaStreamEndCapture(stream_, &graph_);
+        if (error == cudaSuccess)
+            error = end_error;
+        if (error != cudaSuccess || !graph_) {
+            graph_ = nullptr;
+            cudaGetLastError();
+            return;
+        }
+        error = cudaGraphInstantiate(&graph_exec_, graph_, 0);
+        if (error != cudaSuccess || !graph_exec_) {
+            cudaGraphDestroy(graph_);
+            graph_ = nullptr;
+            graph_exec_ = nullptr;
+            cudaGetLastError();
+            return;
+        }
+        graph_ready_ = true;
+    }
+
     void validate(const char* name, nvinfer1::Dims expected, nvinfer1::TensorIOMode mode, nvinfer1::DataType type) {
         if (engine_->getTensorIOMode(name) != mode) throw std::runtime_error(std::string("unexpected TensorRT I/O mode: ") + name);
         if (engine_->getTensorDataType(name) != type) throw std::runtime_error(std::string("unexpected TensorRT data type: ") + name);
@@ -177,6 +230,9 @@ class TensorRtMultiviewEngine::Impl {
     TrtPtr<nvinfer1::IExecutionContext> context_;
     cudaStream_t stream_{};
     std::array<TimingEvent, 5> timing_events_;
+    cudaGraph_t graph_{};
+    cudaGraphExec_t graph_exec_{};
+    bool graph_ready_{};
     void *images_{}, *keypoints_{}, *keypoint_scores_{}, *instance_scores_{}, *boxes_{}, *candidate_valid_{};
     void *source_ptrs_{}, *strides_{}, *widths_{}, *heights_{}, *source_k_{}, *target_k_{}, *distortion_{};
     std::array<float, 27> calibration_k_{};

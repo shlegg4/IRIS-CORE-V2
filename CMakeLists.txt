@@ -48,6 +48,7 @@ foreach(component avformat avcodec avutil)
 endforeach()
 add_library(iris
   src/pipeline/Stage.cpp src/runtime/Pipeline.cpp src/runtime/Runtime.cpp
+  src/api/RestApiServer.cpp
   src/cli/InteractiveCli.cpp
   src/tools/RigCalibrationTool.cpp
   src/infrastructure/gpu/CudaResources.cpp src/infrastructure/gpu/FramePool.cpp
