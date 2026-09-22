@@ -1,16 +1,16 @@
 import { app, shell, BrowserWindow, ipcMain } from 'electron'
-import { spawn, type ChildProcessWithoutNullStreams } from 'child_process'
+import { spawn, type ChildProcessByStdio } from 'child_process'
+import type { Readable } from 'stream'
 import { dirname, join } from 'path'
-import { existsSync, readFile } from 'fs'
+import { existsSync } from 'fs'
 import WebSocket from 'ws'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 
-let irisProcess: ChildProcessWithoutNullStreams | undefined
-let metricsTimer: NodeJS.Timeout | undefined
+let irisProcess: ChildProcessByStdio<null, Readable, Readable> | undefined
+let apiTimer: NodeJS.Timeout | undefined
 let previewSocket: WebSocket | undefined
 let reconnectTimer: NodeJS.Timeout | undefined
-let mainWindow: BrowserWindow | undefined
 
 function send(window: BrowserWindow, channel: string, payload: unknown): void {
   if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
@@ -18,19 +18,35 @@ function send(window: BrowserWindow, channel: string, payload: unknown): void {
   }
 }
 
-function startMetricsBridge(window: BrowserWindow, directory: string): void {
-  if (metricsTimer) clearInterval(metricsTimer)
-  const path = join(directory, 'iris_metrics.json')
-  metricsTimer = setInterval(() => {
-    readFile(path, 'utf8', (error, contents) => {
-      if (error) return
-      try {
-        send(window, 'iris:metrics', JSON.parse(contents))
-      } catch {
-        // The exporter replaces this file periodically; ignore partially written snapshots.
-      }
-    })
-  }, 500)
+const API_BASE = 'http://127.0.0.1:8090/api/v1'
+type ApiResult = { status?: string; message?: string; snapshot?: unknown; [key: string]: unknown }
+async function apiRequest(path: string, method = 'GET', body?: unknown): Promise<ApiResult> {
+  const response = await fetch(`${API_BASE}${path}`, {
+    method,
+    headers: body === undefined ? undefined : { 'content-type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body)
+  })
+  const data = (await response.json()) as ApiResult
+  if (!response.ok) throw new Error(data.message || `IRIS API returned ${response.status}`)
+  return data
+}
+async function waitForApi(): Promise<void> {
+  for (let attempt = 0; attempt < 50; attempt++) {
+    try { await apiRequest('/status'); return } catch { await new Promise((resolve) => setTimeout(resolve, 100)) }
+  }
+  throw new Error('IRIS REST API did not become ready')
+}
+function startApiBridge(window: BrowserWindow): void {
+  if (apiTimer) clearInterval(apiTimer)
+  const poll = async (): Promise<void> => {
+    try {
+      const [status, metrics] = await Promise.all([apiRequest('/status'), apiRequest('/metrics')])
+      send(window, 'iris:status', status)
+      send(window, 'iris:metrics', metrics)
+    } catch (error) { send(window, 'iris:log', `REST polling error: ${String(error)}`) }
+  }
+  void poll()
+  apiTimer = setInterval(() => void poll(), 500)
 }
 
 function connectPreviewEvents(window: BrowserWindow): void {
@@ -76,9 +92,9 @@ function startIrisRuntime(window: BrowserWindow): void {
   if (irisProcess) return
   try {
     const executable = runtimePath()
-    const child = spawn(executable, [], {
+    const child = spawn(executable, ['--api'], {
       cwd: dirname(executable),
-      stdio: ['pipe', 'pipe', 'pipe'],
+      stdio: ['ignore', 'pipe', 'pipe'],
       env: {
         ...process.env,
         PATH: [dirname(executable), process.env.PATH]
@@ -116,26 +132,29 @@ function startIrisRuntime(window: BrowserWindow): void {
       )
       send(window, 'iris:status', { state: 'stopped', code, signal })
     })
-    window.webContents.send('iris:status', { state: 'running', executable })
-    startMetricsBridge(window, dirname(executable))
-    child.stdin.write('preview enable 8080\n')
-    connectPreviewEvents(window)
+    void waitForApi().then(() => {
+      send(window, 'iris:status', { state: 'running', executable })
+      startApiBridge(window)
+      connectPreviewEvents(window)
+    }).catch((error) => send(window, 'iris:status', { state: 'error', message: String(error) }))
   } catch (error) {
     window.webContents.send('iris:status', { state: 'error', message: String(error) })
   }
 }
 
 function stopIrisRuntime(): void {
-  if (metricsTimer) clearInterval(metricsTimer)
+  if (apiTimer) clearInterval(apiTimer)
   if (reconnectTimer) clearTimeout(reconnectTimer)
-  metricsTimer = undefined
+  apiTimer = undefined
   reconnectTimer = undefined
   previewSocket?.close()
   previewSocket = undefined
   if (!irisProcess) return
   const child = irisProcess
   irisProcess = undefined
-  child.kill()
+  void apiRequest('/shutdown').catch(() => undefined).finally(() => {
+    setTimeout(() => { if (irisProcess === child) child.kill() }, 1000)
+  })
 }
 
 function createWindow(): BrowserWindow {
@@ -187,33 +206,10 @@ app.whenReady().then(() => {
 
   // IPC test
   ipcMain.on('ping', () => console.log('pong'))
-  ipcMain.handle('iris:command', async (_event, command: string) => {
-    const line = command.trim()
-    if (!line || /[\r\n]/.test(line)) throw new Error('A terminal command must be one line')
-
-    // IRIS may have exited while Electron remained open. Relaunch it once so
-    // the terminal is usable without needing to restart the viewer itself.
-    if (!irisProcess?.stdin.writable && mainWindow) startIrisRuntime(mainWindow)
-    const child = irisProcess
-    if (!child?.stdin.writable) throw new Error('IRIS runtime could not be started')
-
-    await new Promise<void>((resolve, reject) => {
-      const onError = (error: Error): void => {
-        child.stdin.removeListener('error', onError)
-        reject(error)
-      }
-      child.stdin.once('error', onError)
-      child.stdin.write(`${line}\n`, (error) => {
-        child.stdin.removeListener('error', onError)
-        if (error) reject(error)
-        else resolve()
-      })
-    })
-  })
+  ipcMain.handle('iris:api', async (_event, path: string, method = 'GET', body?: unknown) => apiRequest(path, method, body))
   ipcMain.handle('iris:stop', () => stopIrisRuntime())
 
   const window = createWindow()
-  mainWindow = window
   startIrisRuntime(window)
 
   app.on('activate', function () {

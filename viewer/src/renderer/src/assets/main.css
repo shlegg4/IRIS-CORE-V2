@@ -329,6 +329,18 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.runtime-controls { flex: 1; min-height: 0; overflow: auto; padding: 8px; color: #c8d5d7; font-size: 10px; }
+.runtime-controls details { border-bottom: 1px solid #1e292d; padding: 8px 0; }
+.runtime-controls summary { cursor: pointer; color: #70e3e0; letter-spacing: .08em; font-size: 10px; display: flex; justify-content: space-between; }
+.runtime-controls summary span { color: #718087; }
+.control-fields { display: grid; gap: 6px; margin-top: 8px; }
+.control-fields input, .control-fields select, .camera-row button, .control-fields button { min-width: 0; border: 1px solid #263b40; background: #0d181b; color: #c8d5d7; padding: 6px; font-size: 10px; }
+.control-fields button, .camera-row button { color: #70e3e0; cursor: pointer; }
+.control-fields label { color: #9eb3b4; }
+.camera-row { display: flex; align-items: center; gap: 5px; }
+.camera-row span { flex: 1; }
+.control-log { max-height: 180px; overflow: auto; color: #718087; line-height: 1.5; margin-top: 8px; word-break: break-word; }
+.control-message { display: block; padding: 8px 0; color: #ffcf70; }
 
 @media (max-width: 700px) {
   .workspace {

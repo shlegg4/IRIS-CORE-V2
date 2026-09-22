@@ -33,9 +33,14 @@ export interface CalibrationSnapshot {
 }
 export interface CameraStatus {
   camera_id: number
+  device_index?: number | null
+  device_symbolic_link?: string
   width: number
   height: number
   fps: number
+  frame_rate?: { numerator: number; denominator: number; value?: number }
+  format?: string
+  cuda_device?: number
   reconnect: boolean
 }
 export interface RuntimeStatus {

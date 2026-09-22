@@ -1,15 +1,12 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onMounted, onBeforeUnmount, ref } from 'vue'
 import ThreeGraph from './components/ThreeGraph.vue'
 import MetricsPage from './components/MetricsPage.vue'
 import CameraGridPage from './components/CameraGridPage.vue'
+import RuntimeControls from './components/RuntimeControls.vue'
 import type { CalibrationSnapshot, MetricsSnapshot, PoseFrame, RuntimeStatus } from './types/iris'
 const showGrid = ref(true),
-  command = ref(''),
   activeTab = ref<'output' | 'metrics' | 'cameras'>('output')
-const commandHistory = ref<string[]>([])
-const historyIndex = ref(-1)
-let historyDraft = ''
 const logs = ref([
   ['10:42:01', 'system', 'IRIS runtime connected on localhost:8080'],
   ['10:42:02', 'ok', 'Loaded 4 camera streams · 60 FPS'],
@@ -20,7 +17,6 @@ const poseFrame = ref<PoseFrame | null>(null)
 const calibration = ref<CalibrationSnapshot | null>(null)
 const runtimeStatus = ref<RuntimeStatus>({})
 const showCameras = ref(true)
-const terminalOutput = ref<HTMLElement | null>(null)
 const consoleWidth = ref(286)
 const poseSequence = computed(
   () => poseFrame.value?.sequence ?? poseFrame.value?.sourceSequence ?? 0
@@ -30,56 +26,6 @@ const posePointCount = computed(
     total + (person.valid ?? person.jointValid ?? []).filter((valid) => valid).length, 0) ??
     (poseFrame.value?.joints ?? poseFrame.value?.joints3d ?? poseFrame.value?.joints_3d)?.length ?? 0
 )
-async function runCommand(): Promise<void> {
-  const value = command.value.trim()
-  if (value) {
-    if (commandHistory.value.at(-1) !== value) commandHistory.value.push(value)
-    historyIndex.value = -1
-    historyDraft = ''
-    logs.value.push([new Date().toLocaleTimeString('en-GB'), 'cmd', value])
-    command.value = ''
-    try {
-      await window.api.sendCommand(value)
-    } catch (error) {
-      logs.value.push([
-        new Date().toLocaleTimeString('en-GB'),
-        'error',
-        `Command was not sent: ${error instanceof Error ? error.message : String(error)}`
-      ])
-    }
-  }
-}
-function handleCommandKeydown(event: KeyboardEvent): void {
-  if (event.key === 'Tab') {
-    event.preventDefault()
-    const input = event.currentTarget as HTMLTextAreaElement
-    const start = input.selectionStart
-    const end = input.selectionEnd
-    command.value = `${command.value.slice(0, start)}\t${command.value.slice(end)}`
-    nextTick(() => input.setSelectionRange(start + 1, start + 1))
-    return
-  }
-
-  if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return
-  if (!commandHistory.value.length) return
-  event.preventDefault()
-  const input = event.currentTarget as HTMLTextAreaElement
-
-  if (historyIndex.value === -1) historyDraft = command.value
-  if (event.key === 'ArrowUp') {
-    historyIndex.value = Math.min(historyIndex.value + 1, commandHistory.value.length - 1)
-  } else if (historyIndex.value > 0) {
-    historyIndex.value -= 1
-  } else {
-    historyIndex.value = -1
-    command.value = historyDraft
-    return
-  }
-  command.value = commandHistory.value[commandHistory.value.length - 1 - historyIndex.value]
-  nextTick(() => {
-    input.setSelectionRange(command.value.length, command.value.length)
-  })
-}
 function startResize(event: PointerEvent): void {
   const startX = event.clientX
   const startWidth = consoleWidth.value
@@ -94,14 +40,6 @@ function startResize(event: PointerEvent): void {
   window.addEventListener('pointermove', onMove)
   window.addEventListener('pointerup', onEnd, { once: true })
 }
-watch(
-  logs,
-  async (): Promise<void> => {
-    await nextTick()
-    if (terminalOutput.value) terminalOutput.value.scrollTop = terminalOutput.value.scrollHeight
-  },
-  { deep: true }
-)
 const subscriptions: Array<() => void> = []
 onMounted(() => {
   subscriptions.push(
@@ -126,29 +64,7 @@ onBeforeUnmount(() => subscriptions.forEach((unsubscribe) => unsubscribe()))
 <template>
   <main class="app-shell">
     <section class="workspace" :style="{ '--console-width': `${consoleWidth}px` }">
-      <aside class="console panel">
-        <div class="panel-heading">TERMINAL <span>⌁</span></div>
-        <div ref="terminalOutput" class="terminal-output">
-          <div v-for="(log, index) in logs" :key="index" class="log-line">
-            <span class="time">{{ log[0] }}</span
-            ><span :class="['kind', log[1]]">{{ log[1] }}</span
-            ><span class="log-text">{{ log[2] }}</span>
-          </div>
-          <div class="cursor-line">
-            <span class="prompt">›</span
-            ><textarea
-              v-model="command"
-              autofocus
-              placeholder="Enter command..."
-              rows="1"
-              spellcheck="false"
-              @keydown="handleCommandKeydown"
-              @keydown.enter.prevent="runCommand"
-            ></textarea>
-          </div>
-        </div>
-        <div class="console-footer">main · 4 workers <span>UTF-8</span></div>
-      </aside>
+      <aside class="console panel"><div class="panel-heading">RUNTIME CONTROLS <span>⌁</span></div><RuntimeControls :status="runtimeStatus" :metrics="metrics" :logs="logs" /><div class="console-footer">REST · 127.0.0.1:8090 <span>LOCAL</span></div></aside>
       <div
         class="console-resizer"
         role="separator"
@@ -186,7 +102,7 @@ onBeforeUnmount(() => subscriptions.forEach((unsubscribe) => unsubscribe()))
           </div>
         </div>
         <MetricsPage v-else-if="activeTab === 'metrics'" :snapshot="metrics" />
-        <CameraGridPage v-else :status="runtimeStatus" />
+        <CameraGridPage v-if="activeTab === 'cameras'" :status="runtimeStatus" />
       </section>
     </section>
     <footer class="statusbar">

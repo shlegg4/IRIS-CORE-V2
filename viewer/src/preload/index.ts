@@ -3,7 +3,25 @@ import { electronAPI } from '@electron-toolkit/preload'
 
 // Custom APIs for renderer
 const api = {
-  sendCommand: (command: string) => ipcRenderer.invoke('iris:command', command),
+  request: (path: string, method = 'GET', body?: unknown) => ipcRenderer.invoke('iris:api', path, method, body),
+  getStatus: () => ipcRenderer.invoke('iris:api', '/status'),
+  getMetrics: () => ipcRenderer.invoke('iris:api', '/metrics'),
+  listCameras: () => ipcRenderer.invoke('iris:api', '/cameras'),
+  startPipeline: () => ipcRenderer.invoke('iris:api', '/pipeline/start', 'POST'),
+  stopPipeline: () => ipcRenderer.invoke('iris:api', '/pipeline/stop', 'POST'),
+  stopRecording: () => ipcRenderer.invoke('iris:api', '/recording/stop', 'POST'),
+  startRecording: (body: unknown) => ipcRenderer.invoke('iris:api', '/recording/start', 'POST', body),
+  configureCamera: (id: number, body: unknown) => ipcRenderer.invoke('iris:api', `/cameras/${id}`, 'PATCH', body),
+  addCamera: (body: unknown) => ipcRenderer.invoke('iris:api', '/cameras', 'POST', body),
+  removeCamera: (id: number) => ipcRenderer.invoke('iris:api', `/cameras/${id}`, 'DELETE'),
+  configurePose: (body: unknown) => ipcRenderer.invoke('iris:api', '/pose', 'PATCH', body),
+  configurePreview: (body: unknown) => ipcRenderer.invoke('iris:api', '/outputs/preview', 'PATCH', body),
+  configureSynchronizer: (body: unknown) => ipcRenderer.invoke('iris:api', '/synchronizer', 'PATCH', body),
+  getCalibration: () => ipcRenderer.invoke('iris:api', '/calibration'),
+  startCalibration: (body?: unknown) => ipcRenderer.invoke('iris:api', '/calibration/start', 'POST', body),
+  cancelCalibration: () => ipcRenderer.invoke('iris:api', '/calibration/cancel', 'POST'),
+  clearCalibration: () => ipcRenderer.invoke('iris:api', '/calibration/clear', 'POST'),
+  shutdownRuntime: () => ipcRenderer.invoke('iris:api', '/shutdown', 'POST'),
   stop: () => ipcRenderer.invoke('iris:stop'),
   onLog: (callback: (log: string) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, log: string): void => callback(log)

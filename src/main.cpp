@@ -13,6 +13,12 @@ int main(int argc, char** argv) {
         runtime.start();
         iris::api::RestApiServer api(runtime);
         api.start();
+        iris::PreviewConfig preview;
+        preview.http.enabled = true;
+        preview.http.bind_address = "127.0.0.1";
+        preview.http.port = 8080;
+        auto preview_configured = runtime.execute(iris::ConfigurePreviewCommand{preview});
+        if (!preview_configured) { api.stop(); runtime.stop(); return 1; }
         const auto started = runtime.execute(iris::StartPipelineCommand{});
         if (!started) { runtime.stop(); return 1; }
         while (true) {
