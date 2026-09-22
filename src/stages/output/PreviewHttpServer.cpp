@@ -175,7 +175,6 @@ class PreviewHttpServer::Impl {
                     if (awaiting_keyframe[packet.camera] && !(packet.flags & h264_flag_keyframe)) continue;
                     auto next = packet;
                     if (previous == last_sequence.end() && !(packet.flags & h264_flag_keyframe)) { awaiting_keyframe[packet.camera] = true; continue; }
-                    if (previous != last_sequence.end() && packet.sequence > previous->second + 1) { awaiting_keyframe[packet.camera] = true; if (!(packet.flags & h264_flag_keyframe)) continue; }
                     if (packet.flags & h264_flag_discontinuity) { awaiting_keyframe[packet.camera] = true; if (!(packet.flags & h264_flag_keyframe)) continue; }
                     awaiting_keyframe[packet.camera] = false;
                     last_sequence[packet.camera] = packet.sequence;

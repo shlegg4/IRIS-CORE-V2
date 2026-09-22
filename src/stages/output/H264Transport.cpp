@@ -78,7 +78,7 @@ struct Encoder {
         hardware = av_frame_alloc(); if (!hardware) throw std::bad_alloc();
         hardware->format = AV_PIX_FMT_CUDA; hardware->width = width; hardware->height = height;
     }
-    std::vector<std::pair<std::vector<std::uint8_t>, bool>> encode(const Frame& frame, std::uint32_t rate, std::uint32_t bitrate, std::uint32_t max_width) {
+    std::vector<std::pair<std::vector<std::uint8_t>, bool>> encode(const Frame& frame, std::uint32_t rate, std::uint32_t bitrate, std::uint32_t max_width, bool force_keyframe) {
         const auto target_width = frame.extent.width > max_width ? (max_width & ~1U) : (frame.extent.width & ~1U);
         const auto target_height = static_cast<std::uint32_t>((static_cast<std::uint64_t>(frame.extent.height) * target_width / frame.extent.width) & ~1ULL);
         if (!codec) open(target_width, target_height, rate, bitrate);
@@ -93,7 +93,7 @@ struct Encoder {
                             reinterpret_cast<std::uint8_t*>(hardware->data[0]), hardware->linesize[0], width, height, nullptr);
         if (cudaGetLastError() != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) { if (resized) cudaFree(resized); throw std::runtime_error("CUDA preview conversion failed"); }
         if (resized) cudaFree(resized);
-        hardware->pts = static_cast<std::int64_t>(sequence++); if (avcodec_send_frame(codec, hardware) < 0) throw std::runtime_error("NVENC send failed");
+        hardware->pts = static_cast<std::int64_t>(sequence++); if (force_keyframe) hardware->pict_type = AV_PICTURE_TYPE_I; if (avcodec_send_frame(codec, hardware) < 0) throw std::runtime_error("NVENC send failed");
         std::vector<std::pair<std::vector<std::uint8_t>, bool>> output; AVPacket* packet = av_packet_alloc(); if (!packet) throw std::bad_alloc();
         while (avcodec_receive_packet(codec, packet) == 0) { output.emplace_back(to_avcc(std::vector<std::uint8_t>(packet->data, packet->data + packet->size)), (packet->flags & AV_PKT_FLAG_KEY) != 0); av_packet_unref(packet); }
         av_packet_free(&packet); return output;
@@ -109,7 +109,7 @@ class H264Transport::Impl {
     ~Impl() { stop(); }
     void start() { if (running.exchange(true)) return; worker = std::thread([this] { run(); }); }
     void stop() noexcept { if (running.exchange(false)) queue.close(); if (worker.joinable()) worker.join(); }
-    void publish(PreviewPacket packet) noexcept { if (!running) return; const auto result = queue.send(std::move(packet)); if (result != SendResult::Sent) ++dropped; }
+    void publish(PreviewPacket packet) noexcept { if (!running) return; const auto result = queue.send(std::move(packet)); if (result != SendResult::Sent) { force_keyframe.store(true); ++dropped; } }
     PreviewTransportHealth health() const { std::scoped_lock lock(mutex); return {config.enabled, clients, 0, clients, 0, published, dropped, error, "H264/NVENC", 0, 0}; }
   private:
     void run() noexcept {
@@ -122,7 +122,7 @@ class H264Transport::Impl {
                 if (encoder && (encoder->width != target_width || encoder->height != target_height)) encoder.reset();
                 if (!encoder) encoder = std::make_unique<Encoder>();
                 const bool was_open = encoder->codec != nullptr;
-                auto encoded = encoder->encode(frame, config.max_fps, config.bitrate, config.max_width);
+                auto encoded = encoder->encode(frame, config.max_fps, config.bitrate, config.max_width, force_keyframe.exchange(false));
                 if (!was_open && encoder->codec) {
                     H264PreviewStreamConfig stream;
                     stream.camera = frame.camera; stream.width = encoder->width; stream.height = encoder->height;
@@ -147,7 +147,7 @@ class H264Transport::Impl {
             }
         }
     }
-    H264PreviewConfig config; PreviewHttpServer& server; H264Transport::PublishObserver observer; Channel<PreviewPacket> queue; std::atomic_bool running{false}; std::thread worker; mutable std::mutex mutex; std::unordered_map<CameraId, std::unique_ptr<Encoder>> encoders; std::size_t published{}, dropped{}, clients{}; std::string error;
+    H264PreviewConfig config; PreviewHttpServer& server; H264Transport::PublishObserver observer; Channel<PreviewPacket> queue; std::atomic_bool running{false}, force_keyframe{false}; std::thread worker; mutable std::mutex mutex; std::unordered_map<CameraId, std::unique_ptr<Encoder>> encoders; std::size_t published{}, dropped{}, clients{}; std::string error;
 };
 H264Transport::H264Transport(H264PreviewConfig config, PreviewHttpServer& server, PublishObserver observer) : impl_(std::make_unique<Impl>(std::move(config), server, std::move(observer))) {}
 H264Transport::~H264Transport() = default; void H264Transport::start() { impl_->start(); } void H264Transport::publish(PreviewPacket packet) noexcept { impl_->publish(std::move(packet)); } void H264Transport::stop() noexcept { impl_->stop(); } PreviewTransportHealth H264Transport::health() const { return impl_->health(); }

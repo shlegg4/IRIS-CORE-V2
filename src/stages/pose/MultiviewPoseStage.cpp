@@ -165,9 +165,15 @@ class MultiviewPoseStage::Impl {
                 continue;
             }
         }
+        // Keep 2-D observations publishable even when multiview geometry
+        // rejects the reconstruction.  Otherwise one bad epipolar match
+        // makes the camera overlays disappear with the entire person.
+        const auto valid_2d = std::ranges::count_if(pose.point_valid, [](const auto& view) {
+            return std::ranges::count(view, true) >= 5;
+        });
         pose.active = config_.two_d_only
-            ? std::ranges::count(pose.point_valid[0], true) >= 5
-            : std::ranges::count(pose.joint_valid, true) >= 5;
+            ? valid_2d >= 1
+            : valid_2d >= 1;
         if (!pose.active) poses.pop_back();
         }
         packet.multiview_poses = std::move(poses);
