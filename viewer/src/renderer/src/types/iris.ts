@@ -33,6 +33,14 @@ export interface CalibrationSnapshot {
 }
 export interface CameraStatus {
   camera_id: number
+  connected?: boolean
+  state?: string
+  last_error?: string | null
+  frames_received?: number
+  frames_dropped?: number
+  source_errors?: number
+  last_frame_timestamp?: string
+  reconnect_count?: number | null
   device_index?: number | null
   device_symbolic_link?: string
   width: number
@@ -41,19 +49,58 @@ export interface CameraStatus {
   frame_rate?: { numerator: number; denominator: number; value?: number }
   format?: string
   cuda_device?: number
+  sample_queue_capacity?: number
+  frame_pool_capacity?: number
+  overflow?: string
+  rotation?: string
+  allow_format_fallback?: boolean
   reconnect: boolean
 }
+export interface CameraCaptureSettings {
+  device_index?: number | null
+  device_symbolic_link?: string
+  width: number
+  height: number
+  frame_rate: number
+  format: string
+  cuda_device: number
+  sample_queue_capacity: number
+  frame_pool_capacity: number
+  overflow: string
+  rotation: string
+  allow_format_fallback: boolean
+  reconnect: boolean
+}
+export interface CreateCameraRequest extends CameraCaptureSettings {
+  camera_id: number
+}
+export type UpdateCameraRequest = Partial<CameraCaptureSettings>
 export interface RuntimeStatus {
-  pipeline?: string
+  state?: string
+  recording?: boolean
+  recording_path?: string
+  shared_memory_enabled?: boolean
+  shared_memory_destination?: string
   cameras?: CameraStatus[]
-  previewDropped?: number
-  previewPublished?: number
+  processed_packets?: number
+  sync_tolerance_ms?: number
+  sync_queue_capacity?: number
+  incomplete_batch_policy?: string
+  pose_backend?: string
+  pose_model_path?: string
+  pose_engine_path?: string
+  last_error?: string
   preview?: {
+    bind_address?: string
     port?: number
     enabled?: boolean
+    published_packets?: number
+    dropped_packets?: number
+    connected_clients?: number
+    event_clients?: number
+    h264_clients?: number
+    mjpeg_clients?: number
     last_error?: string
-    h264?: { enabled?: boolean; connected_clients?: number; published_packets?: number; dropped_packets?: number; last_error?: string; codec?: string; bitrate?: number; max_fps?: number; max_width?: number }
   }
-  lastError?: string
   calibration?: CalibrationSnapshot
 }

@@ -56,6 +56,6 @@ struct Packet {
     std::optional<PoseBatch> poses;
     // Results from the fixed three-view COCO-17 TensorRT engine. Coordinates
     // use the calibration world frame and units (e.g. centimetres for Panoptic).
-    std::optional<std::array<MultiviewPose, 10>> multiview_poses;
+    std::optional<std::vector<MultiviewPose>> multiview_poses;
 };
 } // namespace iris

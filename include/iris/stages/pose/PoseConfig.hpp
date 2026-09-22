@@ -30,6 +30,10 @@ struct PoseConfig {
     // The fixed-batch engine is fed three copies internally; no rig calibration
     // or triangulation is required.
     bool two_d_only{};
+    std::size_t max_persons{10};
+    float epipolar_gate_px{12.0F};
+    float minimum_joint_confidence{0.1F};
+    float maximum_reprojection_error_px{8.0F};
     struct CameraCalibration {
         CameraId camera_id{};
         std::array<float, 9> R_w2c{};

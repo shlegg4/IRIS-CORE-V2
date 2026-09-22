@@ -1,4 +1,5 @@
 import { ElectronAPI } from '@electron-toolkit/preload'
+import type { CreateCameraRequest, UpdateCameraRequest } from '../renderer/src/types/iris'
 
 declare global {
   interface Window {
@@ -6,14 +7,14 @@ declare global {
     api: {
       request(path: string, method?: string, body?: unknown): Promise<unknown>
       getStatus(): Promise<unknown>
-      getMetrics(): Promise<unknown>
+      getMetrics(prefix?: string): Promise<unknown>
       listCameras(): Promise<unknown>
       startPipeline(): Promise<unknown>
       stopPipeline(): Promise<unknown>
       startRecording(body: unknown): Promise<unknown>
       stopRecording(): Promise<unknown>
-      configureCamera(id: number, body: unknown): Promise<unknown>
-      addCamera(body: unknown): Promise<unknown>
+      configureCamera(id: number, body: UpdateCameraRequest): Promise<unknown>
+      addCamera(body: CreateCameraRequest): Promise<unknown>
       removeCamera(id: number): Promise<unknown>
       configurePose(body: unknown): Promise<unknown>
       configurePreview(body: unknown): Promise<unknown>

@@ -16,12 +16,14 @@ struct TensorRtMultiviewResult {
         double download_host_ms{}, wait_host_ms{};
         double preprocess_stream_ms{}, engine_stream_ms{}, download_stream_ms{};
     } timings;
-    // The engine is batched over camera views.  These are indexed [view][candidate][joint].
-    std::array<float, 3 * 10 * 17 * 2> keypoints{};
-    std::array<float, 3 * 10 * 17> keypoint_scores{};
-    std::array<float, 3 * 10> instance_scores{};
-    std::array<float, 3 * 10 * 4> boxes{};
-    std::array<unsigned char, 3 * 10> candidate_valid{};
+    // Detector tensors remain device-resident; only selected observations and
+    // finalized triangulated joints cross the pose-stage boundary.
+    std::array<float, 10 * 17 * 3> triangulated_xyz{};
+    std::array<unsigned char, 10 * 17> triangulated_valid{};
+    std::array<unsigned char, 10 * 3> assignments{};
+    std::array<float, 10 * 3 * 17 * 2> selected_keypoints{};
+    std::array<float, 10 * 3 * 17> selected_scores{};
+    std::array<unsigned char, 10 * 3 * 17> selected_valid{};
     // Intrinsics in the letterboxed 640x640 coordinate system used by keypoints.
     std::array<float, 3 * 9> letterbox_intrinsics{};
 };

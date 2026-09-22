@@ -47,8 +47,8 @@ std::vector<std::byte> v2(const Packet& p) {
     const auto frame_count=static_cast<std::uint32_t>(p.frames.size()), pose_count=static_cast<std::uint32_t>(p.poses?p.poses->size():0); append(out,frame_count); append(out,pose_count);
     for(const auto& f:p.frames) { append(out,f.camera); append(out,f.sequence); append(out,f.extent.width); append(out,f.extent.height); append(out,f.format); append(out,f.buffer.stride_bytes); append(out,f.buffer.size_bytes); append(out,f.buffer.device_id); const auto source_ns=f.timing.source_time.count(); append(out,source_ns); cudaIpcMemHandle_t h{}; if(!f.buffer.data || cudaIpcGetMemHandle(&h,f.buffer.data)!=cudaSuccess) throw std::runtime_error("could not export output frame through CUDA IPC"); const auto* b=reinterpret_cast<const std::byte*>(&h); out.insert(out.end(),b,b+sizeof h); }
     if(p.poses) for(const auto& pose:*p.poses) append(out,pose.source_sequence);
-    const auto nm=static_cast<std::uint32_t>(p.multiview_poses?p.multiview_poses->size():0);append(out,nm);
-    if(p.multiview_poses)for(const auto& pose:*p.multiview_poses){const std::uint8_t active=pose.active?1:0;append(out,active);for(const auto& joint:pose.joints_3d)for(float value:joint)append(out,value);for(bool valid:pose.joint_valid){const std::uint8_t value=valid?1:0;append(out,value);}for(const auto& view:pose.joint_scores)for(float score:view)append(out,score);}
+     const auto nm=static_cast<std::uint32_t>(p.multiview_poses?p.multiview_poses->size():0);append(out,nm);
+     if(p.multiview_poses)for(const auto& pose:*p.multiview_poses){const std::uint8_t active=pose.active?1:0;append(out,active);for(const auto& joint:pose.joints_3d)for(float value:joint)append(out,value);for(bool valid:pose.joint_valid){const std::uint8_t value=valid?1:0;append(out,value);}for(const auto& view:pose.joint_scores)for(float score:view)append(out,score);}
     const auto n=static_cast<std::uint64_t>(out.size()); std::memcpy(out.data()+sizeof(magic)+sizeof(version),&n,sizeof n); return out;
 }
 template <std::size_t N>

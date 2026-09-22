@@ -14,5 +14,13 @@ iris_test(runtime_control_tests runtime/RuntimeControlTests.cpp)
 iris_test(h264_preview_protocol_tests stages/H264PreviewProtocolTests.cpp)
 
 if(IRIS_BUILD_HARDWARE_TESTS)
+  add_executable(multiview_cuda_postprocess_tests
+    stages/MultiviewCudaPostprocessTests.cpp
+    ${PROJECT_SOURCE_DIR}/src/stages/pose/MultiviewCudaPostprocess.cu)
+  target_link_libraries(multiview_cuda_postprocess_tests PRIVATE CUDA::cudart)
+  target_include_directories(multiview_cuda_postprocess_tests PRIVATE ${PROJECT_SOURCE_DIR}/include)
+  set_target_properties(multiview_cuda_postprocess_tests PROPERTIES CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED YES)
+  add_test(NAME multiview_cuda_postprocess_tests COMMAND multiview_cuda_postprocess_tests)
+  set_tests_properties(multiview_cuda_postprocess_tests PROPERTIES LABELS "hardware")
   add_subdirectory(hardware)
 endif()

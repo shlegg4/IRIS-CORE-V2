@@ -11,13 +11,11 @@
 #include <ranges>
 
 #ifdef IRIS_HAS_TENSORRT
-#include <Eigen/Dense>
 #include <cmath>
 #endif
 
 namespace iris {
 namespace {
-constexpr float keypoint_confidence_threshold = 0.1F;
 }
 
 class MultiviewPoseStage::Impl {
@@ -40,6 +38,11 @@ class MultiviewPoseStage::Impl {
     }
     void start() {
         if (config_.multiview_engine_path.empty()) return;
+        if (config_.max_persons == 0 || config_.max_persons > 10)
+            throw std::invalid_argument("multiview max_persons must be between 1 and the engine candidate capacity (10)");
+        if (!(config_.epipolar_gate_px > 0.0F) || !(config_.minimum_joint_confidence >= 0.0F) ||
+            !(config_.maximum_reprojection_error_px > 0.0F))
+            throw std::invalid_argument("multiview geometry thresholds must be finite and positive");
         if (!std::filesystem::is_regular_file(config_.multiview_engine_path))
             throw std::runtime_error("multiview TensorRT engine does not exist: " + config_.multiview_engine_path.string());
         refresh_calibration();
@@ -105,41 +108,33 @@ class MultiviewPoseStage::Impl {
         const auto engine_start = std::chrono::steady_clock::now();
         engine_->infer(buffers, strides, widths, heights, result);
         const auto postprocess_start = std::chrono::steady_clock::now();
-        // RTMO candidates are local to each camera.  Select the strongest valid
-        // person independently per view; candidate index must not be associated
-        // across views before triangulation.
+        std::vector<MultiviewPose> poses;
+        poses.reserve(std::min<std::size_t>(config_.max_persons, 10));
+        for (std::size_t person_index = 0; person_index < std::min<std::size_t>(config_.max_persons, 10); ++person_index) {
         std::array<int, 3> selected{};
         selected.fill(-1);
-        for (std::size_t view = 0; view < view_count; ++view)
-            for (std::size_t candidate = 0; candidate < 10; ++candidate) {
-                const auto index = view * 10 + candidate;
-                if (result.candidate_valid[index] && std::isfinite(result.instance_scores[index]) &&
-                    (selected[view] < 0 || result.instance_scores[index] > result.instance_scores[view * 10 + selected[view]]))
-                    selected[view] = static_cast<int>(candidate);
-            }
-
-        std::array<MultiviewPose, 10> poses{};
-        auto& pose = poses[0];
+        for (std::size_t view = 0; view < view_count; ++view) {
+            const auto assignment = result.assignments[person_index * 3 + view];
+            selected[view] = assignment == 255 ? -1 : static_cast<int>(assignment);
+        }
+        auto& pose = poses.emplace_back();
         for (std::size_t view = 0; view < view_count; ++view)
             pose.view_camera_ids[view] = config_.multiview_calibration[view].camera_id;
         for (std::size_t joint = 0; joint < 17; ++joint) {
-            Eigen::Matrix<float, 6, 4> equations;
-            int rows = 0;
             for (std::size_t view = 0; view < view_count; ++view) {
                 if (selected[view] < 0) continue;
-                const auto candidate = static_cast<std::size_t>(selected[view]);
-                const auto score_index = (view * 10 + candidate) * 17 + joint;
-                const float score = result.keypoint_scores[score_index];
+                const auto score_index = (person_index * 3 + view) * 17 + joint;
+                const float score = result.selected_scores[score_index];
                 pose.joint_scores[view][joint] = score;
                 // RTMO emits small positive scores for effectively absent joints.
                 // Treating every positive value as an observation lets a single
                 // reliable view triangulate against noise from another camera,
                 // producing a coherent-looking skeleton in the wrong location.
-                if (!std::isfinite(score) || score < keypoint_confidence_threshold) continue;
+                if (!std::isfinite(score) || score < config_.minimum_joint_confidence) continue;
 
                 const auto point_index = score_index * 2;
-                const float x = result.keypoints[point_index];
-                const float y = result.keypoints[point_index + 1];
+                const float x = result.selected_keypoints[point_index];
+                const float y = result.selected_keypoints[point_index + 1];
                 if (!std::isfinite(x) || !std::isfinite(y)) continue;
                 const auto& source = *std::ranges::find(packet.frames, config_.multiview_calibration[view].camera_id, &Frame::camera);
                 const float scale = std::min(640.0F / static_cast<float>(source.extent.width), 640.0F / static_cast<float>(source.extent.height));
@@ -157,30 +152,24 @@ class MultiviewPoseStage::Impl {
                 const float yd = yu * radial + calibration.distortion[2] * (r2 + 2.0F * yu * yu) + 2.0F * calibration.distortion[3] * xu * yu;
                 pose.points_2d_px[view][joint] = {fx * xd + cx, fy * yd + cy};
                 pose.point_valid[view][joint] = true;
-                if (config_.two_d_only) continue;
-                Eigen::Matrix<float, 3, 4> extrinsic;
-                const auto& camera = config_.multiview_calibration[view];
-                for (int r = 0; r < 3; ++r) {
-                    for (int c = 0; c < 3; ++c) extrinsic(r, c) = camera.R_w2c[r * 3 + c];
-                    extrinsic(r, 3) = camera.t_w2c[r];
-                }
-                Eigen::Matrix3f intrinsic;
-                for (int r = 0; r < 3; ++r)
-                    for (int c = 0; c < 3; ++c) intrinsic(r, c) = result.letterbox_intrinsics[view * 9 + r * 3 + c];
-                const Eigen::Matrix<float, 3, 4> projection = intrinsic * extrinsic;
-                equations.row(rows++) = score * (x * projection.row(2) - projection.row(0));
-                equations.row(rows++) = score * (y * projection.row(2) - projection.row(1));
             }
-            if (rows < 4) continue;
-            const auto decomposition = equations.topRows(rows).jacobiSvd(Eigen::ComputeFullV);
-            const Eigen::Vector4f homogeneous = decomposition.matrixV().col(3);
-            if (!std::isfinite(homogeneous[3]) || std::abs(homogeneous[3]) < 1e-6F) continue;
-            pose.joints_3d[joint] = {homogeneous[0] / homogeneous[3], homogeneous[1] / homogeneous[3], homogeneous[2] / homogeneous[3]};
-            pose.joint_valid[joint] = true;
+            if (!config_.two_d_only) {
+                const auto gpu_index = person_index * 17 + joint;
+                if (result.triangulated_valid[gpu_index]) {
+                    pose.joints_3d[joint] = {
+                        result.triangulated_xyz[gpu_index * 3],
+                        result.triangulated_xyz[gpu_index * 3 + 1],
+                        result.triangulated_xyz[gpu_index * 3 + 2]};
+                    pose.joint_valid[joint] = true;
+                }
+                continue;
+            }
         }
         pose.active = config_.two_d_only
             ? std::ranges::count(pose.point_valid[0], true) >= 5
             : std::ranges::count(pose.joint_valid, true) >= 5;
+        if (!pose.active) poses.pop_back();
+        }
         packet.multiview_poses = std::move(poses);
         const auto finished = std::chrono::steady_clock::now();
         if (metrics_enabled_) {

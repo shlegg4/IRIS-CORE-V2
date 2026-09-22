@@ -20,6 +20,21 @@ function send(window: BrowserWindow, channel: string, payload: unknown): void {
 
 const API_BASE = 'http://127.0.0.1:8090/api/v1'
 type ApiResult = { status?: string; message?: string; snapshot?: unknown; [key: string]: unknown }
+function normalizeRuntimeStatus(payload: unknown): Record<string, unknown> {
+  if (!payload || typeof payload !== 'object') return { state: 'unknown' }
+  const value = payload as Record<string, unknown>
+  if (typeof value.state === 'string') return value
+  if (typeof value.pipeline === 'string') {
+    return {
+      ...value,
+      state: value.pipeline,
+      processed_packets: value.processedPackets,
+      last_error: value.lastError,
+      preview: value.preview
+    }
+  }
+  return value
+}
 async function apiRequest(path: string, method = 'GET', body?: unknown): Promise<ApiResult> {
   const response = await fetch(`${API_BASE}${path}`, {
     method,
@@ -41,7 +56,7 @@ function startApiBridge(window: BrowserWindow): void {
   const poll = async (): Promise<void> => {
     try {
       const [status, metrics] = await Promise.all([apiRequest('/status'), apiRequest('/metrics')])
-      send(window, 'iris:status', status)
+      send(window, 'iris:status', normalizeRuntimeStatus(status))
       send(window, 'iris:metrics', metrics)
     } catch (error) { send(window, 'iris:log', `REST polling error: ${String(error)}`) }
   }
@@ -56,7 +71,7 @@ function connectPreviewEvents(window: BrowserWindow): void {
     try {
       const envelope = JSON.parse(data.toString()) as { type?: string; data?: unknown }
       if (envelope.type === 'pose') send(window, 'iris:pose', envelope.data)
-      else if (envelope.type === 'status') send(window, 'iris:status', envelope.data)
+      else if (envelope.type === 'status') send(window, 'iris:status', normalizeRuntimeStatus(envelope.data))
     } catch (error) {
       send(window, 'iris:log', `preview event error: ${String(error)}`)
     }

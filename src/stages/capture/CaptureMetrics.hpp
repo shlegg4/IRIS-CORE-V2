@@ -3,7 +3,7 @@
 #include <string>
 namespace iris::capture {
 struct CaptureMetrics {
-    infrastructure::metrics::Counter samples_received, frames_emitted, decode_failures,
+    infrastructure::metrics::Counter samples_received, frames_emitted, reconnects, decode_failures,
         decode_invalid_header, decode_dimension_mismatch, decode_nvjpeg, decode_unsupported_format,
         decode_exceptions, source_errors, timestamp_regressions, clock_resets, pool_exhaustions,
         rotation_frames, rotation_failures, rotation_pool_exhaustions;
@@ -17,6 +17,7 @@ struct CaptureMetrics {
                             const std::string& prefix = "iris_capture")
         : samples_received(r.counter(prefix + "_samples_received_total")),
           frames_emitted(r.counter(prefix + "_frames_emitted_total")),
+          reconnects(r.counter(prefix + "_reconnects_total")),
           decode_failures(r.counter(prefix + "_decode_failures_total")),
           decode_invalid_header(r.counter(prefix + "_decode_invalid_header_total")),
           decode_dimension_mismatch(r.counter(prefix + "_decode_dimension_mismatch_total")),

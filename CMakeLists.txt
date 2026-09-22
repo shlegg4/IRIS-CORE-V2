@@ -58,7 +58,7 @@ add_library(iris
   src/stages/capture/FrameSynchronizerStage.cpp
   src/stages/capture/media_foundation/MediaFoundationSource.cpp
   src/stages/capture/decoding/GpuDecoder.cpp src/stages/capture/decoding/Yuy2CudaConverter.cu
-  src/stages/capture/decoding/BgrRotate.cu src/stages/pose/MultiviewPreprocess.cu
+  src/stages/capture/decoding/BgrRotate.cu src/stages/pose/MultiviewPreprocess.cu src/stages/pose/MultiviewCudaPostprocess.cu
   src/stages/pose/PoseStage.cpp src/stages/pose/MultiviewPoseStage.cpp src/stages/pose/TensorRtMultiviewEngine.cpp src/stages/output/OutputStage.cpp src/stages/output/PreviewSink.cpp
   src/stages/output/PreviewHttpServer.cpp
   src/stages/output/H264PreviewProtocol.cpp

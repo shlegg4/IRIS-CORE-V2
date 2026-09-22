@@ -1,4 +1,5 @@
 #include "iris/stages/pose/TensorRtMultiviewEngine.hpp"
+#include "iris/stages/pose/MultiviewCudaPostprocess.hpp"
 
 #include <stdexcept>
 #include <algorithm>
@@ -10,6 +11,7 @@
 #include <cuda_runtime_api.h>
 #include <fstream>
 #include <vector>
+#include <Eigen/Dense>
 extern "C" cudaError_t iris_multiview_preprocess(const void* const*, const std::size_t*, const std::uint32_t*, const std::uint32_t*, const float*, const float*, const float*, float*, cudaStream_t, const std::uint8_t**, std::size_t*, std::uint32_t*, std::uint32_t*, float*, float*, float*);
 
 namespace {
@@ -48,6 +50,9 @@ class TensorRtMultiviewEngine::Impl {
   public:
     explicit Impl(const PoseConfig& config) {
 #ifdef IRIS_HAS_TENSORRT
+        minimum_score_ = config.minimum_joint_confidence;
+        maximum_reprojection_error_ = config.maximum_reprojection_error_px;
+        config_gate_px_ = config.epipolar_gate_px;
         std::ifstream file(config.multiview_engine_path, std::ios::binary | std::ios::ate);
         if (!file) throw std::runtime_error("could not open TensorRT engine: " + config.multiview_engine_path.string());
         const auto size = static_cast<std::size_t>(file.tellg());
@@ -83,11 +88,20 @@ class TensorRtMultiviewEngine::Impl {
         check_cuda(cudaMalloc(&source_k_, sizeof(float) * 27), "cudaMalloc source intrinsics");
         check_cuda(cudaMalloc(&target_k_, sizeof(float) * 27), "cudaMalloc target intrinsics");
         check_cuda(cudaMalloc(&distortion_, sizeof(float) * 15), "cudaMalloc distortion");
+        check_cuda(cudaMalloc(&projections_, sizeof(float) * 36), "cudaMalloc projections");
+        check_cuda(cudaMalloc(&triangulated_xyz_, sizeof(float) * 10 * 17 * 3), "cudaMalloc triangulated xyz");
+        check_cuda(cudaMalloc(&triangulated_valid_, sizeof(unsigned char) * 10 * 17), "cudaMalloc triangulated valid");
+        check_cuda(cudaMalloc(&fundamentals_, sizeof(float) * 18), "cudaMalloc fundamentals");
+        check_cuda(cudaMalloc(&assignments_, sizeof(unsigned char) * 30), "cudaMalloc assignments");
+        check_cuda(cudaMalloc(&selected_keypoints_, sizeof(float) * 10 * 3 * 17 * 2), "cudaMalloc selected keypoints");
+        check_cuda(cudaMalloc(&selected_scores_, sizeof(float) * 10 * 3 * 17), "cudaMalloc selected scores");
+        check_cuda(cudaMalloc(&selected_valid_, sizeof(unsigned char) * 10 * 3 * 17), "cudaMalloc selected valid");
         bind_fixed_io();
         initialize_cuda_graph();
         for (std::size_t i = 0; i < 3; ++i) {
             std::copy(config.multiview_calibration[i].intrinsics.begin(), config.multiview_calibration[i].intrinsics.end(), calibration_k_.begin() + i * 9);
             std::copy(config.multiview_calibration[i].distortion.begin(), config.multiview_calibration[i].distortion.end(), calibration_distortion_.begin() + i * 5);
+            calibration_[i] = config.multiview_calibration[i];
         }
 #else
         (void)config;
@@ -103,6 +117,9 @@ class TensorRtMultiviewEngine::Impl {
         cudaFree(keypoints_); cudaFree(keypoint_scores_); cudaFree(instance_scores_); cudaFree(boxes_); cudaFree(candidate_valid_);
         cudaFree(source_ptrs_); cudaFree(strides_); cudaFree(widths_); cudaFree(heights_);
         cudaFree(source_k_); cudaFree(target_k_); cudaFree(distortion_);
+        cudaFree(projections_); cudaFree(triangulated_xyz_); cudaFree(triangulated_valid_);
+        cudaFree(fundamentals_); cudaFree(assignments_);
+        cudaFree(selected_keypoints_); cudaFree(selected_scores_); cudaFree(selected_valid_);
         if (stream_) cudaStreamDestroy(stream_);
 #endif
     }
@@ -144,12 +161,45 @@ class TensorRtMultiviewEngine::Impl {
         }
         result.timings.enqueue_host_ms = elapsed_ms(enqueue_start);
         check_cuda(cudaEventRecord(timing_events_[3].value, stream_), "time engine end");
+        std::array<float, 36> projections{};
+        for (std::size_t view = 0; view < 3; ++view) {
+            const auto& camera = calibration_[view];
+            const auto* k = target_k.data() + view * 9;
+            for (int row = 0; row < 3; ++row) for (int col = 0; col < 4; ++col) {
+                float value = 0.0F;
+                for (int inner = 0; inner < 3; ++inner)
+                    value += k[row * 3 + inner] * (col < 3 ? camera.R_w2c[inner * 3 + col] : camera.t_w2c[inner]);
+                projections[view * 12 + row * 4 + col] = value;
+            }
+        }
+        check_cuda(cudaMemcpyAsync(projections_, projections.data(), sizeof(projections), cudaMemcpyHostToDevice, stream_), "copy projections");
+        std::array<float, 18> fundamentals{};
+        const Eigen::Matrix3f k0 = Eigen::Map<const Eigen::Matrix<float, 3, 3, Eigen::RowMajor>>(target_k.data());
+        for (int view = 1; view < 3; ++view) {
+            const auto& first = calibration_[0]; const auto& second = calibration_[view];
+            Eigen::Matrix3f r0, r1; Eigen::Vector3f t0, t1;
+            for (int row = 0; row < 3; ++row) for (int col = 0; col < 3; ++col) {
+                r0(row, col) = first.R_w2c[row * 3 + col]; r1(row, col) = second.R_w2c[row * 3 + col];
+            }
+            for (int i = 0; i < 3; ++i) { t0(i) = first.t_w2c[i]; t1(i) = second.t_w2c[i]; }
+            const auto relative_r = r1 * r0.transpose(); const auto relative_t = t1 - relative_r * t0;
+            Eigen::Matrix3f skew;
+            skew << 0.0F, -relative_t.z(), relative_t.y(), relative_t.z(), 0.0F, -relative_t.x(), -relative_t.y(), relative_t.x(), 0.0F;
+            const auto kv = Eigen::Map<const Eigen::Matrix<float, 3, 3, Eigen::RowMajor>>(target_k.data() + view * 9);
+            const auto f = kv.inverse().transpose() * skew * relative_r * k0.inverse();
+            for (int row = 0; row < 3; ++row) for (int col = 0; col < 3; ++col) fundamentals[(view - 1) * 9 + row * 3 + col] = f(row, col);
+        }
+        check_cuda(cudaMemcpyAsync(fundamentals_, fundamentals.data(), sizeof(fundamentals), cudaMemcpyHostToDevice, stream_), "copy epipolar fundamentals");
+        check_cuda(launch_multiview_epipolar_assignment(static_cast<const float*>(keypoints_), static_cast<const float*>(keypoint_scores_), static_cast<const unsigned char*>(candidate_valid_), static_cast<const float*>(fundamentals_), config_gate_px_, static_cast<unsigned char*>(assignments_), stream_), "launch epipolar assignment");
+        check_cuda(launch_multiview_gather_selected(static_cast<const float*>(keypoints_), static_cast<const float*>(keypoint_scores_), static_cast<const unsigned char*>(candidate_valid_), static_cast<const unsigned char*>(assignments_), static_cast<float*>(selected_keypoints_), static_cast<float*>(selected_scores_), static_cast<unsigned char*>(selected_valid_), stream_), "gather selected observations");
+        check_cuda(launch_multiview_weighted_dlt(static_cast<const float*>(keypoints_), static_cast<const float*>(keypoint_scores_), static_cast<const unsigned char*>(candidate_valid_), static_cast<const unsigned char*>(assignments_), static_cast<const float*>(projections_), minimum_score_, maximum_reprojection_error_, static_cast<float*>(triangulated_xyz_), static_cast<unsigned char*>(triangulated_valid_), stream_), "launch GPU triangulation");
         const auto download_start = TimingClock::now();
-        check_cuda(cudaMemcpyAsync(result.keypoints.data(), keypoints_, sizeof(float) * result.keypoints.size(), cudaMemcpyDeviceToHost, stream_), "copy keypoints");
-        check_cuda(cudaMemcpyAsync(result.keypoint_scores.data(), keypoint_scores_, sizeof(float) * result.keypoint_scores.size(), cudaMemcpyDeviceToHost, stream_), "copy keypoint_scores");
-        check_cuda(cudaMemcpyAsync(result.instance_scores.data(), instance_scores_, sizeof(float) * result.instance_scores.size(), cudaMemcpyDeviceToHost, stream_), "copy instance_scores");
-        check_cuda(cudaMemcpyAsync(result.boxes.data(), boxes_, sizeof(float) * result.boxes.size(), cudaMemcpyDeviceToHost, stream_), "copy boxes");
-        check_cuda(cudaMemcpyAsync(result.candidate_valid.data(), candidate_valid_, sizeof(unsigned char) * result.candidate_valid.size(), cudaMemcpyDeviceToHost, stream_), "copy candidate_valid");
+        check_cuda(cudaMemcpyAsync(result.selected_keypoints.data(), selected_keypoints_, sizeof(float) * result.selected_keypoints.size(), cudaMemcpyDeviceToHost, stream_), "copy selected keypoints");
+        check_cuda(cudaMemcpyAsync(result.selected_scores.data(), selected_scores_, sizeof(float) * result.selected_scores.size(), cudaMemcpyDeviceToHost, stream_), "copy selected scores");
+        check_cuda(cudaMemcpyAsync(result.selected_valid.data(), selected_valid_, sizeof(unsigned char) * result.selected_valid.size(), cudaMemcpyDeviceToHost, stream_), "copy selected validity");
+        check_cuda(cudaMemcpyAsync(result.triangulated_xyz.data(), triangulated_xyz_, sizeof(float) * result.triangulated_xyz.size(), cudaMemcpyDeviceToHost, stream_), "copy triangulated xyz");
+        check_cuda(cudaMemcpyAsync(result.triangulated_valid.data(), triangulated_valid_, sizeof(unsigned char) * result.triangulated_valid.size(), cudaMemcpyDeviceToHost, stream_), "copy triangulated valid");
+        check_cuda(cudaMemcpyAsync(result.assignments.data(), assignments_, sizeof(unsigned char) * result.assignments.size(), cudaMemcpyDeviceToHost, stream_), "copy epipolar assignments");
         check_cuda(cudaEventRecord(timing_events_[4].value, stream_), "time download end");
         result.timings.download_host_ms = elapsed_ms(download_start);
         const auto wait_start = TimingClock::now();
@@ -235,8 +285,15 @@ class TensorRtMultiviewEngine::Impl {
     bool graph_ready_{};
     void *images_{}, *keypoints_{}, *keypoint_scores_{}, *instance_scores_{}, *boxes_{}, *candidate_valid_{};
     void *source_ptrs_{}, *strides_{}, *widths_{}, *heights_{}, *source_k_{}, *target_k_{}, *distortion_{};
+    void *projections_{}, *triangulated_xyz_{}, *triangulated_valid_{};
+    void *fundamentals_{}, *assignments_{};
+    void *selected_keypoints_{}, *selected_scores_{}, *selected_valid_{};
     std::array<float, 27> calibration_k_{};
     std::array<float, 15> calibration_distortion_{};
+    std::array<PoseConfig::CameraCalibration, 3> calibration_{};
+    float minimum_score_{0.1F};
+    float maximum_reprojection_error_{8.0F};
+    float config_gate_px_{12.0F};
 #endif
 };
 

@@ -76,6 +76,7 @@ struct CaptureStage::Impl {
                         throw std::runtime_error(
                             "reconnected camera negotiated a different frame extent");
                     }
+                    metrics.reconnects.increment();
                     reset_clock_after_reconnect.store(true);
                 } catch (...) {
                     fail(std::current_exception());

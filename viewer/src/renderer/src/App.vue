@@ -7,17 +7,15 @@ import RuntimeControls from './components/RuntimeControls.vue'
 import type { CalibrationSnapshot, MetricsSnapshot, PoseFrame, RuntimeStatus } from './types/iris'
 const showGrid = ref(true),
   activeTab = ref<'output' | 'metrics' | 'cameras'>('output')
-const logs = ref([
-  ['10:42:01', 'system', 'IRIS runtime connected on localhost:8080'],
-  ['10:42:02', 'ok', 'Loaded 4 camera streams · 60 FPS'],
-  ['10:42:04', 'info', 'Pose pipeline initialized · RTMO-S']
-])
+const logs = ref<string[][]>([])
+const emptyStateError = ref('')
 const metrics = ref<MetricsSnapshot | null>(null)
 const poseFrame = ref<PoseFrame | null>(null)
 const calibration = ref<CalibrationSnapshot | null>(null)
 const runtimeStatus = ref<RuntimeStatus>({})
 const showCameras = ref(true)
-const consoleWidth = ref(286)
+const api = window.api
+const consoleWidth = ref(340)
 const poseSequence = computed(
   () => poseFrame.value?.sequence ?? poseFrame.value?.sourceSequence ?? 0
 )
@@ -26,12 +24,23 @@ const posePointCount = computed(
     total + (person.valid ?? person.jointValid ?? []).filter((valid) => valid).length, 0) ??
     (poseFrame.value?.joints ?? poseFrame.value?.joints3d ?? poseFrame.value?.joints_3d)?.length ?? 0
 )
+const runtimeState = computed(() => runtimeStatus.value.state || 'unknown')
+const runtimeLabel = computed(() => runtimeState.value === 'running' ? 'Running' : runtimeState.value === 'stopped' ? 'Ready' : runtimeState.value[0].toUpperCase() + runtimeState.value.slice(1))
+const hasPoseData = computed(() => posePointCount.value > 0 || !!poseFrame.value)
+async function startFromEmpty(): Promise<void> {
+  emptyStateError.value = ''
+  try {
+    await api.startPipeline()
+  } catch (error) {
+    emptyStateError.value = error instanceof Error ? error.message : String(error)
+  }
+}
 function startResize(event: PointerEvent): void {
   const startX = event.clientX
   const startWidth = consoleWidth.value
   const onMove = (move: PointerEvent): void => {
     const maximum = Math.max(220, window.innerWidth - 360)
-    consoleWidth.value = Math.min(maximum, Math.max(220, startWidth + move.clientX - startX))
+    consoleWidth.value = Math.min(maximum, Math.max(300, startWidth + move.clientX - startX))
   }
   const onEnd = (): void => {
     window.removeEventListener('pointermove', onMove)
@@ -54,7 +63,12 @@ onMounted(() => {
     }),
     window.api.onStatus((status) => {
       const value = status as RuntimeStatus
-      runtimeStatus.value = value
+      runtimeStatus.value = {
+        ...runtimeStatus.value,
+        ...value,
+        cameras: value.cameras ?? runtimeStatus.value.cameras,
+        preview: value.preview ? { ...runtimeStatus.value.preview, ...value.preview } : runtimeStatus.value.preview
+      }
       if (value.calibration) calibration.value = value.calibration
     })
   )
@@ -64,21 +78,23 @@ onBeforeUnmount(() => subscriptions.forEach((unsubscribe) => unsubscribe()))
 <template>
   <main class="app-shell">
     <section class="workspace" :style="{ '--console-width': `${consoleWidth}px` }">
-      <aside class="console panel"><div class="panel-heading">RUNTIME CONTROLS <span>⌁</span></div><RuntimeControls :status="runtimeStatus" :metrics="metrics" :logs="logs" /><div class="console-footer">REST · 127.0.0.1:8090 <span>LOCAL</span></div></aside>
+      <aside class="console panel"><div class="panel-heading">IRIS CONTROL <span>{{ runtimeLabel }}</span></div><RuntimeControls :status="runtimeStatus" :metrics="metrics" :logs="logs" /><div class="console-footer">REST · 127.0.0.1:8090 <span>LOCAL</span></div></aside>
       <div
         class="console-resizer"
         role="separator"
         aria-orientation="vertical"
+        aria-label="Resize runtime controls"
+        tabindex="0"
         @pointerdown="startResize"
       ></div>
       <section class="main-stage">
         <div class="stage-toolbar">
           <div class="tabs">
-            <button :class="{ active: activeTab === 'output' }" @click="activeTab = 'output'">
+            <button :class="{ active: activeTab === 'output' }" :aria-pressed="activeTab === 'output'" @click="activeTab = 'output'">
               3D OUTPUT</button
-            ><button :class="{ active: activeTab === 'metrics' }" @click="activeTab = 'metrics'">
+            ><button :class="{ active: activeTab === 'metrics' }" :aria-pressed="activeTab === 'metrics'" @click="activeTab = 'metrics'">
               METRICS</button
-            ><button :class="{ active: activeTab === 'cameras' }" @click="activeTab = 'cameras'">
+            ><button :class="{ active: activeTab === 'cameras' }" :aria-pressed="activeTab === 'cameras'" @click="activeTab = 'cameras'">
               CAMERA GRID
             </button>
           </div>
@@ -88,14 +104,11 @@ onBeforeUnmount(() => subscriptions.forEach((unsubscribe) => unsubscribe()))
           </div>
         </div>
         <div v-if="activeTab === 'output'" class="viewport">
-          <div class="viewport-label">
-            <span class="pill green-pill"><span class="dot green"></span>LIVE</span
-            ><span>FRAME {{ String(poseSequence).padStart(6, '0') }}</span
-            ><span>1280 × 720</span>
-          </div>
+          <div v-if="hasPoseData" class="viewport-label"><span class="pill green-pill"><span class="dot green"></span>LIVE</span><span>FRAME {{ String(poseSequence).padStart(6, '0') }}</span><span>{{ runtimeStatus.cameras?.[0]?.width || '—' }} × {{ runtimeStatus.cameras?.[0]?.height || '—' }}</span></div>
+          <div v-else class="viewport-empty"><span class="empty-kicker">NO POSE DATA YET</span><h2>{{ runtimeState === 'running' ? 'Waiting for frames' : 'Pipeline is not running' }}</h2><p>{{ runtimeStatus.cameras?.length || 0 }} camera{{ (runtimeStatus.cameras?.length || 0) === 1 ? '' : 's' }} configured · Pose backend: {{ runtimeStatus.pose_backend || 'off' }}</p><small v-if="emptyStateError" class="empty-error" role="alert">{{ emptyStateError }}</small><button v-if="runtimeState !== 'running'" class="empty-primary" @click="startFromEmpty">START PIPELINE</button><button v-else class="empty-secondary" @click="activeTab = 'cameras'">CHECK CAMERAS</button></div>
           <ThreeGraph :show-grid="showGrid" :show-cameras="showCameras" :pose="poseFrame" :calibration="calibration" />
-          <div class="viewport-hud">
-            <span>POSE_ESTIMATION</span><strong>RTMO-S</strong><span class="hud-divider"></span
+          <div v-if="hasPoseData" class="viewport-hud">
+            <span>POSE_ESTIMATION</span><strong>{{ runtimeStatus.pose_backend || '—' }}</strong><span class="hud-divider"></span
             ><span
               >POINTS <strong>{{ posePointCount }}</strong></span
             >
@@ -106,8 +119,7 @@ onBeforeUnmount(() => subscriptions.forEach((unsubscribe) => unsubscribe()))
       </section>
     </section>
     <footer class="statusbar">
-      <span><i class="dot green"></i> ALL SYSTEMS NOMINAL</span><span>GPU 38°C</span
-      ><span>MEM 2.1 GB</span><span class="footer-right">IRIS RUNTIME v0.8.4 · LOCAL</span>
+      <span><i :class="['dot', runtimeState === 'running' ? 'green' : runtimeState === 'failed' ? 'red' : 'amber']"></i> {{ runtimeLabel.toUpperCase() }}</span><span v-if="runtimeStatus.processed_packets !== undefined">PACKETS {{ runtimeStatus.processed_packets }}</span><span v-if="runtimeStatus.recording">RECORDING</span><span class="footer-right">IRIS RUNTIME · LOCAL</span>
     </footer>
   </main>
 </template>
