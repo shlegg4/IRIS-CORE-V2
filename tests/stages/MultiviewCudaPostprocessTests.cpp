@@ -61,7 +61,7 @@ int main() {
     cudaMemcpy(d_projections, projections.data(), sizeof(projections), cudaMemcpyHostToDevice);
     cudaMemcpy(d_candidates, candidates.data(), sizeof(candidates), cudaMemcpyHostToDevice);
     cudaStream_t stream{}; assert(cudaStreamCreate(&stream) == cudaSuccess);
-    if (!cuda_ok(iris::launch_multiview_epipolar_assignment(d_points, d_scores, d_candidates, d_fundamentals, 2.0F, d_assignments, stream), "epipolar assignment launch")) return 1;
+    if (!cuda_ok(iris::launch_multiview_epipolar_assignment(d_points, d_scores, d_candidates, d_fundamentals, 2.0F, 0.1F, d_assignments, stream), "epipolar assignment launch")) return 1;
     if (!cuda_ok(iris::launch_multiview_weighted_dlt(d_points, d_scores, d_candidates, d_assignments, d_projections, 0.1F, 2.0F, d_xyz, d_valid, stream), "triangulation launch")) return 1;
     assert(cudaMemcpyAsync(assignments.data(), d_assignments, sizeof(assignments), cudaMemcpyDeviceToHost, stream) == cudaSuccess);
     assert(cudaMemcpyAsync(xyz.data(), d_xyz, sizeof(xyz), cudaMemcpyDeviceToHost, stream) == cudaSuccess);

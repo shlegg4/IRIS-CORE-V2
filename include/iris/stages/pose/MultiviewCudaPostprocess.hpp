@@ -25,6 +25,7 @@ cudaError_t launch_multiview_epipolar_assignment(const float* keypoints,
                                                  const unsigned char* candidate_valid,
                                                  const float* fundamentals,
                                                  float gate_px,
+                                                 float minimum_score,
                                                  unsigned char* assignments,
                                                  cudaStream_t stream);
 

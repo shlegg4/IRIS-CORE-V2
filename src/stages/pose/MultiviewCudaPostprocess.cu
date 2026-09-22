@@ -84,7 +84,7 @@ __device__ float epipolar_distance(const float* f, float x1, float y1, float x2,
 
 __global__ void assignment_kernel(const float* points, const float* scores,
                                   const unsigned char* candidates, const float* fundamentals,
-                                  float gate, unsigned char* assignments) {
+                                  float gate, float minimum_score, unsigned char* assignments) {
     // One bounded exact assignment solve per non-reference view.  The 10x10
     // cost matrix is small enough for a 2^10 dynamic program in one CUDA
     // thread, and guarantees that two people cannot consume the same
@@ -96,7 +96,7 @@ __global__ void assignment_kernel(const float* points, const float* scores,
     for (int person = 0; person < 10; ++person) {
         int best = -1;
         for (int candidate = 0; candidate < 10; ++candidate)
-            if (!used_anchor[candidate] && candidates[candidate] && isfinite(scores[candidate * 17]) &&
+            if (!used_anchor[candidate] && candidates[candidate] && isfinite(scores[candidate * 17]) && scores[candidate * 17] >= minimum_score &&
                 (best < 0 || scores[candidate * 17] > scores[best * 17])) best = candidate;
         anchors[person] = best;
         if (best >= 0) used_anchor[best] = true;
@@ -118,7 +118,7 @@ __global__ void assignment_kernel(const float* points, const float* scores,
                 for (int candidate = 0; candidate < 10; ++candidate) {
                     if (mask & (1 << candidate)) continue;
                     const int index = view * 10 + candidate;
-                    if (!candidates[index] || !isfinite(scores[index * 17])) continue;
+                    if (!candidates[index] || !isfinite(scores[index * 17]) || scores[index * 17] < minimum_score) continue;
                     const float x2 = points[(index * 17) * 2], y2 = points[(index * 17) * 2 + 1];
                     if (!isfinite(x2) || !isfinite(y2)) continue;
                     const float cost = epipolar_distance(fundamentals + (view - 1) * 9, x1, y1, x2, y2);
@@ -183,9 +183,9 @@ cudaError_t launch_multiview_weighted_dlt(const float* keypoints, const float* s
 
 cudaError_t launch_multiview_epipolar_assignment(const float* keypoints, const float* scores,
                                                  const unsigned char* candidate_valid,
-                                                 const float* fundamentals, float gate_px,
+                                                 const float* fundamentals, float gate_px, float minimum_score,
                                                  unsigned char* assignments, cudaStream_t stream) {
-    assignment_kernel<<<1, 10, 0, stream>>>(keypoints, scores, candidate_valid, fundamentals, gate_px, assignments);
+    assignment_kernel<<<1, 10, 0, stream>>>(keypoints, scores, candidate_valid, fundamentals, gate_px, minimum_score, assignments);
     return cudaGetLastError();
 }
 

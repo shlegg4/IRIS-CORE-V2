@@ -31,9 +31,9 @@ struct PoseConfig {
     // or triangulation is required.
     bool two_d_only{};
     std::size_t max_persons{10};
-    float epipolar_gate_px{12.0F};
-    float minimum_joint_confidence{0.1F};
-    float maximum_reprojection_error_px{8.0F};
+    float epipolar_gate_px{32.0F};
+    float minimum_joint_confidence{0.35F};
+    float maximum_reprojection_error_px{64.0F};
     struct CameraCalibration {
         CameraId camera_id{};
         std::array<float, 9> R_w2c{};
