@@ -26,7 +26,18 @@ class MultiviewPoseStage::Impl {
         : config_(std::move(config)), metrics_enabled_(metrics != nullptr), process_ms_(metrics ? metrics->histogram("iris_pose_process_ms", {1, 2, 5, 10, 20, 50, 100, 250, 500, 1000}) : infrastructure::metrics::Histogram{}),
           capture_to_result_ms_(metrics ? metrics->histogram("iris_pose_capture_to_result_ms", {5, 10, 20, 50, 100, 250, 500, 1000, 2000, 5000}) : infrastructure::metrics::Histogram{}),
           last_capture_to_result_ms_(metrics ? metrics->gauge("iris_pose_last_capture_to_result_ms") : infrastructure::metrics::Gauge{}),
-          last_process_ms_(metrics ? metrics->gauge("iris_pose_last_process_ms") : infrastructure::metrics::Gauge{}) {}
+          last_process_ms_(metrics ? metrics->gauge("iris_pose_last_process_ms") : infrastructure::metrics::Gauge{}) {
+        if (metrics) {
+            const std::array<const char*, 11> names{
+                "frame_ready_wait", "preprocess_host", "trt_setup_host", "trt_enqueue_host",
+                "download_host", "result_wait_host", "preprocess_stream", "engine_stream",
+                "download_stream", "postprocess_cpu", "engine_call_host"};
+            for (std::size_t i=0; i<names.size(); ++i) {
+                breakdown_[i] = metrics->histogram(std::string("iris_pose_")+names[i]+"_ms", {0.01,0.05,0.1,0.25,0.5,1,2,3,5,10,20});
+                latest_[i] = metrics->gauge(std::string("iris_pose_last_")+names[i]+"_ms");
+            }
+        }
+    }
     void start() {
         if (config_.multiview_engine_path.empty()) return;
         if (!std::filesystem::is_regular_file(config_.multiview_engine_path))
@@ -64,6 +75,7 @@ class MultiviewPoseStage::Impl {
         std::array<std::size_t, 3> strides{};
         std::array<std::uint32_t, 3> widths{};
         std::array<std::uint32_t, 3> heights{};
+        double ready_wait_ms = 0;
         for (std::size_t i = 0; i < view_count; ++i) {
             const auto id = config_.multiview_calibration[i].camera_id;
             const auto frame = std::ranges::find(packet.frames, id, &Frame::camera);
@@ -71,7 +83,11 @@ class MultiviewPoseStage::Impl {
                 throw std::runtime_error("multiview packet is missing a valid calibrated BGR camera frame");
             if (!frame->extent.width || !frame->extent.height || frame->buffer.stride_bytes < static_cast<std::size_t>(frame->extent.width) * 3)
                 throw std::runtime_error("multiview frame has invalid dimensions or stride");
-            if (frame->ready) frame->ready->synchronize();
+            if (frame->ready) {
+                const auto begin = std::chrono::steady_clock::now();
+                frame->ready->synchronize();
+                ready_wait_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-begin).count();
+            }
             buffers[i] = frame->buffer.data;
             strides[i] = frame->buffer.stride_bytes;
             widths[i] = frame->extent.width;
@@ -86,7 +102,9 @@ class MultiviewPoseStage::Impl {
             heights[i] = heights[0];
         }
         TensorRtMultiviewResult result;
+        const auto engine_start = std::chrono::steady_clock::now();
         engine_->infer(buffers, strides, widths, heights, result);
+        const auto postprocess_start = std::chrono::steady_clock::now();
         // RTMO candidates are local to each camera.  Select the strongest valid
         // person independently per view; candidate index must not be associated
         // across views before triangulation.
@@ -166,6 +184,15 @@ class MultiviewPoseStage::Impl {
         packet.multiview_poses = std::move(poses);
         const auto finished = std::chrono::steady_clock::now();
         if (metrics_enabled_) {
+            const auto& t=result.timings;
+            const std::array<double,11> values{ready_wait_ms, t.preprocess_host_ms, t.setup_host_ms,
+                t.enqueue_host_ms, t.download_host_ms, t.wait_host_ms, t.preprocess_stream_ms,
+                t.engine_stream_ms, t.download_stream_ms,
+                std::chrono::duration<double,std::milli>(finished-postprocess_start).count(),
+                std::chrono::duration<double,std::milli>(postprocess_start-engine_start).count()};
+            for(std::size_t i=0;i<values.size();++i) {
+                breakdown_[i].observe(values[i]); latest_[i].set(values[i]);
+            }
             const auto process = std::chrono::duration<double, std::milli>(finished - started).count();
             process_ms_.observe(process);
             last_process_ms_.set(process);
@@ -214,6 +241,8 @@ class MultiviewPoseStage::Impl {
     infrastructure::metrics::Histogram process_ms_, capture_to_result_ms_;
     infrastructure::metrics::Gauge last_capture_to_result_ms_;
     infrastructure::metrics::Gauge last_process_ms_;
+    std::array<infrastructure::metrics::Histogram,11> breakdown_;
+    std::array<infrastructure::metrics::Gauge,11> latest_;
 };
 
 MultiviewPoseStage::MultiviewPoseStage(Channel<Packet>& input, Channel<Packet>* output, PoseConfig config, infrastructure::metrics::MetricRegistry* metrics)

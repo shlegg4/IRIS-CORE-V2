@@ -44,7 +44,7 @@ const metrics = computed(() => {
       label: 'POSE LATENCY',
       value: poseLatency?.toFixed(1) ?? '—',
       unit: 'MS',
-      detail: `Capture to triangulated pose · ${poseProcess?.toFixed(1) ?? '—'} ms inference`,
+      detail: `Capture to triangulated pose · ${poseProcess?.toFixed(1) ?? '—'} ms pose processing`,
       width: `${Math.max(4, 100 - Math.min(100, (poseLatency ?? 100) / 5))}%`,
       tone: poseLatency && poseLatency > 150 ? 'orange' : 'cyan'
     },

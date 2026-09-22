@@ -10,6 +10,12 @@
 namespace iris {
 
 struct TensorRtMultiviewResult {
+    // Host intervals are sequential; stream intervals overlap them and must not be added.
+    struct Timings {
+        double preprocess_host_ms{}, setup_host_ms{}, enqueue_host_ms{};
+        double download_host_ms{}, wait_host_ms{};
+        double preprocess_stream_ms{}, engine_stream_ms{}, download_stream_ms{};
+    } timings;
     // The engine is batched over camera views.  These are indexed [view][candidate][joint].
     std::array<float, 3 * 10 * 17 * 2> keypoints{};
     std::array<float, 3 * 10 * 17> keypoint_scores{};

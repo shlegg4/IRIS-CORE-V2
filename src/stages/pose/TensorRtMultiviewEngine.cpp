@@ -3,6 +3,7 @@
 #include <stdexcept>
 #include <algorithm>
 #include <utility>
+#include <chrono>
 
 #ifdef IRIS_HAS_TENSORRT
 #include <NvInfer.h>
@@ -12,6 +13,14 @@
 extern "C" cudaError_t iris_multiview_preprocess(const void* const*, const std::size_t*, const std::uint32_t*, const std::uint32_t*, const float*, const float*, const float*, float*, cudaStream_t, const std::uint8_t**, std::size_t*, std::uint32_t*, std::uint32_t*, float*, float*, float*);
 
 namespace {
+using TimingClock = std::chrono::steady_clock;
+double elapsed_ms(TimingClock::time_point start) {
+    return std::chrono::duration<double, std::milli>(TimingClock::now() - start).count();
+}
+struct TimingEvent {
+    cudaEvent_t value{};
+    ~TimingEvent() { if (value) cudaEventDestroy(value); }
+};
 class Logger final : public nvinfer1::ILogger {
   public:
     void log(Severity severity, const char* message) noexcept override {
@@ -59,6 +68,8 @@ class TensorRtMultiviewEngine::Impl {
         validate("boxes", nvinfer1::Dims3{3,10,4}, nvinfer1::TensorIOMode::kOUTPUT, nvinfer1::DataType::kFLOAT);
         validate("candidate_valid", nvinfer1::Dims2{3,10}, nvinfer1::TensorIOMode::kOUTPUT, nvinfer1::DataType::kBOOL);
         check_cuda(cudaStreamCreate(&stream_), "cudaStreamCreate");
+        for (auto& event : timing_events_)
+            check_cuda(cudaEventCreate(&event.value), "create pose timing event");
         check_cuda(cudaMalloc(&images_, sizeof(float) * 3 * 3 * 640 * 640), "cudaMalloc images");
         check_cuda(cudaMalloc(&keypoints_, sizeof(float) * 3 * 10 * 17 * 2), "cudaMalloc keypoints");
         check_cuda(cudaMalloc(&keypoint_scores_, sizeof(float) * 3 * 10 * 17), "cudaMalloc keypoint_scores");
@@ -97,6 +108,8 @@ class TensorRtMultiviewEngine::Impl {
 #ifndef IRIS_HAS_TENSORRT
         throw std::runtime_error("TensorRT support was not compiled into IRIS");
 #else
+        const auto preprocess_start = TimingClock::now();
+        check_cuda(cudaEventRecord(timing_events_[0].value, stream_), "time preprocessing begin");
         std::array<float, 27> target_k{};
         for (std::size_t view = 0; view < 3; ++view) {
             const float scale = std::min(640.0f / static_cast<float>(widths[view]), 640.0f / static_cast<float>(heights[view]));
@@ -112,19 +125,40 @@ class TensorRtMultiviewEngine::Impl {
         }
         result.letterbox_intrinsics = target_k;
         check_cuda(iris_multiview_preprocess(sources.data(), strides.data(), widths.data(), heights.data(), calibration_k_.data(), target_k.data(), calibration_distortion_.data(), static_cast<float*>(images_), stream_, static_cast<const std::uint8_t**>(source_ptrs_), static_cast<std::size_t*>(strides_), static_cast<std::uint32_t*>(widths_), static_cast<std::uint32_t*>(heights_), static_cast<float*>(source_k_), static_cast<float*>(target_k_), static_cast<float*>(distortion_)), "multiview preprocessing");
+        check_cuda(cudaEventRecord(timing_events_[1].value, stream_), "time preprocessing end");
+        result.timings.preprocess_host_ms = elapsed_ms(preprocess_start);
+        const auto setup_start = TimingClock::now();
         // The pipeline supplies one image for each of its three calibrated views.
         // This is a no-op for a static engine and selects N=3 for a dynamic one.
         if (!context_->setInputShape("images", nvinfer1::Dims4{3, 3, 640, 640}))
             throw std::runtime_error("TensorRT rejected the RTMO batch shape [3,3,640,640]");
         if (!context_->setTensorAddress("images", images_) || !context_->setTensorAddress("keypoints", keypoints_) || !context_->setTensorAddress("keypoint_scores", keypoint_scores_) || !context_->setTensorAddress("instance_scores", instance_scores_) || !context_->setTensorAddress("boxes", boxes_) || !context_->setTensorAddress("candidate_valid", candidate_valid_))
             throw std::runtime_error("TensorRT rejected one or more tensor addresses");
+        result.timings.setup_host_ms = elapsed_ms(setup_start);
+        check_cuda(cudaEventRecord(timing_events_[2].value, stream_), "time engine begin");
+        const auto enqueue_start = TimingClock::now();
         if (!context_->enqueueV3(stream_)) throw std::runtime_error("TensorRT enqueueV3 failed: " + logger_.last_error);
+        result.timings.enqueue_host_ms = elapsed_ms(enqueue_start);
+        check_cuda(cudaEventRecord(timing_events_[3].value, stream_), "time engine end");
+        const auto download_start = TimingClock::now();
         check_cuda(cudaMemcpyAsync(result.keypoints.data(), keypoints_, sizeof(float) * result.keypoints.size(), cudaMemcpyDeviceToHost, stream_), "copy keypoints");
         check_cuda(cudaMemcpyAsync(result.keypoint_scores.data(), keypoint_scores_, sizeof(float) * result.keypoint_scores.size(), cudaMemcpyDeviceToHost, stream_), "copy keypoint_scores");
         check_cuda(cudaMemcpyAsync(result.instance_scores.data(), instance_scores_, sizeof(float) * result.instance_scores.size(), cudaMemcpyDeviceToHost, stream_), "copy instance_scores");
         check_cuda(cudaMemcpyAsync(result.boxes.data(), boxes_, sizeof(float) * result.boxes.size(), cudaMemcpyDeviceToHost, stream_), "copy boxes");
         check_cuda(cudaMemcpyAsync(result.candidate_valid.data(), candidate_valid_, sizeof(unsigned char) * result.candidate_valid.size(), cudaMemcpyDeviceToHost, stream_), "copy candidate_valid");
+        check_cuda(cudaEventRecord(timing_events_[4].value, stream_), "time download end");
+        result.timings.download_host_ms = elapsed_ms(download_start);
+        const auto wait_start = TimingClock::now();
         check_cuda(cudaStreamSynchronize(stream_), "synchronize TensorRT inference");
+        result.timings.wait_host_ms = elapsed_ms(wait_start);
+        const auto interval = [&](int first, int last) {
+            float value{};
+            check_cuda(cudaEventElapsedTime(&value, timing_events_[first].value, timing_events_[last].value), "read pose timing");
+            return static_cast<double>(value);
+        };
+        result.timings.preprocess_stream_ms = interval(0, 1);
+        result.timings.engine_stream_ms = interval(2, 3);
+        result.timings.download_stream_ms = interval(3, 4);
 #endif
     }
 #ifdef IRIS_HAS_TENSORRT
@@ -142,6 +176,7 @@ class TensorRtMultiviewEngine::Impl {
     TrtPtr<nvinfer1::ICudaEngine> engine_;
     TrtPtr<nvinfer1::IExecutionContext> context_;
     cudaStream_t stream_{};
+    std::array<TimingEvent, 5> timing_events_;
     void *images_{}, *keypoints_{}, *keypoint_scores_{}, *instance_scores_{}, *boxes_{}, *candidate_valid_{};
     void *source_ptrs_{}, *strides_{}, *widths_{}, *heights_{}, *source_k_{}, *target_k_{}, *distortion_{};
     std::array<float, 27> calibration_k_{};
