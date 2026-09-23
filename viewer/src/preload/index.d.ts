@@ -6,6 +6,7 @@ declare global {
     electron: ElectronAPI
     api: {
       request(path: string, method?: string, body?: unknown): Promise<unknown>
+      pickVideoFiles(): Promise<string[]>
       getStatus(): Promise<unknown>
       getMetrics(prefix?: string): Promise<unknown>
       listCameras(): Promise<unknown>

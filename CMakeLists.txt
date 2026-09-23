@@ -56,10 +56,12 @@ add_library(iris
   src/infrastructure/metrics/PrometheusExporter.cpp
   src/stages/capture/CaptureStage.cpp src/stages/capture/timing/CaptureClock.cpp
   src/stages/capture/FrameSynchronizerStage.cpp
+  src/stages/capture/SynchronizedVideoStage.cpp src/stages/capture/video/VideoFileReader.cpp
+  src/stages/capture/video/Nv12ToBgrCuda.cu
   src/stages/capture/media_foundation/MediaFoundationSource.cpp
   src/stages/capture/decoding/GpuDecoder.cpp src/stages/capture/decoding/Yuy2CudaConverter.cu
   src/stages/capture/decoding/BgrRotate.cu src/stages/pose/MultiviewPreprocess.cu src/stages/pose/MultiviewCudaPostprocess.cu
-  src/stages/pose/PoseStage.cpp src/stages/pose/MultiviewPoseStage.cpp src/stages/pose/TensorRtMultiviewEngine.cpp src/stages/output/OutputStage.cpp src/stages/output/PreviewSink.cpp
+  src/stages/pose/PoseStage.cpp src/stages/pose/MultiviewPoseStage.cpp src/stages/pose/TensorRtMultiviewEngine.cpp src/stages/output/OutputStage.cpp src/stages/output/SnapshotBatchSource.cpp src/stages/output/PreviewSink.cpp
   src/stages/output/PreviewHttpServer.cpp
   src/stages/output/H264PreviewProtocol.cpp
   src/stages/output/H264Transport.cpp
@@ -153,7 +155,7 @@ if(IRIS_BUILD_TOOLS)
   target_link_libraries(iris_mf_probe PRIVATE iris::iris)
   target_include_directories(iris_mf_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
   add_executable(h264_preview_runtime_probe src/tools/H264PreviewRuntimeProbe.cpp)
-  target_link_libraries(h264_preview_runtime_probe PRIVATE FFmpeg::avcodec FFmpeg::avutil)
+  target_link_libraries(h264_preview_runtime_probe PRIVATE FFmpeg::avcodec FFmpeg::avutil CUDA::cudart CUDA::cuda_driver)
   add_test(NAME h264_preview_runtime_probe COMMAND h264_preview_runtime_probe)
 endif()
 if(IRIS_BUILD_TESTS)

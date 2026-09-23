@@ -1,4 +1,4 @@
-import { app, shell, BrowserWindow, ipcMain } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, dialog, type OpenDialogOptions } from 'electron'
 import { spawn, type ChildProcessByStdio } from 'child_process'
 import type { Readable } from 'stream'
 import { dirname, join } from 'path'
@@ -221,6 +221,18 @@ app.whenReady().then(() => {
   // IPC test
   ipcMain.on('ping', () => console.log('pong'))
   ipcMain.handle('iris:api', async (_event, path: string, method = 'GET', body?: unknown) => apiRequest(path, method, body))
+  ipcMain.handle('iris:pick-videos', async (event) => {
+    const window = BrowserWindow.fromWebContents(event.sender)
+    const options: OpenDialogOptions = {
+      title: 'Select synchronized video feeds',
+      properties: ['openFile', 'multiSelections'],
+      filters: [{ name: 'Video files', extensions: ['mp4', 'mov', 'mkv', 'avi', 'm4v', 'webm'] }]
+    }
+    const result = window
+      ? await dialog.showOpenDialog(window, options)
+      : await dialog.showOpenDialog(options)
+    return result.canceled ? [] : result.filePaths
+  })
   ipcMain.handle('iris:stop', () => stopIrisRuntime())
 
   const window = createWindow()

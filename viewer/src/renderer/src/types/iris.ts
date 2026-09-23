@@ -82,6 +82,12 @@ export interface CreateCameraRequest extends CameraCaptureSettings {
 export type UpdateCameraRequest = Partial<CameraCaptureSettings>
 export interface RuntimeStatus {
   state?: string
+  input_mode?: 'live' | 'video' | string
+  video_inputs?: Array<{ camera_id: number; path: string }>
+  video_decode_status?: VideoDecodeStatus[]
+  video_cuda_device?: number
+  video_frame_pool_capacity?: number
+  video_realtime?: boolean
   recording?: boolean
   recording_path?: string
   shared_memory_enabled?: boolean
@@ -108,4 +114,10 @@ export interface RuntimeStatus {
     last_error?: string
   }
   calibration?: CalibrationSnapshot
+}
+export interface VideoDecodeStatus {
+  camera_id: number
+  codec: string
+  backend: 'NVDEC' | 'SOFTWARE' | string
+  detail: string
 }

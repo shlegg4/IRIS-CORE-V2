@@ -1,6 +1,7 @@
 #include "iris/api/RestApiServer.hpp"
 
 #include "iris/pipeline/Frame.hpp"
+#include "iris/infrastructure/gpu/CudaResources.hpp"
 #include "iris/pipeline/OverflowPolicy.hpp"
 #include "iris/stages/output/PreviewHttpServer.hpp"
 #ifdef _WIN32
@@ -15,11 +16,19 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <thread>
+#include <vector>
+#include <cuda_runtime_api.h>
 
 namespace iris::api {
 namespace asio = boost::asio;
@@ -69,9 +78,39 @@ json camera(const CameraCaptureConfig& c, const infrastructure::metrics::Metrics
 }
 json snapshot(const RuntimeSnapshot& s) {
     json cameras = json::array(); for (const auto& c : s.cameras) cameras.push_back(camera(c, s.metrics));
-    return {{"state", to_string(s.state)}, {"recording", s.recording}, {"recording_path", s.recording_path.string()}, {"shared_memory_destination", s.shared_memory_destination}, {"shared_memory_enabled", s.shared_memory_enabled}, {"processed_packets", s.processed_packets}, {"cameras", cameras}, {"sync_tolerance_ms", s.sync_tolerance.count()}, {"sync_queue_capacity", s.sync_queue_capacity}, {"incomplete_batch_policy", s.incomplete_batch_policy == IncompleteBatchPolicy::DropBatch ? "drop" : "partial"}, {"pose_backend", s.pose_backend}, {"pose_model_path", s.pose_model_path.string()}, {"pose_engine_path", s.pose_engine_path.string()}, {"preview", {{"enabled", s.preview.enabled}, {"bind_address", s.preview.bind_address}, {"port", s.preview.port}, {"published_packets", s.preview.published_packets}, {"dropped_packets", s.preview.dropped_packets}, {"connected_clients", s.preview.connected_clients}, {"event_clients", s.preview.event_clients}, {"h264_clients", s.preview.h264_clients}, {"mjpeg_clients", s.preview.mjpeg_clients}, {"last_error", s.preview.last_error}}}, {"last_error", s.last_error}, {"metrics", metrics(s.metrics)}};
+    json video_inputs = json::array(); for (const auto& v : s.video_inputs) video_inputs.push_back({{"camera_id", v.camera_id}, {"path", v.path.string()}});
+    json decode_status = json::array(); for (const auto& status : s.video_decode_status) decode_status.push_back({{"camera_id", status.camera_id}, {"codec", status.codec}, {"backend", status.backend}, {"detail", status.detail}});
+    return {{"state", to_string(s.state)}, {"input_mode", s.input_mode}, {"video_inputs", video_inputs}, {"video_decode_status", decode_status}, {"video_cuda_device", s.video_cuda_device}, {"video_frame_pool_capacity", s.video_frame_pool_capacity}, {"video_realtime", s.video_realtime}, {"recording", s.recording}, {"recording_path", s.recording_path.string()}, {"shared_memory_destination", s.shared_memory_destination}, {"shared_memory_enabled", s.shared_memory_enabled}, {"processed_packets", s.processed_packets}, {"cameras", cameras}, {"sync_tolerance_ms", s.sync_tolerance.count()}, {"sync_queue_capacity", s.sync_queue_capacity}, {"incomplete_batch_policy", s.incomplete_batch_policy == IncompleteBatchPolicy::DropBatch ? "drop" : "partial"}, {"pose_backend", s.pose_backend}, {"pose_model_path", s.pose_model_path.string()}, {"pose_engine_path", s.pose_engine_path.string()}, {"preview", {{"enabled", s.preview.enabled}, {"bind_address", s.preview.bind_address}, {"port", s.preview.port}, {"published_packets", s.preview.published_packets}, {"dropped_packets", s.preview.dropped_packets}, {"connected_clients", s.preview.connected_clients}, {"event_clients", s.preview.event_clients}, {"h264_clients", s.preview.h264_clients}, {"mjpeg_clients", s.preview.mjpeg_clients}, {"last_error", s.preview.last_error}}}, {"last_error", s.last_error}, {"metrics", metrics(s.metrics)}};
 }
 json response(const RuntimeCommandResponse& r) { json out{{"status", command_status(r.status)}, {"message", r.message}}; if (r.snapshot) out["snapshot"] = snapshot(*r.snapshot); return out; }
+void write_bmp(const std::filesystem::path& path, const Frame& frame) {
+    if (frame.format != PixelFormat::Bgr8 || !frame.buffer.data || !frame.extent.width || !frame.extent.height || frame.buffer.stride_bytes < static_cast<std::size_t>(frame.extent.width) * 3)
+        throw std::runtime_error("snapshot requires a valid full-resolution BGR frame for camera " + std::to_string(frame.camera));
+    if (frame.ready) frame.ready->synchronize();
+    if (cudaSetDevice(frame.buffer.device_id) != cudaSuccess) throw std::runtime_error("could not select camera CUDA device");
+    const auto width = frame.extent.width, height = frame.extent.height;
+    const std::size_t source_stride = static_cast<std::size_t>(width) * 3;
+    std::vector<std::uint8_t> pixels(source_stride * height);
+    if (cudaMemcpy2D(pixels.data(), source_stride, frame.buffer.data, frame.buffer.stride_bytes, source_stride, height, cudaMemcpyDeviceToHost) != cudaSuccess)
+        throw std::runtime_error("could not copy full-resolution snapshot from GPU for camera " + std::to_string(frame.camera));
+    const std::uint32_t row_size = (width * 3U + 3U) & ~3U;
+    const std::uint32_t image_size = row_size * height;
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) throw std::runtime_error("could not create snapshot image: " + path.string());
+    auto u16 = [&out](std::uint16_t v) { const char b[2]{static_cast<char>(v), static_cast<char>(v >> 8)}; out.write(b, 2); };
+    auto u32 = [&out](std::uint32_t v) { const char b[4]{static_cast<char>(v), static_cast<char>(v >> 8), static_cast<char>(v >> 16), static_cast<char>(v >> 24)}; out.write(b, 4); };
+    out.put('B'); out.put('M'); u32(54U + image_size); u16(0); u16(0); u32(54); u32(40); u32(width); u32(height); u16(1); u16(24); u32(0); u32(image_size); u32(2835); u32(2835); u32(0); u32(0);
+    std::vector<char> row(row_size, 0);
+    for (std::uint32_t y = height; y-- > 0;) { std::memcpy(row.data(), pixels.data() + static_cast<std::size_t>(y) * source_stride, source_stride); out.write(row.data(), row.size()); }
+    if (!out) throw std::runtime_error("failed while writing snapshot image: " + path.string());
+}
+json snapshot_pose(const Packet& packet, const std::string& backend) {
+    json pose{{"schema_version", 1}, {"packet_sequence", packet.sequence}, {"backend", backend}, {"coordinate_frame", "IRIS rig calibration world"}, {"panoptic_units", "mm"}, {"multiview_units", "calibration units"}, {"panoptic", json::array()}, {"multiview", json::array()}, {"views_2d", json::array()}};
+    if (packet.poses) for (const auto& person : *packet.poses) { json joints=json::array(), confidence=json::array(); for (const auto& joint : person.joints_3d_mm) joints.push_back({joint[0],joint[1],joint[2]}); for (const auto score : person.joint_confidence) confidence.push_back(score); pose["panoptic"].push_back({{"source_sequence",person.source_sequence},{"score",person.score},{"joints3d",joints},{"confidence",confidence}}); }
+    if (packet.multiview_poses) for (const auto& person : *packet.multiview_poses) { json joints=json::array(), valid=json::array(); for (std::size_t i=0;i<person.joints_3d.size();++i) { const auto& joint=person.joints_3d[i]; joints.push_back({joint[0],joint[1],joint[2]}); valid.push_back(person.joint_valid[i]); } pose["multiview"].push_back({{"active",person.active},{"joints3d",joints},{"valid",valid}}); }
+    if (packet.view_poses_2d) for (const auto& view : *packet.view_poses_2d) { json points=json::array(), scores=json::array(), valid=json::array(); for (std::size_t i=0;i<view.points_px.size();++i) { points.push_back({view.points_px[i][0],view.points_px[i][1]}); scores.push_back(view.scores[i]); valid.push_back(view.valid[i]); } pose["views_2d"].push_back({{"camera_id",view.camera_id},{"person_id",view.person_id},{"points_px",points},{"scores",scores},{"valid",valid}}); }
+    return pose;
+}
 }
 
 class RestApiServer::Impl {
@@ -112,12 +151,51 @@ class RestApiServer::Impl {
 #endif
         }
         if (path == "/api/v1/cameras" && req.method() == http::verb::get) { const auto s=runtime_.snapshot(); json out=json::array(); for (const auto& c:s.cameras) out.push_back(camera(c, s.metrics)); return {http::status::ok, out}; }
+        if (path == "/api/v1/video-source" && req.method() == http::verb::get) { const auto s=runtime_.snapshot(); json videos=json::array(); for(const auto& v:s.video_inputs) videos.push_back({{"camera_id",v.camera_id},{"path",v.path.string()}}); json decoders=json::array(); for(const auto& d:s.video_decode_status) decoders.push_back({{"camera_id",d.camera_id},{"codec",d.codec},{"backend",d.backend},{"detail",d.detail}}); return {http::status::ok, {{"input_mode",s.input_mode},{"cuda_device",s.video_cuda_device},{"frame_pool_capacity",s.video_frame_pool_capacity},{"realtime",s.video_realtime},{"cameras",videos},{"decode_status",decoders}}}; }
         if (path == "/api/v1/recording" && req.method() == http::verb::get) { auto s=runtime_.snapshot(); return {http::status::ok, {{"recording",s.recording},{"path",s.recording_path.string()}}}; }
         if (path == "/api/v1/synchronizer" && req.method() == http::verb::get) { auto s=runtime_.snapshot(); return {http::status::ok, {{"tolerance_ms",s.sync_tolerance.count()},{"queue_capacity",s.sync_queue_capacity},{"incomplete_batch_policy",s.incomplete_batch_policy==IncompleteBatchPolicy::EmitPartial?"partial":"drop"}}}; }
         if (path == "/api/v1/outputs/preview" && req.method() == http::verb::get) { auto s=runtime_.snapshot(); return {http::status::ok, {{"enabled",s.preview.enabled},{"bind_address",s.preview.bind_address},{"port",s.preview.port},{"published_packets",s.preview.published_packets},{"dropped_packets",s.preview.dropped_packets},{"connected_clients",s.preview.connected_clients},{"last_error",s.preview.last_error}}}; }
+        if (path == "/api/v1/capture/snapshot" && req.method() == http::verb::post) {
+            auto b=json::parse(req.body(),nullptr,false);
+            if(b.is_discarded()||!b.is_object()||!b.contains("session_id")||!b["session_id"].is_string()||!b.contains("batch_id")||!b["batch_id"].is_string()||!b.contains("orientation_degrees")||!b["orientation_degrees"].is_number()||!b.contains("camera_ids")||!b["camera_ids"].is_array()||!b.contains("output_dir")||!b["output_dir"].is_string()) return error(http::status::bad_request,"session_id, batch_id, orientation_degrees, camera_ids, and output_dir are required");
+            const auto session_id=b["session_id"].get<std::string>(), batch_id=b["batch_id"].get<std::string>();
+            if(session_id.empty()||session_id.size()>80||batch_id.empty()||batch_id.size()>32||!std::all_of(session_id.begin(),session_id.end(),[](unsigned char c){return std::isalnum(c)||c=='-'||c=='_';})||!std::all_of(batch_id.begin(),batch_id.end(),[](unsigned char c){return std::isalnum(c)||c=='-'||c=='_';})) return error(http::status::bad_request,"invalid session or batch ID");
+            const auto angle=b["orientation_degrees"].get<int>(); if(angle!=0&&angle!=45&&angle!=90&&angle!=135) return error(http::status::bad_request,"unsupported orientation");
+            std::vector<CameraId> ids;std::set<CameraId> unique;for(const auto& value:b["camera_ids"]){if(!value.is_number_unsigned())return error(http::status::bad_request,"camera_ids must contain unsigned IDs");const auto id=value.get<CameraId>();if(!unique.insert(id).second)return error(http::status::bad_request,"camera IDs must be unique");ids.push_back(id);}if(ids.size()!=4)return error(http::status::bad_request,"snapshot batches require exactly four cameras");
+            const auto status=runtime_.snapshot();if(status.state!=RuntimeState::Running)return error(http::status::service_unavailable,"IRIS capture pipeline is not running");
+            const auto packet=runtime_.capture_snapshot_batch(ids,std::chrono::milliseconds(5000));if(!packet)return error(http::status::service_unavailable,"timed out waiting for the next synchronized four-camera frame batch");
+            std::vector<const Frame*> selected;selected.reserve(ids.size());std::vector<std::int64_t> timestamps;for(const auto id:ids){const auto frame=std::find_if(packet->frames.begin(),packet->frames.end(),[id](const Frame& f){return f.camera==id;});if(frame==packet->frames.end())return error(http::status::conflict,"synchronized frame batch is missing a selected camera");selected.push_back(&*frame);const auto capture=frame->timing.estimated_capture_time.time_since_epoch().count()?frame->timing.estimated_capture_time:frame->timing.host_arrival_time;timestamps.push_back(std::chrono::duration_cast<std::chrono::nanoseconds>(capture.time_since_epoch()).count());}
+            const auto [min_time,max_time]=std::minmax_element(timestamps.begin(),timestamps.end());const double skew_ms=static_cast<double>(*max_time-*min_time)/1.0e6;if(skew_ms>static_cast<double>(status.sync_tolerance.count()))return error(http::status::conflict,"synchronized frame batch exceeded the configured timestamp tolerance");
+            std::filesystem::path destination=b["output_dir"].get<std::string>();if(!destination.is_absolute())return error(http::status::bad_request,"output_dir must be an absolute path");destination=std::filesystem::absolute(destination).lexically_normal();std::error_code ec;std::filesystem::create_directories(destination.parent_path(),ec);if(ec)return error(http::status::internal_server_error,"could not create snapshot parent directory: "+ec.message());if(std::filesystem::exists(destination,ec)){if(ec||!std::filesystem::is_directory(destination)||!std::filesystem::is_empty(destination))return error(http::status::conflict,"snapshot output directory already exists and is not empty");std::filesystem::remove(destination,ec);if(ec)return error(http::status::conflict,"could not reserve snapshot output directory: "+ec.message());}
+            const auto pending=destination.parent_path()/(destination.filename().string()+".pending-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));if(!std::filesystem::create_directory(pending,ec)||ec)return error(http::status::internal_server_error,"could not create atomic snapshot staging directory");
+            try {
+                json frames=json::array();
+                for(std::size_t i=0;i<selected.size();++i){const auto& frame=*selected[i];const std::string filename="camera_"+std::to_string(frame.camera)+".bmp";write_bmp(pending/filename,frame);const auto image=(destination/filename).string();frames.push_back({{"camera_id",frame.camera},{"image_path",image},{"frame_sequence",frame.sequence},{"timestamp_ns",timestamps[i]},{"timestamp_seconds",static_cast<double>(timestamps[i])/1.0e9},{"width",frame.extent.width},{"height",frame.extent.height}});}
+                const auto pose=snapshot_pose(*packet,status.pose_backend);{std::ofstream pose_file(pending/"pose.json",std::ios::binary|std::ios::trunc);if(!pose_file)throw std::runtime_error("could not create pose metadata");pose_file<<pose.dump(2);if(!pose_file)throw std::runtime_error("failed writing pose metadata");}
+                std::filesystem::rename(pending,destination,ec);if(ec)throw std::runtime_error("could not atomically commit snapshot batch: "+ec.message());
+                return {http::status::ok,{{"schema_version",1},{"session_id",session_id},{"batch_id",batch_id},{"orientation_degrees",angle},{"packet_sequence",packet->sequence},{"captured_at",std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count()},{"synchronization_skew_ms",skew_ms},{"pose_path",(destination/"pose.json").string()},{"pose",pose},{"frames",frames}}};
+            } catch(const std::exception& cause){std::filesystem::remove_all(pending,ec);return error(http::status::internal_server_error,cause.what());}
+        }
         RuntimeCommand command;
         if (path == "/api/v1/pipeline/start" && req.method() == http::verb::post) command=StartPipelineCommand{};
         else if (path == "/api/v1/pipeline/stop" && req.method() == http::verb::post) command=StopPipelineCommand{};
+        else if (path == "/api/v1/video-source" && req.method() == http::verb::delete_) command=UseLiveCaptureCommand{};
+        else if (path == "/api/v1/video-source" && req.method() == http::verb::post) {
+            auto b=json::parse(req.body(),nullptr,false);
+            if(b.is_discarded() || !b.contains("cameras") || !b["cameras"].is_array()) return error(http::status::bad_request,"cameras array is required");
+            if((b.contains("cuda_device") && !b["cuda_device"].is_number_integer()) ||
+               (b.contains("frame_pool_capacity") && !b["frame_pool_capacity"].is_number_unsigned()) ||
+               (b.contains("realtime") && !b["realtime"].is_boolean())) return error(http::status::bad_request,"video source options have invalid types");
+            SynchronizedVideoConfig c;
+            c.cuda_device=b.value("cuda_device",0);
+            c.frame_pool_capacity=b.value("frame_pool_capacity",8U);
+            c.realtime=b.value("realtime",false);
+            for(const auto& item:b["cameras"]) {
+                if(!item.is_object() || !item.contains("camera_id") || !item["camera_id"].is_number_unsigned() || !item.contains("path") || !item["path"].is_string()) return error(http::status::bad_request,"each video camera requires camera_id and path");
+                c.cameras.push_back({item["camera_id"].get<CameraId>(),item["path"].get<std::string>()});
+            }
+            command=ConfigureVideoIngestionCommand{std::move(c)};
+        }
         else if (path == "/api/v1/recording/stop" && req.method() == http::verb::post) command=StopRecordingCommand{};
         else if (path == "/api/v1/shutdown" && req.method() == http::verb::post) command=ShutdownCommand{};
         else if (path == "/api/v1/recording/start" && req.method() == http::verb::post) { auto b=json::parse(req.body(),nullptr,false); if (b.is_discarded() || !b.contains("destination") || !b["destination"].is_string()) return error(http::status::bad_request,"destination is required"); command=StartRecordingCommand{b["destination"].get<std::string>(),number(b,"bitrate"),number(b,"frame_rate")}; }

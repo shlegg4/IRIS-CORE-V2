@@ -17,6 +17,7 @@
 #include <ranges>
 #include <thread>
 #include <string_view>
+#include <system_error>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -206,7 +207,7 @@ const char* to_string(RuntimeState state) noexcept {
 class Runtime::Impl {
   public:
     explicit Impl(MultiCameraCaptureConfig config, std::uint16_t metrics_port, PoseConfig pose_config)
-        : capture_config_(std::move(config)), pose_config_(std::move(pose_config)), calibration_store_(std::make_shared<CalibrationStore>()), rig_tool_(std::make_shared<RigCalibrationTool>(calibration_store_)), exporter_(metrics_, "iris_metrics.json"),
+        : capture_config_(std::move(config)), pose_config_(std::move(pose_config)), calibration_store_(std::make_shared<CalibrationStore>()), rig_tool_(std::make_shared<RigCalibrationTool>(calibration_store_)), snapshot_source_(std::make_shared<SnapshotBatchSource>()), exporter_(metrics_, "iris_metrics.json"),
           prometheus_(metrics_, metrics_port), commands_(32, OverflowPolicy::Block) {}
 
     ~Impl() { stop(); }
@@ -248,6 +249,7 @@ class Runtime::Impl {
         std::scoped_lock lock(state_mutex_);
         return snapshot_unlocked();
     }
+    std::shared_ptr<const Packet> capture_snapshot_batch(const std::vector<CameraId>& ids, std::chrono::milliseconds timeout) const { return snapshot_source_->wait_for_cameras(ids, timeout); }
 
     void stop() {
         if (!control_started_) {
@@ -300,7 +302,13 @@ class Runtime::Impl {
             pipeline_thread_.join();
         }
         auto pipeline_pose_config=pose_config_; pipeline_pose_config.calibration_store=calibration_store_;
-        pipeline_ = std::make_unique<Pipeline>(capture_config_, metrics_, std::move(pipeline_pose_config), rig_tool_);
+        if (video_config_) {
+            pipeline_ = std::make_unique<Pipeline>(*video_config_, metrics_,
+                                                   std::move(pipeline_pose_config), rig_tool_, snapshot_source_);
+        } else {
+            pipeline_ = std::make_unique<Pipeline>(capture_config_, metrics_,
+                                                   std::move(pipeline_pose_config), rig_tool_, snapshot_source_);
+        }
         auto disk_result = pipeline_->configure_disk(disk_config_);
         if (!disk_result) {
             return from_output_result(std::move(disk_result));
@@ -621,6 +629,33 @@ class Runtime::Impl {
                                           "synchronizer configuration updated");
     }
 
+    RuntimeCommandResponse handle(const ConfigureVideoIngestionCommand& command) {
+        if (command.config.cameras.empty()) {
+            return {RuntimeCommandStatus::Rejected, "at least one video camera is required", snapshot()};
+        }
+        if (command.config.cuda_device < 0 || command.config.frame_pool_capacity == 0) {
+            return {RuntimeCommandStatus::Rejected, "video CUDA device and frame-pool capacity are invalid", snapshot()};
+        }
+        std::vector<CameraId> ids;
+        for (const auto& camera : command.config.cameras) {
+            if (std::ranges::find(ids, camera.camera_id) != ids.end()) {
+                return {RuntimeCommandStatus::Rejected, "video camera IDs must be unique", snapshot()};
+            }
+            ids.push_back(camera.camera_id);
+            std::error_code ec;
+            if (camera.path.empty() || !std::filesystem::is_regular_file(camera.path, ec)) {
+                return {RuntimeCommandStatus::Rejected,
+                        "video file does not exist or is not a regular file: " + camera.path.string(),
+                        snapshot()};
+            }
+        }
+        return apply_video_configuration(command.config, "video ingestion configured");
+    }
+
+    RuntimeCommandResponse handle(const UseLiveCaptureCommand&) {
+        return apply_video_configuration(std::nullopt, "live camera capture selected");
+    }
+
     RuntimeCommandResponse handle(const ShutdownCommand&) {
         stop_pipeline();
         exporter_.stop();
@@ -635,12 +670,29 @@ class Runtime::Impl {
 
     RuntimeCommandResponse apply_camera_configuration(MultiCameraCaptureConfig requested,
                                                       std::string message) {
+        {
+            std::scoped_lock lock(state_mutex_);
+            if (video_config_) {
+                return {RuntimeCommandStatus::Rejected,
+                        "select live capture before changing webcam or synchronizer settings",
+                        snapshot_unlocked()};
+            }
+        }
         const auto previous = capture_config_;
+        std::optional<SynchronizedVideoConfig> previous_video;
+        {
+            std::scoped_lock lock(state_mutex_);
+            previous_video = video_config_;
+        }
         const bool restart = pipeline_running();
         if (restart) {
             stop_pipeline();
         }
         capture_config_ = std::move(requested);
+        {
+            std::scoped_lock lock(state_mutex_);
+            video_config_.reset();
+        }
         if (!restart) {
             return {RuntimeCommandStatus::Applied, std::move(message), snapshot()};
         }
@@ -650,6 +702,10 @@ class Runtime::Impl {
             return restarted;
         }
         capture_config_ = previous;
+        {
+            std::scoped_lock lock(state_mutex_);
+            video_config_ = previous_video;
+        }
         auto restored = handle(StartPipelineCommand{});
         if (restored) {
             return {RuntimeCommandStatus::Failed,
@@ -662,6 +718,38 @@ class Runtime::Impl {
             "requested camera configuration failed and previous pipeline could not be restored: " +
                 restarted.message,
             restored.snapshot};
+    }
+
+    RuntimeCommandResponse apply_video_configuration(
+        std::optional<SynchronizedVideoConfig> requested, std::string message) {
+        std::optional<SynchronizedVideoConfig> previous;
+        {
+            std::scoped_lock lock(state_mutex_);
+            previous = video_config_;
+        }
+        const bool restart = pipeline_running();
+        if (restart) stop_pipeline();
+        {
+            std::scoped_lock lock(state_mutex_);
+            video_config_ = std::move(requested);
+        }
+        if (!restart) {
+            return {RuntimeCommandStatus::Applied, std::move(message), snapshot()};
+        }
+        auto restarted = handle(StartPipelineCommand{});
+        if (restarted) {
+            restarted.message = std::move(message) + " and pipeline restarted";
+            return restarted;
+        }
+        {
+            std::scoped_lock lock(state_mutex_);
+            video_config_ = previous;
+        }
+        auto restored = handle(StartPipelineCommand{});
+        return {RuntimeCommandStatus::Failed,
+                restored ? "requested video configuration failed; previous source restored: " + restarted.message
+                         : "requested video configuration failed and previous source could not be restored: " + restarted.message,
+                restored.snapshot};
     }
 
     void pipeline_loop() {
@@ -757,6 +845,14 @@ class Runtime::Impl {
         }
         result.processed_packets = pipeline_ ? pipeline_->processed_count() : 0;
         result.cameras = capture_config_.cameras;
+        result.input_mode = video_config_ ? "video" : "live";
+        if (video_config_) {
+            result.video_inputs = video_config_->cameras;
+            result.video_cuda_device = video_config_->cuda_device;
+            result.video_frame_pool_capacity = video_config_->frame_pool_capacity;
+            result.video_realtime = video_config_->realtime;
+            if (pipeline_) result.video_decode_status = pipeline_->video_decode_status();
+        }
         result.sync_tolerance = capture_config_.sync_tolerance;
         result.sync_queue_capacity = capture_config_.sync_queue_capacity;
         result.incomplete_batch_policy = capture_config_.incomplete_batch_policy;
@@ -773,6 +869,7 @@ class Runtime::Impl {
     }
 
     MultiCameraCaptureConfig capture_config_;
+    std::optional<SynchronizedVideoConfig> video_config_;
     DiskOutputConfig disk_config_;
     SharedMemoryOutputConfig shm_config_;
     PreviewConfig preview_config_;
@@ -784,6 +881,7 @@ class Runtime::Impl {
     PoseConfig pose_config_;
     std::shared_ptr<CalibrationStore> calibration_store_;
     std::shared_ptr<RigCalibrationTool> rig_tool_;
+    std::shared_ptr<SnapshotBatchSource> snapshot_source_;
     infrastructure::metrics::MetricRegistry metrics_;
     infrastructure::metrics::MetricsExporter exporter_;
     infrastructure::metrics::PrometheusExporter prometheus_;
@@ -811,6 +909,7 @@ RuntimeCommandResponse Runtime::execute(RuntimeCommand command) {
 }
 
 RuntimeSnapshot Runtime::snapshot() const { return impl_->snapshot(); }
+std::shared_ptr<const Packet> Runtime::capture_snapshot_batch(const std::vector<CameraId>& ids, std::chrono::milliseconds timeout) const { return impl_->capture_snapshot_batch(ids, timeout); }
 
 void Runtime::stop() { impl_->stop(); }
 

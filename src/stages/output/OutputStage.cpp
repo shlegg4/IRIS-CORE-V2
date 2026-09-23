@@ -200,8 +200,9 @@ class SharedMapping {
 
 class OutputStage::Impl {
   public:
-    Impl(Channel<Packet>& input, MetricRegistry& registry, OutputConfig config)
-        : input_(input), config_(std::move(config)), metrics_(registry),
+    Impl(Channel<Packet>& input, MetricRegistry& registry, OutputConfig config,
+         std::shared_ptr<SnapshotBatchSource> snapshots)
+        : input_(input), config_(std::move(config)), metrics_(registry), snapshots_(std::move(snapshots)),
           preview_(make_preview_config(config_), &registry),
           shm_queue_(config_.shared_memory_queue_capacity, OverflowPolicy::DropOldest,
                      infrastructure::metrics::register_channel_metrics(
@@ -339,6 +340,7 @@ class OutputStage::Impl {
             auto retained = std::make_shared<Packet>(std::move(*packet));
             ++processed_count_;
             {
+                if (snapshots_) snapshots_->publish(retained);
                 preview_.publish(retained);
             }
             std::scoped_lock lock(disk_submit_mutex_);
@@ -452,6 +454,7 @@ class OutputStage::Impl {
     Channel<Packet>& input_;
     OutputConfig config_;
     OutputMetrics metrics_;
+    std::shared_ptr<SnapshotBatchSource> snapshots_;
     PreviewSink preview_;
     Channel<PacketPtr> shm_queue_;
     Channel<DiskWork> disk_queue_;
@@ -468,8 +471,9 @@ class OutputStage::Impl {
 #endif
 };
 
-OutputStage::OutputStage(Channel<Packet>& input, MetricRegistry& metrics, OutputConfig config)
-    : impl_(std::make_unique<Impl>(input, metrics, std::move(config))) {}
+OutputStage::OutputStage(Channel<Packet>& input, MetricRegistry& metrics, OutputConfig config,
+                         std::shared_ptr<SnapshotBatchSource> snapshots)
+    : impl_(std::make_unique<Impl>(input, metrics, std::move(config), std::move(snapshots))) {}
 
 OutputStage::~OutputStage() = default;
 

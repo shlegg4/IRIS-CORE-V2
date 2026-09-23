@@ -3,8 +3,11 @@
 #include "iris/runtime/RuntimeControl.hpp"
 #include "iris/stages/capture/CaptureConfig.hpp"
 #include "iris/stages/pose/PoseConfig.hpp"
+#include "iris/stages/output/SnapshotBatchSource.hpp"
 
 #include <cstdint>
+#include <chrono>
+#include <vector>
 #include <memory>
 
 namespace iris {
@@ -23,6 +26,7 @@ class Runtime {
     void start();
     RuntimeCommandResponse execute(RuntimeCommand);
     RuntimeSnapshot snapshot() const;
+    std::shared_ptr<const Packet> capture_snapshot_batch(const std::vector<CameraId>&, std::chrono::milliseconds) const;
     void stop();
     int run();
 

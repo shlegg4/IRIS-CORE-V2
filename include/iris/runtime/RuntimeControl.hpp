@@ -2,6 +2,7 @@
 
 #include "iris/infrastructure/metrics/MetricRegistry.hpp"
 #include "iris/stages/capture/CaptureConfig.hpp"
+#include "iris/stages/capture/SynchronizedVideoConfig.hpp"
 #include "iris/stages/output/OutputConfig.hpp"
 
 #include <filesystem>
@@ -76,6 +77,8 @@ struct ConfigureSynchronizerCommand {
     std::size_t queue_capacity{4};
     IncompleteBatchPolicy incomplete_batch_policy{IncompleteBatchPolicy::DropBatch};
 };
+struct ConfigureVideoIngestionCommand { SynchronizedVideoConfig config; };
+struct UseLiveCaptureCommand {};
 struct ShutdownCommand {};
 
 using RuntimeCommand =
@@ -84,7 +87,8 @@ using RuntimeCommand =
                  StartRecordingCommand, StopRecordingCommand, ConfigureSharedMemoryCommand,
                  ConfigurePreviewCommand,
                  ConfigureCaptureCommand, AddCameraCommand, RemoveCameraCommand, GetCamerasCommand,
-                 ConfigureSynchronizerCommand, ShutdownCommand>;
+                 ConfigureSynchronizerCommand, ConfigureVideoIngestionCommand,
+                 UseLiveCaptureCommand, ShutdownCommand>;
 
 struct RuntimeSnapshot {
     RuntimeState state{RuntimeState::Stopped};
@@ -106,6 +110,12 @@ struct RuntimeSnapshot {
     } preview;
     std::size_t processed_packets{};
     std::vector<CameraCaptureConfig> cameras;
+    std::string input_mode{"live"};
+    std::vector<VideoCameraInput> video_inputs;
+    std::vector<VideoDecodeStatus> video_decode_status;
+    int video_cuda_device{};
+    std::size_t video_frame_pool_capacity{8};
+    bool video_realtime{};
     std::chrono::milliseconds sync_tolerance{20};
     std::size_t sync_queue_capacity{4};
     IncompleteBatchPolicy incomplete_batch_policy{IncompleteBatchPolicy::DropBatch};

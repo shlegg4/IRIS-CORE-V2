@@ -6,16 +6,35 @@ const playing = ref(true),
   fatalError = ref(''),
   failed = ref(new Set<number>()),
   fps = ref(new Map<number, number>())
-const cameras = computed<CameraStatus[]>(() =>
-    (props.status.cameras ?? []).map((camera) => ({
+const cameras = computed<CameraStatus[]>(() => {
+  const configured = props.status.cameras ?? []
+  if (props.status.input_mode === 'video') {
+    return (props.status.video_inputs ?? []).map((feed) => {
+      const camera = configured.find((item) => item.camera_id === feed.camera_id)
+      return {
+        camera_id: feed.camera_id,
+        width: camera?.width ?? 1920,
+        height: camera?.height ?? 1080,
+        fps: 0,
+        reconnect: false,
+        ...camera
+      }
+    })
+  }
+  return configured.map((camera) => ({
       ...camera,
       fps:
         camera.fps ??
         camera.frame_rate?.value ??
         (camera.frame_rate ? camera.frame_rate.numerator / camera.frame_rate.denominator : 0)
     }))
-  ),
+}),
   port = computed(() => props.status.preview?.port || 8080)
+function sourceName(id: number): string {
+  if (props.status.input_mode !== 'video') return `CAMERA ${String(id).padStart(2, '0')}`
+  const path = props.status.video_inputs?.find((feed) => feed.camera_id === id)?.path
+  return path ? path.split(/[\\/]/).pop() || path : `VIDEO ${String(id).padStart(2, '0')}`
+}
 type OverlayPerson = { personId: number; points: number[][]; scores: number[]; valid: boolean[] }
 type Overlay = {
   sequence: number
@@ -527,8 +546,8 @@ onBeforeUnmount(() => {
           {{
             fatalError ||
             (cameras.length
-              ? `${cameras.length} configured view${cameras.length === 1 ? '' : 's'} from the active capture rig.`
-              : 'No cameras configured.')
+              ? `${cameras.length} configured view${cameras.length === 1 ? '' : 's'} from ${props.status.input_mode === 'video' ? 'the video feeds' : 'the active capture rig'}.`
+              : props.status.input_mode === 'video' ? 'No video feeds configured.' : 'No cameras configured.')
           }}
         </p>
       </div>
@@ -543,7 +562,7 @@ onBeforeUnmount(() => {
             :ref="(element) => setCanvas(camera.camera_id, element)"
             :width="camera.width"
             :height="camera.height"
-          /><span class="feed-label">CAM_{{ String(camera.camera_id).padStart(2, '0') }}</span
+          /><span class="feed-label" :title="sourceName(camera.camera_id)">{{ props.status.input_mode === 'video' ? 'VIDEO' : 'CAM' }}_{{ String(camera.camera_id).padStart(2, '0') }}</span
           ><span class="feed-live"><i />{{ playing ? 'LIVE' : 'PAUSED' }}</span>
           <div class="confidence-chart">
             <header>
@@ -598,8 +617,8 @@ onBeforeUnmount(() => {
           >
         </div>
         <div class="camera-info">
-          <strong>CAMERA {{ String(camera.camera_id).padStart(2, '0') }}</strong
-          ><span>{{ camera.fps.toFixed(1) }} FPS · {{ camera.width }} × {{ camera.height }}</span>
+          <strong>{{ sourceName(camera.camera_id) }}</strong
+          ><span>{{ props.status.input_mode === 'video' ? 'FILE FEED' : `${camera.fps.toFixed(1)} FPS` }} · {{ camera.width }} × {{ camera.height }}</span>
         </div>
       </article>
     </div>

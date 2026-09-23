@@ -114,7 +114,7 @@ onBeforeUnmount(() => subscriptions.forEach((unsubscribe) => unsubscribe()))
             >
           </div>
         </div>
-        <MetricsPage v-else-if="activeTab === 'metrics'" :snapshot="metrics" />
+        <MetricsPage v-else-if="activeTab === 'metrics'" :snapshot="metrics" :input-mode="runtimeStatus.input_mode" :video-decode-status="runtimeStatus.video_decode_status" />
         <CameraGridPage v-if="activeTab === 'cameras'" :status="runtimeStatus" />
       </section>
     </section>

@@ -6,6 +6,7 @@
 #include "iris/stages/output/OutputCommand.hpp"
 #include "iris/stages/output/OutputConfig.hpp"
 #include "iris/stages/output/PreviewSink.hpp"
+#include "iris/stages/output/SnapshotBatchSource.hpp"
 
 #include <cstddef>
 #include <memory>
@@ -16,7 +17,8 @@ namespace iris {
 class OutputStage final {
   public:
     OutputStage(Channel<Packet>& input, infrastructure::metrics::MetricRegistry& metrics,
-                OutputConfig config = {});
+                OutputConfig config = {},
+                std::shared_ptr<SnapshotBatchSource> snapshots = {});
     ~OutputStage();
 
     OutputStage(const OutputStage&) = delete;

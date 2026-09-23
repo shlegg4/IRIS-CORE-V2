@@ -5,6 +5,7 @@ import type { CreateCameraRequest, DiscoveredCamera, UpdateCameraRequest } from 
 // Custom APIs for renderer
 const api = {
   request: (path: string, method = 'GET', body?: unknown) => ipcRenderer.invoke('iris:api', path, method, body),
+  pickVideoFiles: () => ipcRenderer.invoke('iris:pick-videos') as Promise<string[]>,
   getStatus: () => ipcRenderer.invoke('iris:api', '/status'),
   getMetrics: (prefix = '') => ipcRenderer.invoke('iris:api', prefix ? `/metrics?prefix=${encodeURIComponent(prefix)}` : '/metrics'),
   listCameras: () => ipcRenderer.invoke('iris:api', '/cameras'),

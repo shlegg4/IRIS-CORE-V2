@@ -129,6 +129,7 @@ std::optional<FrameRotation> parse_rotation(const std::string& value) {
 
 void print_snapshot(const RuntimeSnapshot& snapshot, std::ostream& output) {
     output << "pipeline:  " << to_string(snapshot.state) << '\n';
+    output << "input:     " << snapshot.input_mode << '\n';
     output << "recording: " << (snapshot.recording ? "active" : "inactive") << '\n';
     output << "file:      " << snapshot.recording_path.string() << '\n';
     output << "packets:   " << snapshot.processed_packets << '\n';
@@ -148,22 +149,29 @@ void print_snapshot(const RuntimeSnapshot& snapshot, std::ostream& output) {
            << " mjpeg=" << snapshot.preview.mjpeg_clients << ")";
     if (!snapshot.preview.last_error.empty()) output << " error=" << snapshot.preview.last_error;
     output << '\n';
-    output << "cameras:   " << snapshot.cameras.size() << '\n';
-    for (const auto& camera : snapshot.cameras) {
-        output << "  [" << camera.camera_id << "] ";
-        if (!camera.capture.device_symbolic_link.empty()) {
-            output << camera.capture.device_symbolic_link;
-        } else {
-            output << "device-index=" << camera.capture.device_index.value_or(0);
+    if (snapshot.input_mode == "video") {
+        output << "video files:\n";
+        for (const auto& video : snapshot.video_inputs) {
+            output << "  [" << video.camera_id << "] " << video.path.string() << '\n';
         }
-        output << " " << camera.capture.extent.width << "x" << camera.capture.extent.height << "@"
-               << camera.capture.frame_rate.value() << '\n';
+    } else {
+        output << "cameras:   " << snapshot.cameras.size() << '\n';
+        for (const auto& camera : snapshot.cameras) {
+            output << "  [" << camera.camera_id << "] ";
+            if (!camera.capture.device_symbolic_link.empty()) {
+                output << camera.capture.device_symbolic_link;
+            } else {
+                output << "device-index=" << camera.capture.device_index.value_or(0);
+            }
+            output << " " << camera.capture.extent.width << "x" << camera.capture.extent.height << "@"
+                   << camera.capture.frame_rate.value() << '\n';
+        }
+        output << "sync:      tolerance=" << snapshot.sync_tolerance.count()
+               << "ms capacity=" << snapshot.sync_queue_capacity << " policy="
+               << (snapshot.incomplete_batch_policy == IncompleteBatchPolicy::DropBatch ? "drop"
+                                                                                        : "partial")
+               << '\n';
     }
-    output << "sync:      tolerance=" << snapshot.sync_tolerance.count()
-           << "ms capacity=" << snapshot.sync_queue_capacity << " policy="
-           << (snapshot.incomplete_batch_policy == IncompleteBatchPolicy::DropBatch ? "drop"
-                                                                                    : "partial")
-           << '\n';
     if (!snapshot.last_error.empty()) {
         output << "error:     " << snapshot.last_error << '\n';
     }
@@ -349,6 +357,50 @@ std::optional<RuntimeCommand> InteractiveCli::parse(std::string line, std::strin
     if (tokens[0] == "capture" && tokens.size() == 2 && tokens[1] == "list") {
         return GetCamerasCommand{};
     }
+    if (tokens[0] == "capture" && tokens.size() == 2 && tokens[1] == "live") {
+        return UseLiveCaptureCommand{};
+    }
+    if (tokens[0] == "capture" && tokens.size() >= 4 && tokens[1] == "video") {
+        SynchronizedVideoConfig config;
+        for (std::size_t index = 2; index < tokens.size();) {
+            const auto& token = tokens[index];
+            if (token == "--cuda-device" || token == "--frame-pool" || token == "--realtime") {
+                if (index + 1 >= tokens.size()) {
+                    error = token + " requires a value";
+                    return std::nullopt;
+                }
+                const auto& value = tokens[index + 1];
+                if (token == "--cuda-device") {
+                    const auto device = parse_non_negative_int(value);
+                    if (!device) { error = "CUDA device must be a non-negative integer"; return std::nullopt; }
+                    config.cuda_device = *device;
+                } else if (token == "--frame-pool") {
+                    const auto capacity = parse_positive(value);
+                    if (!capacity) { error = "frame-pool capacity must be positive"; return std::nullopt; }
+                    config.frame_pool_capacity = *capacity;
+                } else {
+                    const auto realtime = parse_bool(value);
+                    if (!realtime) { error = "realtime must be true or false"; return std::nullopt; }
+                    config.realtime = *realtime;
+                }
+                index += 2;
+                continue;
+            }
+            if (index + 1 >= tokens.size()) {
+                error = "capture video requires camera-id and file pairs";
+                return std::nullopt;
+            }
+            const auto camera_id = parse_non_negative(token);
+            if (!camera_id) { error = "video camera ID must be a non-negative integer"; return std::nullopt; }
+            config.cameras.push_back({*camera_id, tokens[index + 1]});
+            index += 2;
+        }
+        if (config.cameras.empty()) {
+            error = "capture video requires at least one camera-id and file pair";
+            return std::nullopt;
+        }
+        return ConfigureVideoIngestionCommand{std::move(config)};
+    }
     if (tokens[0] == "capture" && tokens.size() == 5 && tokens[1] == "sync") {
         const auto tolerance = parse_non_negative(tokens[2]);
         const auto capacity = parse_positive(tokens[3]);
@@ -523,6 +575,8 @@ std::string InteractiveCli::help() {
            "preview enable [port]\n"
            "preview disable\n"
            "capture list\n"
+           "capture video [--cuda-device <n>] [--frame-pool <n>] [--realtime <true|false>] <camera-id> <file> [<camera-id> <file> ...]\n"
+           "capture live\n"
            "capture sync <tolerance-ms> <capacity> <drop|partial>\n"
            "capture add <camera-id> <device-index> [width height fps format]\n"
            "capture remove <camera-id>\n"
