@@ -91,7 +91,7 @@ class TensorRtMultiviewEngine::Impl {
         check_cuda(cudaMalloc(&projections_, sizeof(float) * 36), "cudaMalloc projections");
         check_cuda(cudaMalloc(&triangulated_xyz_, sizeof(float) * 10 * 17 * 3), "cudaMalloc triangulated xyz");
         check_cuda(cudaMalloc(&triangulated_valid_, sizeof(unsigned char) * 10 * 17), "cudaMalloc triangulated valid");
-        check_cuda(cudaMalloc(&fundamentals_, sizeof(float) * 18), "cudaMalloc fundamentals");
+        check_cuda(cudaMalloc(&fundamentals_, sizeof(float) * 27), "cudaMalloc fundamentals");
         check_cuda(cudaMalloc(&assignments_, sizeof(unsigned char) * 30), "cudaMalloc assignments");
         check_cuda(cudaMalloc(&selected_keypoints_, sizeof(float) * 10 * 3 * 17 * 2), "cudaMalloc selected keypoints");
         check_cuda(cudaMalloc(&selected_scores_, sizeof(float) * 10 * 3 * 17), "cudaMalloc selected scores");
@@ -161,6 +161,7 @@ class TensorRtMultiviewEngine::Impl {
         }
         result.timings.enqueue_host_ms = elapsed_ms(enqueue_start);
         check_cuda(cudaEventRecord(timing_events_[3].value, stream_), "time engine end");
+        const auto geometry_setup_start = TimingClock::now();
         std::array<float, 36> projections{};
         for (std::size_t view = 0; view < 3; ++view) {
             const auto& camera = calibration_[view];
@@ -173,10 +174,12 @@ class TensorRtMultiviewEngine::Impl {
             }
         }
         check_cuda(cudaMemcpyAsync(projections_, projections.data(), sizeof(projections), cudaMemcpyHostToDevice, stream_), "copy projections");
-        std::array<float, 18> fundamentals{};
-        const Eigen::Matrix3f k0 = Eigen::Map<const Eigen::Matrix<float, 3, 3, Eigen::RowMajor>>(target_k.data());
-        for (int view = 1; view < 3; ++view) {
-            const auto& first = calibration_[0]; const auto& second = calibration_[view];
+        std::array<float, 27> fundamentals{};
+        constexpr int pair_first[3]{0, 0, 1};
+        constexpr int pair_second[3]{1, 2, 2};
+        for (int pair = 0; pair < 3; ++pair) {
+            const int first_view = pair_first[pair], second_view = pair_second[pair];
+            const auto& first = calibration_[first_view]; const auto& second = calibration_[second_view];
             Eigen::Matrix3f r0, r1; Eigen::Vector3f t0, t1;
             for (int row = 0; row < 3; ++row) for (int col = 0; col < 3; ++col) {
                 r0(row, col) = first.R_w2c[row * 3 + col]; r1(row, col) = second.R_w2c[row * 3 + col];
@@ -185,14 +188,21 @@ class TensorRtMultiviewEngine::Impl {
             const auto relative_r = r1 * r0.transpose(); const auto relative_t = t1 - relative_r * t0;
             Eigen::Matrix3f skew;
             skew << 0.0F, -relative_t.z(), relative_t.y(), relative_t.z(), 0.0F, -relative_t.x(), -relative_t.y(), relative_t.x(), 0.0F;
-            const auto kv = Eigen::Map<const Eigen::Matrix<float, 3, 3, Eigen::RowMajor>>(target_k.data() + view * 9);
-            const auto f = kv.inverse().transpose() * skew * relative_r * k0.inverse();
-            for (int row = 0; row < 3; ++row) for (int col = 0; col < 3; ++col) fundamentals[(view - 1) * 9 + row * 3 + col] = f(row, col);
+            const auto k0 = Eigen::Map<const Eigen::Matrix<float, 3, 3, Eigen::RowMajor>>(target_k.data() + first_view * 9);
+            const auto k1 = Eigen::Map<const Eigen::Matrix<float, 3, 3, Eigen::RowMajor>>(target_k.data() + second_view * 9);
+            const auto f = k1.inverse().transpose() * skew * relative_r * k0.inverse();
+            for (int row = 0; row < 3; ++row) for (int col = 0; col < 3; ++col)
+                fundamentals[pair * 9 + row * 3 + col] = f(row, col);
         }
         check_cuda(cudaMemcpyAsync(fundamentals_, fundamentals.data(), sizeof(fundamentals), cudaMemcpyHostToDevice, stream_), "copy epipolar fundamentals");
+        result.timings.geometry_setup_host_ms = elapsed_ms(geometry_setup_start);
+        check_cuda(cudaEventRecord(timing_events_[4].value, stream_), "time association begin");
         check_cuda(launch_multiview_epipolar_assignment(static_cast<const float*>(keypoints_), static_cast<const float*>(keypoint_scores_), static_cast<const unsigned char*>(candidate_valid_), static_cast<const float*>(fundamentals_), config_gate_px_, minimum_score_, static_cast<unsigned char*>(assignments_), stream_), "launch epipolar assignment");
+        check_cuda(cudaEventRecord(timing_events_[5].value, stream_), "time association end");
         check_cuda(launch_multiview_gather_selected(static_cast<const float*>(keypoints_), static_cast<const float*>(keypoint_scores_), static_cast<const unsigned char*>(candidate_valid_), static_cast<const unsigned char*>(assignments_), static_cast<float*>(selected_keypoints_), static_cast<float*>(selected_scores_), static_cast<unsigned char*>(selected_valid_), stream_), "gather selected observations");
+        check_cuda(cudaEventRecord(timing_events_[6].value, stream_), "time gather end");
         check_cuda(launch_multiview_weighted_dlt(static_cast<const float*>(keypoints_), static_cast<const float*>(keypoint_scores_), static_cast<const unsigned char*>(candidate_valid_), static_cast<const unsigned char*>(assignments_), static_cast<const float*>(projections_), minimum_score_, maximum_reprojection_error_, static_cast<float*>(triangulated_xyz_), static_cast<unsigned char*>(triangulated_valid_), stream_), "launch GPU triangulation");
+        check_cuda(cudaEventRecord(timing_events_[7].value, stream_), "time triangulation end");
         const auto download_start = TimingClock::now();
         check_cuda(cudaMemcpyAsync(result.selected_keypoints.data(), selected_keypoints_, sizeof(float) * result.selected_keypoints.size(), cudaMemcpyDeviceToHost, stream_), "copy selected keypoints");
         check_cuda(cudaMemcpyAsync(result.selected_scores.data(), selected_scores_, sizeof(float) * result.selected_scores.size(), cudaMemcpyDeviceToHost, stream_), "copy selected scores");
@@ -203,7 +213,7 @@ class TensorRtMultiviewEngine::Impl {
         check_cuda(cudaMemcpyAsync(result.triangulated_xyz.data(), triangulated_xyz_, sizeof(float) * result.triangulated_xyz.size(), cudaMemcpyDeviceToHost, stream_), "copy triangulated xyz");
         check_cuda(cudaMemcpyAsync(result.triangulated_valid.data(), triangulated_valid_, sizeof(unsigned char) * result.triangulated_valid.size(), cudaMemcpyDeviceToHost, stream_), "copy triangulated valid");
         check_cuda(cudaMemcpyAsync(result.assignments.data(), assignments_, sizeof(unsigned char) * result.assignments.size(), cudaMemcpyDeviceToHost, stream_), "copy epipolar assignments");
-        check_cuda(cudaEventRecord(timing_events_[4].value, stream_), "time download end");
+        check_cuda(cudaEventRecord(timing_events_[8].value, stream_), "time output copies end");
         result.timings.download_host_ms = elapsed_ms(download_start);
         const auto wait_start = TimingClock::now();
         check_cuda(cudaStreamSynchronize(stream_), "synchronize TensorRT inference");
@@ -215,7 +225,13 @@ class TensorRtMultiviewEngine::Impl {
         };
         result.timings.preprocess_stream_ms = interval(0, 1);
         result.timings.engine_stream_ms = interval(2, 3);
-        result.timings.download_stream_ms = interval(3, 4);
+        result.timings.association_stream_ms = interval(4, 5);
+        result.timings.gather_stream_ms = interval(5, 6);
+        result.timings.triangulation_stream_ms = interval(6, 7);
+        result.timings.output_copy_stream_ms = interval(7, 8);
+        // Retain the historical aggregate: engine end through geometry uploads,
+        // postprocess kernels, and output copies.
+        result.timings.download_stream_ms = interval(3, 8);
 #endif
     }
 #ifdef IRIS_HAS_TENSORRT
@@ -282,7 +298,7 @@ class TensorRtMultiviewEngine::Impl {
     TrtPtr<nvinfer1::ICudaEngine> engine_;
     TrtPtr<nvinfer1::IExecutionContext> context_;
     cudaStream_t stream_{};
-    std::array<TimingEvent, 5> timing_events_;
+    std::array<TimingEvent, 9> timing_events_;
     cudaGraph_t graph_{};
     cudaGraphExec_t graph_exec_{};
     bool graph_ready_{};

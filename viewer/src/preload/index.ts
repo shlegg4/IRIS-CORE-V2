@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
-import type { CreateCameraRequest, UpdateCameraRequest } from '../renderer/src/types/iris'
+import type { CreateCameraRequest, DiscoveredCamera, UpdateCameraRequest } from '../renderer/src/types/iris'
 
 // Custom APIs for renderer
 const api = {
@@ -8,6 +8,7 @@ const api = {
   getStatus: () => ipcRenderer.invoke('iris:api', '/status'),
   getMetrics: (prefix = '') => ipcRenderer.invoke('iris:api', prefix ? `/metrics?prefix=${encodeURIComponent(prefix)}` : '/metrics'),
   listCameras: () => ipcRenderer.invoke('iris:api', '/cameras'),
+  discoverCameras: () => ipcRenderer.invoke('iris:api', '/cameras/discover') as Promise<DiscoveredCamera[]>,
   startPipeline: () => ipcRenderer.invoke('iris:api', '/pipeline/start', 'POST'),
   stopPipeline: () => ipcRenderer.invoke('iris:api', '/pipeline/stop', 'POST'),
   stopRecording: () => ipcRenderer.invoke('iris:api', '/recording/stop', 'POST'),

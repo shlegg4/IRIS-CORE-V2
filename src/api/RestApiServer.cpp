@@ -3,6 +3,10 @@
 #include "iris/pipeline/Frame.hpp"
 #include "iris/pipeline/OverflowPolicy.hpp"
 #include "iris/stages/output/PreviewHttpServer.hpp"
+#ifdef _WIN32
+#include "stages/capture/media_foundation/MediaFoundationSource.hpp"
+#include <windows.h>
+#endif
 
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio.hpp>
@@ -39,6 +43,17 @@ std::optional<OverflowPolicy> parse_overflow(const json& b) { if (!b.contains("o
 std::optional<FrameRotation> parse_rotation(const json& b) { if (!b.contains("rotation") || !b["rotation"].is_string()) return std::nullopt; const auto v=b["rotation"].get<std::string>(); if(v=="none")return FrameRotation::None; if(v=="cw90")return FrameRotation::Clockwise90; if(v=="180")return FrameRotation::Rotate180; if(v=="ccw90")return FrameRotation::CounterClockwise90; return std::nullopt; }
 std::optional<CaptureConfigPatch> capture_patch(const json& b) { CaptureConfigPatch p; if(!b.is_object())return std::nullopt; if(b.contains("device_symbolic_link"))p.device_symbolic_link=b.value("device_symbolic_link",""); if(b.contains("device_index"))p.device_index=number(b,"device_index"); if(b.contains("width"))p.width=number(b,"width"); if(b.contains("height"))p.height=number(b,"height"); if(b.contains("frame_rate"))p.frame_rate=frame_rate(b); if(b.contains("format"))p.format=parse_format(b); if(b.contains("cuda_device"))p.cuda_device=b.value("cuda_device",0); if(b.contains("sample_queue_capacity"))p.sample_queue_capacity=number(b,"sample_queue_capacity"); if(b.contains("frame_pool_capacity"))p.frame_pool_capacity=number(b,"frame_pool_capacity"); if(b.contains("overflow"))p.overflow=parse_overflow(b); if(b.contains("rotation"))p.rotation=parse_rotation(b); if(b.contains("allow_format_fallback"))p.allow_format_fallback=b.value("allow_format_fallback",false); if(b.contains("reconnect"))p.reconnect=b.value("reconnect",true); return p; }
 std::optional<CameraId> path_camera(const std::string& path) { const std::string prefix="/api/v1/cameras/"; if(!path.starts_with(prefix))return std::nullopt; try { std::size_t used{}; auto v=std::stoul(path.substr(prefix.size()),&used); if(used!=path.size()-prefix.size()||v>UINT32_MAX)return std::nullopt; return static_cast<CameraId>(v); } catch(...) { return std::nullopt; } }
+#ifdef _WIN32
+std::string utf8(const std::wstring& value) {
+    if (value.empty()) return {};
+    const auto length = static_cast<int>(value.size());
+    const int bytes = WideCharToMultiByte(CP_UTF8, 0, value.data(), length, nullptr, 0, nullptr, nullptr);
+    if (bytes <= 0) return {};
+    std::string result(static_cast<std::size_t>(bytes), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, value.data(), length, result.data(), bytes, nullptr, nullptr);
+    return result;
+}
+#endif
 
 json metrics(const infrastructure::metrics::MetricsSnapshot& m) {
     json result{{"counters", m.counters}, {"gauges", m.gauges}, {"histograms", json::object()}};
@@ -79,6 +94,23 @@ class RestApiServer::Impl {
         const std::string target(req.target()); const auto query_start = target.find('?'); const std::string path = target.substr(0, query_start);
         if (path == "/api/v1/status" && req.method() == http::verb::get) return {http::status::ok, snapshot(runtime_.snapshot())};
         if (path == "/api/v1/metrics" && req.method() == http::verb::get) { auto result=metrics(runtime_.snapshot().metrics); if(query_start!=std::string::npos) { const auto query=target.substr(query_start+1); const std::string key="prefix="; if(query.starts_with(key)) { const auto prefix=query.substr(key.size()); for(auto group: {"counters","gauges","histograms"}) for(auto it=result[group].begin();it!=result[group].end();) { if(!it.key().starts_with(prefix)) it=result[group].erase(it); else ++it; } } } return {http::status::ok, result}; }
+        if (path == "/api/v1/cameras/discover" && req.method() == http::verb::get) {
+#ifdef _WIN32
+            try {
+                iris::capture::MediaFoundationSource source;
+                const auto devices = source.enumerate();
+                json out = json::array();
+                for (std::size_t index = 0; index < devices.size(); ++index)
+                    out.push_back({{"name", utf8(devices[index].name)}, {"device_index", index},
+                                   {"device_symbolic_link", utf8(devices[index].symbolic_link)}});
+                return {http::status::ok, out};
+            } catch (const std::exception& cause) {
+                return error(http::status::internal_server_error, cause.what());
+            }
+#else
+            return error(http::status::not_implemented, "Camera discovery is available on Windows only");
+#endif
+        }
         if (path == "/api/v1/cameras" && req.method() == http::verb::get) { const auto s=runtime_.snapshot(); json out=json::array(); for (const auto& c:s.cameras) out.push_back(camera(c, s.metrics)); return {http::status::ok, out}; }
         if (path == "/api/v1/recording" && req.method() == http::verb::get) { auto s=runtime_.snapshot(); return {http::status::ok, {{"recording",s.recording},{"path",s.recording_path.string()}}}; }
         if (path == "/api/v1/synchronizer" && req.method() == http::verb::get) { auto s=runtime_.snapshot(); return {http::status::ok, {{"tolerance_ms",s.sync_tolerance.count()},{"queue_capacity",s.sync_queue_capacity},{"incomplete_batch_policy",s.incomplete_batch_policy==IncompleteBatchPolicy::EmitPartial?"partial":"drop"}}}; }
@@ -98,7 +130,7 @@ class RestApiServer::Impl {
         else if (path == "/api/v1/calibration/clear" && req.method() == http::verb::post) command=ClearRigCalibrationCommand{};
         else if (path == "/api/v1/calibration" && req.method() == http::verb::get) command=GetRigCalibrationStatusCommand{};
         else if (path == "/api/v1/outputs/shared-memory" && req.method() == http::verb::patch) { auto b=json::parse(req.body(),nullptr,false); if(b.is_discarded())return error(http::status::bad_request,"invalid shared-memory body"); SharedMemoryOutputConfig c; c.enabled=b.value("enabled",false); c.destination=b.value("destination",c.destination); c.capacity_bytes=b.value("capacity_bytes",c.capacity_bytes); c.legacy_v1=b.value("legacy_v1",true); command=ConfigureSharedMemoryCommand{c}; }
-        else if (path == "/api/v1/synchronizer" && req.method() == http::verb::patch) { auto b=json::parse(req.body(),nullptr,false); if(b.is_discarded())return error(http::status::bad_request,"invalid synchronizer body"); ConfigureSynchronizerCommand c; c.tolerance=std::chrono::milliseconds(b.value("tolerance_ms",3)); c.queue_capacity=b.value("queue_capacity",4U); c.incomplete_batch_policy=b.value("incomplete_batch_policy", "drop")=="partial" ? IncompleteBatchPolicy::EmitPartial : IncompleteBatchPolicy::DropBatch; command= c; }
+        else if (path == "/api/v1/synchronizer" && req.method() == http::verb::patch) { auto b=json::parse(req.body(),nullptr,false); if(b.is_discarded())return error(http::status::bad_request,"invalid synchronizer body"); ConfigureSynchronizerCommand c; c.tolerance=std::chrono::milliseconds(b.value("tolerance_ms",20)); c.queue_capacity=b.value("queue_capacity",4U); c.incomplete_batch_policy=b.value("incomplete_batch_policy", "drop")=="partial" ? IncompleteBatchPolicy::EmitPartial : IncompleteBatchPolicy::DropBatch; command= c; }
         else if (path == "/api/v1/outputs/preview" && req.method() == http::verb::patch) { auto b=json::parse(req.body(),nullptr,false); if(b.is_discarded())return error(http::status::bad_request,"invalid preview body"); PreviewConfig c; c.http.enabled=b.value("http_enabled",true); c.mjpeg.enabled=b.value("mjpeg_enabled",true); c.h264.enabled=b.value("h264_enabled",true); c.http.bind_address=b.value("bind_address",c.http.bind_address); c.http.port=b.value("port",c.http.port); c.h264.max_fps=b.value("max_fps",c.h264.max_fps); c.h264.max_width=b.value("max_width",c.h264.max_width); c.mjpeg.jpeg_quality=b.value("jpeg_quality",c.mjpeg.jpeg_quality); c.h264.bitrate=b.value("bitrate",c.h264.bitrate); c.http.queue_capacity=b.value("queue_capacity",c.http.queue_capacity); command=ConfigurePreviewCommand{c}; }
         else return error(http::status::not_found,"endpoint not found");
         auto r=runtime_.execute(std::move(command)); auto code=r.status==RuntimeCommandStatus::Applied?http::status::ok:(r.status==RuntimeCommandStatus::Rejected?http::status::unprocessable_entity:http::status::internal_server_error); return {code,response(r)};

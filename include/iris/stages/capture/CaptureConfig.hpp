@@ -58,7 +58,7 @@ enum class IncompleteBatchPolicy { DropBatch, EmitPartial };
 
 struct MultiCameraCaptureConfig {
     std::vector<CameraCaptureConfig> cameras;
-    std::chrono::milliseconds sync_tolerance{3};
+    std::chrono::milliseconds sync_tolerance{20};
     std::size_t sync_queue_capacity{4};
     IncompleteBatchPolicy incomplete_batch_policy{IncompleteBatchPolicy::DropBatch};
 };

@@ -71,7 +71,6 @@ function connectPreviewEvents(window: BrowserWindow): void {
     try {
       const envelope = JSON.parse(data.toString()) as { type?: string; data?: unknown }
       if (envelope.type === 'pose') send(window, 'iris:pose', envelope.data)
-      else if (envelope.type === 'status') send(window, 'iris:status', normalizeRuntimeStatus(envelope.data))
     } catch (error) {
       send(window, 'iris:log', `preview event error: ${String(error)}`)
     }

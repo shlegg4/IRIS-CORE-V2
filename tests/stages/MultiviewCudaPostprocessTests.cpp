@@ -34,7 +34,7 @@ int main() {
             scores[second] = 1.0F;
         }
     }
-    std::array<float, 18> fundamentals{};
+    std::array<float, 27> fundamentals{};
     std::array<float, 36> projections{};
     for (int view = 0; view < 3; ++view) {
         projections[view * 12 + 0] = 1.0F;

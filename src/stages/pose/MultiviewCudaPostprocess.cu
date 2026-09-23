@@ -82,67 +82,220 @@ __device__ float epipolar_distance(const float* f, float x1, float y1, float x2,
     return 0.5F * (fabsf(residual) / fmaxf(1e-6F, hypotf(l2x, l2y)) + fabsf(residual) / fmaxf(1e-6F, hypotf(l1x, l1y)));
 }
 
-__global__ void assignment_kernel(const float* points, const float* scores,
-                                  const unsigned char* candidates, const float* fundamentals,
-                                  float gate, float minimum_score, unsigned char* assignments) {
-    // One bounded exact assignment solve per non-reference view.  The 10x10
-    // cost matrix is small enough for a 2^10 dynamic program in one CUDA
-    // thread, and guarantees that two people cannot consume the same
-    // candidate in a view.
-    if (blockIdx.x != 0 || threadIdx.x != 0) return;
-    int anchors[10];
-    for (int person = 0; person < 10; ++person) anchors[person] = -1;
-    bool used_anchor[10]{};
-    for (int person = 0; person < 10; ++person) {
-        int best = -1;
-        for (int candidate = 0; candidate < 10; ++candidate)
-            if (!used_anchor[candidate] && candidates[candidate] && isfinite(scores[candidate * 17]) && scores[candidate * 17] >= minimum_score &&
-                (best < 0 || scores[candidate * 17] > scores[best * 17])) best = candidate;
-        anchors[person] = best;
-        if (best >= 0) used_anchor[best] = true;
-        assignments[person * 3] = best < 0 ? 255 : static_cast<unsigned char>(best);
-        assignments[person * 3 + 1] = assignments[person * 3 + 2] = 255;
-    }
-    for (int view = 1; view < 3; ++view) {
-        constexpr int state_count = 1 << 10;
-        float dp[state_count], next[state_count];
-        unsigned char choice[10][state_count];
-        for (int mask = 0; mask < state_count; ++mask) dp[mask] = mask == 0 ? 0.0F : 1e20F;
-        for (int person = 0; person < 10; ++person) {
-            for (int mask = 0; mask < state_count; ++mask) { next[mask] = dp[mask]; choice[person][mask] = 255; }
-            const int anchor = anchors[person];
-            for (int mask = 0; mask < state_count; ++mask) {
-                if (dp[mask] >= 1e19F || anchor < 0) continue;
-                const float x1 = points[anchor * 17 * 2], y1 = points[anchor * 17 * 2 + 1];
-                if (!isfinite(x1) || !isfinite(y1)) continue;
+__device__ void solve_assignment_parallel(const float* costs, const int* sources,
+                                          int count, float gate, int row_offset,
+                                          int output_view, unsigned char* assignments,
+                                          float* dp_a, float* dp_b,
+                                          unsigned char* choices) {
+    constexpr int state_count = 1 << 10;
+    const int lane = threadIdx.x;
+    for (int mask = lane; mask < state_count; mask += blockDim.x)
+        dp_a[mask] = mask == 0 ? 0.0F : 1e20F;
+    __syncthreads();
+
+    float* current = dp_a;
+    float* next = dp_b;
+    for (int person = 0; person < count; ++person) {
+        const int source = sources[person];
+        for (int mask = lane; mask < state_count; mask += blockDim.x) {
+            float best = current[mask]; // Leave this source detection unmatched.
+            unsigned char selected = 255;
+            if (source >= 0) {
                 for (int candidate = 0; candidate < 10; ++candidate) {
-                    if (mask & (1 << candidate)) continue;
-                    const int index = view * 10 + candidate;
-                    if (!candidates[index] || !isfinite(scores[index * 17]) || scores[index * 17] < minimum_score) continue;
-                    const float x2 = points[(index * 17) * 2], y2 = points[(index * 17) * 2 + 1];
-                    if (!isfinite(x2) || !isfinite(y2)) continue;
-                    const float cost = epipolar_distance(fundamentals + (view - 1) * 9, x1, y1, x2, y2);
-                    if (cost > gate) continue;
-                    const int new_mask = mask | (1 << candidate);
-                    if (dp[mask] + cost < next[new_mask]) {
-                        // Reward every gated match so the solver prefers the
-                        // largest consistent matching before minimizing error.
-                        next[new_mask] = dp[mask] + cost - gate;
-                        choice[person][new_mask] = static_cast<unsigned char>(candidate);
+                    const int bit = 1 << candidate;
+                    if (!(mask & bit)) continue;
+                    const float edge = costs[person * 10 + candidate];
+                    if (edge >= 1e19F) continue;
+                    const float candidate_cost = current[mask ^ bit] + edge - gate;
+                    if (candidate_cost < best) {
+                        best = candidate_cost;
+                        selected = static_cast<unsigned char>(candidate);
                     }
                 }
             }
-            for (int mask = 0; mask < state_count; ++mask) dp[mask] = next[mask];
+            next[mask] = best;
+            choices[person * state_count + mask] = selected;
         }
+        __syncthreads();
+        float* swap = current;
+        current = next;
+        next = swap;
+    }
+
+    if (lane == 0) {
         int mask = 0;
         for (int candidate_mask = 1; candidate_mask < state_count; ++candidate_mask)
-            if (dp[candidate_mask] < dp[mask]) mask = candidate_mask;
-        for (int person = 9; person >= 0; --person) {
-            const unsigned char candidate = choice[person][mask];
-            if (candidate != 255) {
-                assignments[person * 3 + view] = candidate;
-                mask &= ~(1 << candidate);
+            if (current[candidate_mask] < current[mask]) mask = candidate_mask;
+        for (int person = count - 1; person >= 0; --person) {
+            const unsigned char candidate = choices[person * state_count + mask];
+            if (candidate < 10) {
+                assignments[(row_offset + person) * 3 + output_view] = candidate;
+                mask ^= 1 << candidate;
             }
+        }
+    }
+    __syncthreads();
+}
+
+__global__ void assignment_kernel(const float* points, const float* scores,
+                                  const unsigned char* candidates, const float* fundamentals,
+                                  float gate, float minimum_score, unsigned char* assignments) {
+    // The 3 pairwise 10x10 cost matrices are evaluated in parallel.  The
+    // bounded DP then assigns one thread to each candidate mask per person.
+    // Camera 0 detections seed tracks; leftover camera 1 detections are matched
+    // to camera 2 and emitted as rows without a camera 0 observation.
+    if (blockIdx.x != 0) return;
+    constexpr int state_count = 1 << 10;
+    constexpr float invalid_cost = 1e20F;
+    __shared__ float pair_costs[3 * 10 * 10];
+    __shared__ float match_costs[10 * 10];
+    __shared__ float dp_a[state_count];
+    __shared__ float dp_b[state_count];
+    __shared__ unsigned char choices[10 * state_count];
+    __shared__ int anchors[10];
+    __shared__ int source_candidates[10];
+    __shared__ int anchor_count;
+    __shared__ int fallback_count;
+
+    const int lane = threadIdx.x;
+    for (int work = lane; work < 3 * 10 * 10; work += blockDim.x) {
+        const int pair = work / 100;
+        const int pair_item = work % 100;
+        const int first_candidate = pair_item / 10;
+        const int second_candidate = pair_item % 10;
+        const int first_view = pair == 0 ? 0 : (pair == 1 ? 0 : 1);
+        const int second_view = pair == 0 ? 1 : 2;
+        const int first_index = first_view * 10 + first_candidate;
+        const int second_index = second_view * 10 + second_candidate;
+        const int first_score_index = first_index * 17;
+        const int second_score_index = second_index * 17;
+        float cost = invalid_cost;
+        if (candidates[first_index] && candidates[second_index] &&
+            isfinite(scores[first_score_index]) && scores[first_score_index] >= minimum_score &&
+            isfinite(scores[second_score_index]) && scores[second_score_index] >= minimum_score) {
+            const float x1 = points[first_score_index * 2];
+            const float y1 = points[first_score_index * 2 + 1];
+            const float x2 = points[second_score_index * 2];
+            const float y2 = points[second_score_index * 2 + 1];
+            if (isfinite(x1) && isfinite(y1) && isfinite(x2) && isfinite(y2)) {
+                const float measured = epipolar_distance(fundamentals + pair * 9, x1, y1, x2, y2);
+                if (measured <= gate) cost = measured;
+            }
+        }
+        pair_costs[work] = cost;
+    }
+    if (lane == 0) {
+        for (int index = 0; index < 30; ++index) assignments[index] = 255;
+        for (int person = 0; person < 10; ++person) anchors[person] = -1;
+        bool used[10]{};
+        anchor_count = 0;
+        for (int person = 0; person < 10; ++person) {
+            int best = -1;
+            for (int candidate = 0; candidate < 10; ++candidate) {
+                const int score_index = candidate * 17;
+                if (!used[candidate] && candidates[candidate] && isfinite(scores[score_index]) &&
+                    scores[score_index] >= minimum_score &&
+                    (best < 0 || scores[score_index] > scores[best * 17])) best = candidate;
+            }
+            if (best < 0) break;
+            anchors[person] = best;
+            assignments[person * 3] = static_cast<unsigned char>(best);
+            source_candidates[person] = best;
+            used[best] = true;
+            ++anchor_count;
+        }
+    }
+    __syncthreads();
+
+    for (int work = lane; work < anchor_count * 10; work += blockDim.x) {
+        const int person = work / 10;
+        const int candidate = work % 10;
+        match_costs[work] = pair_costs[anchors[person] * 10 + candidate];
+    }
+    __syncthreads();
+    solve_assignment_parallel(match_costs, source_candidates, anchor_count, gate, 0, 1,
+                              assignments, dp_a, dp_b, choices);
+
+    // A view 2 match must agree with the anchor and, when present, the chosen
+    // view 1 detection. This avoids building geometrically inconsistent triples.
+    for (int work = lane; work < anchor_count * 10; work += blockDim.x) {
+        const int person = work / 10;
+        const int candidate = work % 10;
+        const int anchor = anchors[person];
+        const int view1_candidate = assignments[person * 3 + 1];
+        const float cost02 = pair_costs[100 + anchor * 10 + candidate];
+        float cost = cost02;
+        if (view1_candidate < 10) {
+            const float cost12 = pair_costs[200 + view1_candidate * 10 + candidate];
+            cost = cost02 < invalid_cost && cost12 < invalid_cost
+                ? 0.5F * (cost02 + cost12) : invalid_cost;
+        }
+        match_costs[work] = cost;
+    }
+    __syncthreads();
+    solve_assignment_parallel(match_costs, source_candidates, anchor_count, gate, 0, 2,
+                              assignments, dp_a, dp_b, choices);
+
+    if (lane == 0) {
+        bool used_view1[10]{};
+        for (int person = 0; person < anchor_count; ++person) {
+            const int candidate = assignments[person * 3 + 1];
+            if (candidate < 10) used_view1[candidate] = true;
+        }
+        fallback_count = 0;
+        const int capacity = 10 - anchor_count;
+        bool selected[10]{};
+        while (fallback_count < capacity) {
+            int best = -1;
+            for (int candidate = 0; candidate < 10; ++candidate) {
+                const int score_index = (10 + candidate) * 17;
+                if (!used_view1[candidate] && !selected[candidate] && candidates[10 + candidate] &&
+                    isfinite(scores[score_index]) && scores[score_index] >= minimum_score &&
+                    (best < 0 || scores[score_index] > scores[(10 + best) * 17])) best = candidate;
+            }
+            if (best < 0) break;
+            source_candidates[fallback_count] = best;
+            const int row = anchor_count + fallback_count;
+            assignments[row * 3 + 1] = static_cast<unsigned char>(best);
+            selected[best] = true;
+            ++fallback_count;
+        }
+    }
+    __syncthreads();
+
+    bool used_view2[10]{};
+    for (int person = 0; person < anchor_count; ++person) {
+        const int candidate = assignments[person * 3 + 2];
+        if (candidate < 10) used_view2[candidate] = true;
+    }
+    for (int work = lane; work < fallback_count * 10; work += blockDim.x) {
+        const int person = work / 10;
+        const int candidate = work % 10;
+        const int view2_candidate = candidate;
+        match_costs[work] = used_view2[view2_candidate]
+            ? invalid_cost
+            : pair_costs[200 + source_candidates[person] * 10 + view2_candidate];
+    }
+    __syncthreads();
+    solve_assignment_parallel(match_costs, source_candidates, fallback_count, gate,
+                              anchor_count, 2, assignments, dp_a, dp_b, choices);
+
+    for (int person = anchor_count; person < anchor_count + fallback_count; ++person) {
+        const int candidate = assignments[person * 3 + 2];
+        if (candidate < 10) used_view2[candidate] = true;
+    }
+    if (lane == 0) {
+        for (int row = anchor_count + fallback_count; row < 10; ++row) {
+            int best = -1;
+            for (int candidate = 0; candidate < 10; ++candidate) {
+                const int score_index = (20 + candidate) * 17;
+                if (!used_view2[candidate] && candidates[20 + candidate] &&
+                    isfinite(scores[score_index]) && scores[score_index] >= minimum_score &&
+                    (best < 0 || scores[score_index] > scores[(20 + best) * 17])) best = candidate;
+            }
+            if (best < 0) break;
+            assignments[row * 3 + 2] = static_cast<unsigned char>(best);
+            used_view2[best] = true;
         }
     }
 }
@@ -185,7 +338,7 @@ cudaError_t launch_multiview_epipolar_assignment(const float* keypoints, const f
                                                  const unsigned char* candidate_valid,
                                                  const float* fundamentals, float gate_px, float minimum_score,
                                                  unsigned char* assignments, cudaStream_t stream) {
-    assignment_kernel<<<1, 10, 0, stream>>>(keypoints, scores, candidate_valid, fundamentals, gate_px, minimum_score, assignments);
+    assignment_kernel<<<1, 256, 0, stream>>>(keypoints, scores, candidate_valid, fundamentals, gate_px, minimum_score, assignments);
     return cudaGetLastError();
 }
 

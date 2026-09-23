@@ -26,10 +26,11 @@ class MultiviewPoseStage::Impl {
           last_capture_to_result_ms_(metrics ? metrics->gauge("iris_pose_last_capture_to_result_ms") : infrastructure::metrics::Gauge{}),
           last_process_ms_(metrics ? metrics->gauge("iris_pose_last_process_ms") : infrastructure::metrics::Gauge{}) {
         if (metrics) {
-            const std::array<const char*, 11> names{
+            const std::array<const char*, 16> names{
                 "frame_ready_wait", "preprocess_host", "trt_setup_host", "trt_enqueue_host",
                 "download_host", "result_wait_host", "preprocess_stream", "engine_stream",
-                "download_stream", "postprocess_cpu", "engine_call_host"};
+                "download_stream", "postprocess_cpu", "engine_call_host", "geometry_setup_host",
+                "association_stream", "gather_stream", "triangulation_stream", "output_copy_stream"};
             for (std::size_t i=0; i<names.size(); ++i) {
                 breakdown_[i] = metrics->histogram(std::string("iris_pose_")+names[i]+"_ms", {0.01,0.05,0.1,0.25,0.5,1,2,3,5,10,20});
                 latest_[i] = metrics->gauge(std::string("iris_pose_last_")+names[i]+"_ms");
@@ -215,11 +216,13 @@ class MultiviewPoseStage::Impl {
         const auto finished = std::chrono::steady_clock::now();
         if (metrics_enabled_) {
             const auto& t=result.timings;
-            const std::array<double,11> values{ready_wait_ms, t.preprocess_host_ms, t.setup_host_ms,
+            const std::array<double,16> values{ready_wait_ms, t.preprocess_host_ms, t.setup_host_ms,
                 t.enqueue_host_ms, t.download_host_ms, t.wait_host_ms, t.preprocess_stream_ms,
                 t.engine_stream_ms, t.download_stream_ms,
                 std::chrono::duration<double,std::milli>(finished-postprocess_start).count(),
-                std::chrono::duration<double,std::milli>(postprocess_start-engine_start).count()};
+                std::chrono::duration<double,std::milli>(postprocess_start-engine_start).count(),
+                t.geometry_setup_host_ms, t.association_stream_ms, t.gather_stream_ms,
+                t.triangulation_stream_ms, t.output_copy_stream_ms};
             for(std::size_t i=0;i<values.size();++i) {
                 breakdown_[i].observe(values[i]); latest_[i].set(values[i]);
             }
@@ -271,8 +274,8 @@ class MultiviewPoseStage::Impl {
     infrastructure::metrics::Histogram process_ms_, capture_to_result_ms_;
     infrastructure::metrics::Gauge last_capture_to_result_ms_;
     infrastructure::metrics::Gauge last_process_ms_;
-    std::array<infrastructure::metrics::Histogram,11> breakdown_;
-    std::array<infrastructure::metrics::Gauge,11> latest_;
+    std::array<infrastructure::metrics::Histogram,16> breakdown_;
+    std::array<infrastructure::metrics::Gauge,16> latest_;
 };
 
 MultiviewPoseStage::MultiviewPoseStage(Channel<Packet>& input, Channel<Packet>* output, PoseConfig config, infrastructure::metrics::MetricRegistry* metrics)

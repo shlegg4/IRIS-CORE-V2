@@ -355,6 +355,20 @@ body {
 .camera-manager-head { padding: 0 0 9px; }
 .camera-manager-head strong, .camera-card strong, .camera-editor strong { display: block; color: var(--cyan); font-size: 11px; letter-spacing: .05em; }
 .camera-manager-head small, .camera-card small, .camera-editor small { display: block; color: var(--muted); margin-top: 3px; }
+.camera-secondary-action { min-height: 28px; padding: 5px 7px; border: 1px solid #2d464b; border-radius: 3px; background: #0d181b; color: var(--cyan); font-size: 10px; cursor: pointer; }
+.camera-secondary-action:disabled { opacity: .55; cursor: default; }
+.camera-discovery { margin: 8px 0 12px; padding: 9px; border: 1px solid #1e292d; background: #0c1416; }
+.camera-discovery-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-bottom: 7px; }
+.camera-discovery-head strong { display: block; color: #d5e0e2; font-size: 10px; letter-spacing: .08em; }
+.camera-discovery-head small { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; }
+.camera-device-card { display: grid; grid-template-columns: 7px minmax(0, 1fr) 104px 68px; align-items: center; gap: 8px; padding: 8px 0; border-top: 1px solid #172125; }
+.camera-device-info { min-width: 0; }
+.camera-device-info strong { display: block; overflow: hidden; color: #d5e0e2; font-size: 11px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.camera-device-info small { display: block; overflow: hidden; margin-top: 3px; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.camera-rotation-control { display: grid; gap: 3px; color: var(--muted); font-size: 9px; }
+.camera-rotation-control select { width: 100%; min-width: 0; min-height: 28px; padding: 4px; border: 1px solid #2d464b; border-radius: 3px; background: #0d181b; color: var(--text); font-size: 9px; }
+.camera-enable-action, .camera-enabled-state { min-height: 28px; padding: 5px 4px; border: 1px solid #2d464b; border-radius: 3px; color: var(--cyan); font-size: 9px; }
+.camera-enabled-state { border-color: #285a4d; background: #10211c; color: var(--green); opacity: .9; }
 .camera-card { padding: 9px 0; border-top: 1px solid #172125; }
 .camera-card-main { display: flex; gap: 8px; min-width: 0; }
 .camera-card-actions { display: flex; gap: 5px; flex-shrink: 0; }

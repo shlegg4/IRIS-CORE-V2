@@ -72,7 +72,7 @@ struct RemoveCameraCommand {
 };
 struct GetCamerasCommand {};
 struct ConfigureSynchronizerCommand {
-    std::chrono::milliseconds tolerance{3};
+    std::chrono::milliseconds tolerance{20};
     std::size_t queue_capacity{4};
     IncompleteBatchPolicy incomplete_batch_policy{IncompleteBatchPolicy::DropBatch};
 };
@@ -106,7 +106,7 @@ struct RuntimeSnapshot {
     } preview;
     std::size_t processed_packets{};
     std::vector<CameraCaptureConfig> cameras;
-    std::chrono::milliseconds sync_tolerance{3};
+    std::chrono::milliseconds sync_tolerance{20};
     std::size_t sync_queue_capacity{4};
     IncompleteBatchPolicy incomplete_batch_policy{IncompleteBatchPolicy::DropBatch};
     std::string last_error;

@@ -56,6 +56,11 @@ export interface CameraStatus {
   allow_format_fallback?: boolean
   reconnect: boolean
 }
+export interface DiscoveredCamera {
+  name: string
+  device_index: number
+  device_symbolic_link: string
+}
 export interface CameraCaptureSettings {
   device_index?: number | null
   device_symbolic_link?: string

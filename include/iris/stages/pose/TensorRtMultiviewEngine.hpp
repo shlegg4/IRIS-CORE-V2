@@ -12,9 +12,11 @@ namespace iris {
 struct TensorRtMultiviewResult {
     // Host intervals are sequential; stream intervals overlap them and must not be added.
     struct Timings {
-        double preprocess_host_ms{}, setup_host_ms{}, enqueue_host_ms{};
+        double preprocess_host_ms{}, setup_host_ms{}, enqueue_host_ms{}, geometry_setup_host_ms{};
         double download_host_ms{}, wait_host_ms{};
-        double preprocess_stream_ms{}, engine_stream_ms{}, download_stream_ms{};
+        double preprocess_stream_ms{}, engine_stream_ms{};
+        double association_stream_ms{}, gather_stream_ms{}, triangulation_stream_ms{};
+        double output_copy_stream_ms{}, download_stream_ms{};
     } timings;
     // Raw detector tensors are retained for camera-local 2-D output. Selected
     // observations remain the input to epipolar triangulation only.

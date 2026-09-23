@@ -20,6 +20,9 @@ cudaError_t launch_multiview_weighted_dlt(const float* keypoints,
                                           unsigned char* valid,
                                           cudaStream_t stream);
 
+// fundamentals contains row-major pair matrices in order (0,1), (0,2), (1,2).
+// The matcher writes up to ten rows of per-view candidate indices; 255 marks
+// a missing view. Unmatched view 1/2 candidates may form pair-only rows.
 cudaError_t launch_multiview_epipolar_assignment(const float* keypoints,
                                                  const float* scores,
                                                  const unsigned char* candidate_valid,
