@@ -9,8 +9,8 @@ import type {
 
 const props = defineProps<{ status: RuntimeStatus }>()
 const api = window.api
-type VideoFeed = { camera_id: number; path: string }
 type Rotation = 'none' | 'cw90' | '180' | 'ccw90'
+type VideoFeed = { camera_id: number; path: string; rotation: Rotation }
 type CameraDraft = {
   camera_id: number
   device_index: number | null
@@ -66,6 +66,7 @@ const videoFeeds = ref<VideoFeed[]>([])
 const videoCudaDevice = ref(0)
 const videoFramePool = ref(8)
 const videoRealtime = ref(false)
+const videoLoop = ref(false)
 const videoBusy = ref(false)
 const videoError = ref('')
 const videoNotice = ref('')
@@ -323,7 +324,7 @@ async function chooseVideos(): Promise<void> {
     for (const path of paths) {
       const camera_id = nextVideoCameraId(used)
       used.add(camera_id)
-      videoFeeds.value.push({ camera_id, path })
+      videoFeeds.value.push({ camera_id, path, rotation: 'none' })
     }
     videoFeeds.value = [...videoFeeds.value]
     if (paths.length) videoDirty.value = true
@@ -366,7 +367,8 @@ async function submitVideoFeeds(): Promise<void> {
       cameras: videoFeeds.value.map((feed) => ({ ...feed })),
       cuda_device: videoCudaDevice.value,
       frame_pool_capacity: videoFramePool.value,
-      realtime: videoRealtime.value
+      realtime: videoRealtime.value,
+      loop: videoLoop.value
     })
     videoDirty.value = false
     sourcePanel.value = 'video'
@@ -400,10 +402,11 @@ watch(() => props.status.input_mode, (mode) => {
 })
 watch(() => props.status.video_inputs, (feeds) => {
   if (feeds && props.status.input_mode === 'video' && !videoDirty.value) {
-    videoFeeds.value = feeds.map((feed) => ({ ...feed }))
+    videoFeeds.value = feeds.map((feed) => ({ ...feed, rotation: feed.rotation ?? 'none' }))
     videoCudaDevice.value = props.status.video_cuda_device ?? 0
     videoFramePool.value = props.status.video_frame_pool_capacity ?? 8
     videoRealtime.value = props.status.video_realtime ?? false
+    videoLoop.value = props.status.video_loop ?? false
   }
 }, { immediate: true })
 
@@ -448,9 +451,11 @@ onMounted(scan)
         <button class="camera-secondary-action" :disabled="videoBusy" @click="chooseVideos">ADD VIDEO FILES</button>
       </header>
       <p class="camera-empty">Use files captured by IRIS to replay the same frame indexes through the pipeline. All selected files must contain the same number of frames.</p>
+      <label class="video-loop-toggle"><input v-model="videoLoop" type="checkbox" :disabled="videoBusy" @change="videoDirty = true" /><span><strong>LOOP FEEDS</strong><small>Restart all video files together when they reach the end.</small></span></label>
       <article v-for="(feed, index) in videoFeeds" :key="`${feed.camera_id}-${feed.path}`" class="video-feed-row">
         <label>Camera ID<input v-model.number="feed.camera_id" type="number" min="0" :disabled="videoBusy" @input="videoDirty = true" /></label>
         <div class="video-feed-path"><strong>FEED {{ String(feed.camera_id).padStart(2, '0') }}</strong><span :title="feed.path">{{ feed.path }}</span></div>
+        <label>Rotation<select v-model="feed.rotation" :disabled="videoBusy" @change="videoDirty = true"><option value="none">None</option><option value="cw90">90° clockwise</option><option value="180">180°</option><option value="ccw90">90° counter-clockwise</option></select></label>
         <button class="danger-action" :disabled="videoBusy" @click="removeVideo(index)">REMOVE</button>
       </article>
       <div v-if="!videoFeeds.length" class="camera-empty">No video feeds selected.</div>
@@ -460,7 +465,7 @@ onMounted(scan)
           <label>CUDA device<input v-model.number="videoCudaDevice" type="number" min="0" :disabled="videoBusy" /></label>
           <label>Frame pool capacity<input v-model.number="videoFramePool" type="number" min="1" :disabled="videoBusy" /></label>
         </div>
-        <label><input v-model="videoRealtime" type="checkbox" :disabled="videoBusy" /> Replay at source frame rate</label>
+        <label><input v-model="videoRealtime" type="checkbox" :disabled="videoBusy" @change="videoDirty = true" /> Replay at source frame rate</label>
       </details>
       <p v-if="videoError" class="camera-form-error" role="alert">{{ videoError }}</p>
       <p v-if="videoNotice" class="camera-form-notice" role="status">{{ videoNotice }}</p>
@@ -470,7 +475,8 @@ onMounted(scan)
       </div>
       <div v-if="props.status.input_mode === 'video'" class="active-video-feeds">
         <strong>ACTIVE VIDEO FEEDS</strong>
-        <small v-for="feed in props.status.video_inputs || []" :key="feed.camera_id">CAM_{{ String(feed.camera_id).padStart(2, '0') }} · {{ feed.path }}</small>
+        <small>LOOP {{ props.status.video_loop ? 'ON' : 'OFF' }}</small>
+        <small v-for="feed in props.status.video_inputs || []" :key="feed.camera_id">CAM_{{ String(feed.camera_id).padStart(2, '0') }} · ROTATION {{ feed.rotation ?? 'none' }} · {{ feed.path }}</small>
       </div>
     </section>
 

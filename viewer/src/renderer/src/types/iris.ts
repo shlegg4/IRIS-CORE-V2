@@ -83,11 +83,12 @@ export type UpdateCameraRequest = Partial<CameraCaptureSettings>
 export interface RuntimeStatus {
   state?: string
   input_mode?: 'live' | 'video' | string
-  video_inputs?: Array<{ camera_id: number; path: string }>
+  video_inputs?: Array<{ camera_id: number; path: string; rotation?: 'none' | 'cw90' | '180' | 'ccw90' }>
   video_decode_status?: VideoDecodeStatus[]
   video_cuda_device?: number
   video_frame_pool_capacity?: number
   video_realtime?: boolean
+  video_loop?: boolean
   recording?: boolean
   recording_path?: string
   shared_memory_enabled?: boolean

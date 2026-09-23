@@ -851,6 +851,7 @@ class Runtime::Impl {
             result.video_cuda_device = video_config_->cuda_device;
             result.video_frame_pool_capacity = video_config_->frame_pool_capacity;
             result.video_realtime = video_config_->realtime;
+            result.video_loop = video_config_->loop;
             if (pipeline_) result.video_decode_status = pipeline_->video_decode_status();
         }
         result.sync_tolerance = capture_config_.sync_tolerance;

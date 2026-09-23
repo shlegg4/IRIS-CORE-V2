@@ -2,6 +2,7 @@
 
 #include "iris/infrastructure/gpu/CudaResources.hpp"
 #include "iris/infrastructure/gpu/FramePool.hpp"
+#include "stages/capture/decoding/GpuDecoder.hpp"
 #include "stages/capture/video/VideoFileReader.hpp"
 
 #include <cuda_runtime_api.h>
@@ -27,6 +28,12 @@
 #endif
 
 namespace iris {
+namespace {
+Extent2D output_extent(Extent2D input, FrameRotation rotation) {
+    return swaps_axes(rotation) ? Extent2D{input.height, input.width} : input;
+}
+} // namespace
+
 class SynchronizedVideoStage::Impl {
   public:
     Impl(SynchronizedVideoConfig config, Channel<Packet>& output,
@@ -93,11 +100,19 @@ class SynchronizedVideoStage::Impl {
     void run(std::stop_token stop) noexcept {
         try {
             std::vector<std::unique_ptr<infrastructure::gpu::FramePool>> pools;
+            std::vector<std::unique_ptr<infrastructure::gpu::FramePool>> rotation_pools;
             pools.reserve(config_.cameras.size());
+            rotation_pools.resize(config_.cameras.size());
             for (std::size_t index = 0; index < config_.cameras.size(); ++index) {
                 pools.push_back(std::make_unique<infrastructure::gpu::FramePool>(
                     config_.cuda_device, readers_[index]->extent(), 3,
                     config_.frame_pool_capacity));
+                const auto rotation = config_.cameras[index].rotation;
+                if (rotation != FrameRotation::None) {
+                    rotation_pools[index] = std::make_unique<infrastructure::gpu::FramePool>(
+                        config_.cuda_device, output_extent(readers_[index]->extent(), rotation),
+                        3, config_.frame_pool_capacity);
+                }
             }
 
             std::vector<double> frame_rates;
@@ -124,6 +139,7 @@ class SynchronizedVideoStage::Impl {
                 infrastructure::gpu::check_cuda(cudaSetDevice(config_.cuda_device),
                                                 "select video CUDA device");
                 std::vector<std::optional<GpuBuffer>> buffers(readers_.size());
+                std::vector<std::optional<GpuBuffer>> rotated_buffers(readers_.size());
                 double pool_wait_ms{};
                 for (std::size_t index = 0; index < readers_.size(); ++index) {
                     const auto pool_wait_start = std::chrono::steady_clock::now();
@@ -131,6 +147,13 @@ class SynchronizedVideoStage::Impl {
                     while (!buffers[index] && !stop.stop_requested()) {
                         std::this_thread::sleep_for(std::chrono::milliseconds(1));
                         buffers[index] = pools[index]->acquire();
+                    }
+                    if (buffers[index] && rotation_pools[index]) {
+                        rotated_buffers[index] = rotation_pools[index]->acquire();
+                        while (!rotated_buffers[index] && !stop.stop_requested()) {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                            rotated_buffers[index] = rotation_pools[index]->acquire();
+                        }
                     }
                     pool_wait_ms += elapsed_ms(pool_wait_start);
                     if (stop.stop_requested()) break;
@@ -171,6 +194,16 @@ class SynchronizedVideoStage::Impl {
                 batch_decode_ms_.observe(batch_decode_ms);
                 last_batch_decode_ms_.set(batch_decode_ms);
                 if (ended == readers_.size()) {
+                    if (config_.loop) {
+                        if (batch_index == 0) {
+                            throw std::runtime_error("cannot loop video feeds that contain no frames");
+                        }
+                        for (std::size_t index = 0; index < readers_.size(); ++index) {
+                            readers_[index] = std::make_unique<capture::video::VideoFileReader>(
+                                config_.cameras[index].path, config_.cuda_device);
+                        }
+                        continue;
+                    }
                     finished_ = true;
                     break;
                 }
@@ -221,6 +254,20 @@ class SynchronizedVideoStage::Impl {
                             "upload software-decoded video frame");
                         upload_ms += elapsed_ms(upload_start);
                     }
+                    auto* output_buffer = &*buffers[index];
+                    auto output_frame_extent = source.extent;
+                    const auto rotation = config_.cameras[index].rotation;
+                    if (rotation != FrameRotation::None) {
+                        auto& rotated = *rotated_buffers[index];
+                        capture::launch_bgr_rotation(
+                            buffers[index]->data, buffers[index]->stride_bytes,
+                            rotated.data, rotated.stride_bytes, source.extent.width,
+                            source.extent.height, rotation, nullptr);
+                        infrastructure::gpu::check_cuda(
+                            cudaStreamSynchronize(nullptr), "wait for video frame rotation");
+                        output_frame_extent = output_extent(source.extent, rotation);
+                        output_buffer = &rotated;
+                    }
                     auto ready = std::make_shared<infrastructure::gpu::CudaEvent>();
                     ready->record(nullptr);
                     FrameTiming timing;
@@ -232,9 +279,9 @@ class SynchronizedVideoStage::Impl {
                     Frame frame;
                     frame.camera = config_.cameras[index].camera_id;
                     frame.sequence = batch_index;
-                    frame.extent = source.extent;
+                    frame.extent = output_frame_extent;
                     frame.format = PixelFormat::Bgr8;
-                    frame.buffer = std::move(*buffers[index]);
+                    frame.buffer = std::move(*output_buffer);
                     frame.ready = std::move(ready);
                     frame.timing = timing;
                     batch.push_back(std::move(frame));
@@ -333,7 +380,8 @@ class SynchronizedVideoStage::Impl {
         std::vector<Extent2D> result;
         result.reserve(readers_.size());
         for (const auto& reader : readers_) {
-            result.push_back(reader->extent());
+            const auto index = result.size();
+            result.push_back(output_extent(reader->extent(), config_.cameras[index].rotation));
         }
         return result;
     }

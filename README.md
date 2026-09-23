@@ -68,7 +68,7 @@ shm enable <name>
 shm disable
 capture list
 capture sync <tolerance-ms> <capacity> <drop|partial>
-capture video [--cuda-device <n>] [--frame-pool <n>] [--realtime <true|false>] <camera-id> <file> [<camera-id> <file> ...]
+capture video [--cuda-device <n>] [--frame-pool <n>] [--realtime <true|false>] [--loop <true|false>] [--rotation <camera-id> <none|cw90|180|ccw90>] <camera-id> <file> [<camera-id> <file> ...]
 capture live
 capture add <camera-id> <device-index> [width height fps format]
 capture remove <camera-id>
@@ -94,6 +94,10 @@ pace batches by the first file's presentation timestamps, or `capture live` to r
 ingestion. Paths with spaces should be quoted. To start directly in video mode when no webcam is
 available, launch `iris_app.exe --video 0 "cam 0.mp4" 1 "cam 1.mp4"`; `--api --video` and
 `--non-interactive --video` accept the same camera/file pairs.
+Add `--rotation <camera-id> <none|cw90|180|ccw90>` to either video CLI form to rotate a specific
+feed; the viewer also provides a rotation selector for each video feed.
+Use `--loop true` to restart all files together after they reach EOF. The viewer exposes the same
+option under Video processing options.
 
 Runtime metrics are periodically written to `iris_metrics.json`. Detailed design and validation notes are under `docs/`.
 They are also exposed in Prometheus format at `http://127.0.0.1:9464/metrics`. A provisioned

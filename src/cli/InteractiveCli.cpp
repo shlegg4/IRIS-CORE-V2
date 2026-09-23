@@ -362,9 +362,25 @@ std::optional<RuntimeCommand> InteractiveCli::parse(std::string line, std::strin
     }
     if (tokens[0] == "capture" && tokens.size() >= 4 && tokens[1] == "video") {
         SynchronizedVideoConfig config;
+        std::vector<std::pair<CameraId, FrameRotation>> rotations;
         for (std::size_t index = 2; index < tokens.size();) {
             const auto& token = tokens[index];
-            if (token == "--cuda-device" || token == "--frame-pool" || token == "--realtime") {
+            if (token == "--rotation") {
+                if (index + 2 >= tokens.size()) {
+                    error = "--rotation requires a camera ID and one of none, cw90, 180, or ccw90";
+                    return std::nullopt;
+                }
+                const auto camera_id = parse_non_negative(tokens[index + 1]);
+                const auto rotation = parse_rotation(tokens[index + 2]);
+                if (!camera_id || !rotation) {
+                    error = "invalid --rotation camera ID or rotation";
+                    return std::nullopt;
+                }
+                rotations.emplace_back(*camera_id, *rotation);
+                index += 3;
+                continue;
+            }
+            if (token == "--cuda-device" || token == "--frame-pool" || token == "--realtime" || token == "--loop") {
                 if (index + 1 >= tokens.size()) {
                     error = token + " requires a value";
                     return std::nullopt;
@@ -378,10 +394,14 @@ std::optional<RuntimeCommand> InteractiveCli::parse(std::string line, std::strin
                     const auto capacity = parse_positive(value);
                     if (!capacity) { error = "frame-pool capacity must be positive"; return std::nullopt; }
                     config.frame_pool_capacity = *capacity;
-                } else {
+                } else if (token == "--realtime") {
                     const auto realtime = parse_bool(value);
                     if (!realtime) { error = "realtime must be true or false"; return std::nullopt; }
                     config.realtime = *realtime;
+                } else {
+                    const auto loop = parse_bool(value);
+                    if (!loop) { error = "loop must be true or false"; return std::nullopt; }
+                    config.loop = *loop;
                 }
                 index += 2;
                 continue;
@@ -398,6 +418,17 @@ std::optional<RuntimeCommand> InteractiveCli::parse(std::string line, std::strin
         if (config.cameras.empty()) {
             error = "capture video requires at least one camera-id and file pair";
             return std::nullopt;
+        }
+        for (const auto& [camera_id, rotation] : rotations) {
+            const auto camera = std::find_if(config.cameras.begin(), config.cameras.end(),
+                                             [camera_id](const auto& input) {
+                                                 return input.camera_id == camera_id;
+                                             });
+            if (camera == config.cameras.end()) {
+                error = "--rotation references an unknown camera ID";
+                return std::nullopt;
+            }
+            camera->rotation = rotation;
         }
         return ConfigureVideoIngestionCommand{std::move(config)};
     }
@@ -575,7 +606,7 @@ std::string InteractiveCli::help() {
            "preview enable [port]\n"
            "preview disable\n"
            "capture list\n"
-           "capture video [--cuda-device <n>] [--frame-pool <n>] [--realtime <true|false>] <camera-id> <file> [<camera-id> <file> ...]\n"
+           "capture video [--cuda-device <n>] [--frame-pool <n>] [--realtime <true|false>] [--loop <true|false>] [--rotation <camera-id> <none|cw90|180|ccw90>] <camera-id> <file> [<camera-id> <file> ...]\n"
            "capture live\n"
            "capture sync <tolerance-ms> <capacity> <drop|partial>\n"
            "capture add <camera-id> <device-index> [width height fps format]\n"

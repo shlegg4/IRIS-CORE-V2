@@ -116,6 +116,7 @@ struct RuntimeSnapshot {
     int video_cuda_device{};
     std::size_t video_frame_pool_capacity{8};
     bool video_realtime{};
+    bool video_loop{};
     std::chrono::milliseconds sync_tolerance{20};
     std::size_t sync_queue_capacity{4};
     IncompleteBatchPolicy incomplete_batch_policy{IncompleteBatchPolicy::DropBatch};

@@ -77,6 +77,7 @@ class Pipeline::Impl {
                 camera.camera_id = video_config->cameras[index].camera_id;
                 camera.capture.cuda_device = video_config->cuda_device;
                 camera.capture.extent = extents[index];
+                camera.capture.rotation = video_config->cameras[index].rotation;
                 source_cameras.push_back(std::move(camera));
             }
         }
