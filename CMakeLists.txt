@@ -201,7 +201,7 @@ if(WIN32)
     foreach(_component core imgproc)
       add_custom_command(TARGET iris_app POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-          "${IRIS_VCPKG_ROOT}/bin/opencv_${_component}4$<$<CONFIG:Debug>:d>.dll"
+          "$<IF:$<CONFIG:Debug>,${IRIS_VCPKG_ROOT}/debug/bin/opencv_${_component}4d.dll,${IRIS_VCPKG_ROOT}/bin/opencv_${_component}4.dll>"
           "$<TARGET_FILE_DIR:iris_app>"
         COMMENT "Copying OpenCV ${_component} runtime")
     endforeach()
