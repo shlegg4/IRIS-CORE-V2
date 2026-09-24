@@ -78,6 +78,11 @@ or `{ "numerator": 30, "denominator": 1 }`. Supported pixel formats are `mjpeg`,
 Pose configuration requires a `backend` of `off`, `monocular`, `2d`, or `multiview`. Optional
 fields are `model_path`, `engine_path`, and `calibration_path`.
 
+Multiview pose results expose a stable `track_id` for each active 3-D track. Detection indices
+remain frame-local and can be `-1` for cameras without a current match. Each joint's `predicted`
+flag is true only for its single allowed frame of extrapolation after the last triangulated update;
+the following miss clears `valid`.
+
 Synchronizer settings are `tolerance_ms`, `queue_capacity`, and
 `incomplete_batch_policy` (`drop` or `partial`). Preview settings include `http_enabled`,
 `mjpeg_enabled`, `h264_enabled`, `bind_address`, `port`, `max_fps`, `max_width`,

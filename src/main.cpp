@@ -74,6 +74,11 @@ std::optional<iris::SynchronizedVideoConfig> video_config_from_args(int argc, ch
             index += 2;
             continue;
         }
+        if (std::string_view(argv[index]) == "--metrics-port") {
+            if (index + 1 >= argc) { error = "--metrics-port requires an integer"; return std::nullopt; }
+            index += 2;
+            continue;
+        }
         if (std::string_view(argv[index]) == "--engine" ||
             std::string_view(argv[index]) == "--calibration" ||
             std::string_view(argv[index]) == "--output-dir") {
@@ -146,7 +151,26 @@ std::optional<iris::SynchronizedVideoConfig> video_config_from_args(int argc, ch
 } // namespace
 
 int run_main(int argc, char** argv) {
-    iris::Runtime runtime;
+    std::uint16_t metrics_port = 9464;
+    for (int index = 1; index < argc; ++index) {
+        if (std::string_view(argv[index]) != "--metrics-port") continue;
+        if (index + 1 >= argc) {
+            std::cerr << "--metrics-port requires an integer from 1 through 65535\n";
+            return 2;
+        }
+        try {
+            std::size_t used{};
+            const auto parsed = std::stoul(argv[index + 1], &used);
+            if (used != std::string_view(argv[index + 1]).size() || parsed == 0 || parsed > 65535)
+                throw std::invalid_argument("invalid metrics port");
+            metrics_port = static_cast<std::uint16_t>(parsed);
+        } catch (...) {
+            std::cerr << "--metrics-port requires an integer from 1 through 65535\n";
+            return 2;
+        }
+        ++index;
+    }
+    iris::Runtime runtime(iris::CaptureConfig{}, metrics_port);
     const bool api_mode = argc >= 2 && std::string_view(argv[1]) == "--api";
     const bool non_interactive = argc >= 2 && std::string_view(argv[1]) == "--non-interactive";
     const int video_args = api_mode && argc >= 3 && std::string_view(argv[2]) == "--video"

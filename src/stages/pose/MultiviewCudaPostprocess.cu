@@ -392,7 +392,11 @@ __device__ void solve_assignment_parallel(const float* costs, const int* sources
             float best = current[mask]; // Leave this source detection unmatched.
             unsigned char selected = 255;
             if (source >= 0) {
-                for (int candidate = 0; candidate < 10; ++candidate) {
+                // On exact cost ties, reserve lower candidate indices for
+                // earlier rows by assigning the highest available index to
+                // the row being processed now. This keeps deterministic
+                // one-to-one results for symmetric detections.
+                for (int candidate = 9; candidate >= 0; --candidate) {
                     const int bit = 1 << candidate;
                     if (!(mask & bit)) continue;
                     const float edge = costs[person * 10 + candidate];
@@ -612,6 +616,343 @@ __global__ void gather_selected_kernel(const float* points, const float* scores,
     selected_valid[work] = 1;
 }
 
+constexpr int temporal_max_views = 10;
+constexpr int temporal_max_tracks = 10;
+constexpr int temporal_candidates = 10;
+constexpr int temporal_joints = 17;
+constexpr int temporal_missed_limit = 30;
+
+__global__ void temporal_cost_kernel(
+    const float* points, const float* scores, const unsigned char* candidates,
+    const float* projection, const float* xyz, const float* velocity,
+    const unsigned char* joint_valid, const unsigned char* active,
+    float dt, float minimum_score, float gate, int view_count, int track_count,
+    float* costs) {
+    const int work = blockIdx.x * blockDim.x + threadIdx.x;
+    const int total = view_count * track_count * temporal_candidates;
+    if (work >= total) return;
+    const int candidate = work % temporal_candidates;
+    const int track = (work / temporal_candidates) % track_count;
+    const int view = work / (temporal_candidates * track_count);
+    float cost = CUDART_INF_F;
+    if (active[track] && candidates[view * temporal_candidates + candidate]) {
+        const float* p = projection + view * 12;
+        float sum = 0.0F;
+        float weight_sum = 0.0F;
+        int count = 0;
+        for (int joint = 0; joint < temporal_joints; ++joint) {
+            const int state = track * temporal_joints + joint;
+            const int detection = (view * temporal_candidates + candidate) * temporal_joints + joint;
+            const float confidence = scores[detection];
+            if (!joint_valid[state] || !isfinite(confidence) || confidence < minimum_score) continue;
+            const float px = points[detection * 2], py = points[detection * 2 + 1];
+            if (!isfinite(px) || !isfinite(py)) continue;
+            const float x = xyz[state * 3] + velocity[state * 3] * dt;
+            const float y = xyz[state * 3 + 1] + velocity[state * 3 + 1] * dt;
+            const float z = xyz[state * 3 + 2] + velocity[state * 3 + 2] * dt;
+            const float w = p[8] * x + p[9] * y + p[10] * z + p[11];
+            if (!(w > 1e-5F)) continue;
+            const float projected_x = (p[0] * x + p[1] * y + p[2] * z + p[3]) / w;
+            const float projected_y = (p[4] * x + p[5] * y + p[6] * z + p[7]) / w;
+            if (projected_x < 0.0F || projected_x >= 640.0F ||
+                projected_y < 0.0F || projected_y >= 640.0F) continue;
+            const float dx = projected_x - px;
+            const float dy = projected_y - py;
+            const float residual = hypotf(dx, dy);
+            if (!isfinite(residual)) continue;
+            // Huber-like robustification prevents a few bad joints dominating.
+            const float weight = fminf(1.0F, confidence);
+            sum += fminf(residual, gate * 2.0F) * weight;
+            weight_sum += weight;
+            ++count;
+        }
+        if (count >= 3 && weight_sum > 0.0F) cost = sum / weight_sum;
+    }
+    costs[work] = cost;
+}
+
+__global__ void temporal_assignment_kernel(
+    const float* costs, const unsigned char* active,
+    unsigned char* assignments, int views, int tracks, float gate) {
+    constexpr int columns = temporal_candidates * 2;
+    if (blockIdx.x >= static_cast<unsigned>(views)) return;
+    const int view = static_cast<int>(blockIdx.x);
+    const int lane = threadIdx.x;
+    __shared__ float u[temporal_max_tracks + 1];
+    __shared__ float v[columns + 1];
+    __shared__ float minv[columns + 1];
+    __shared__ int p[columns + 1];
+    __shared__ int way[columns + 1];
+    __shared__ unsigned char used_columns[columns + 1];
+    __shared__ int current_row, column_zero, column_one, done;
+    __shared__ float delta;
+
+    for (int i = lane; i <= tracks; i += blockDim.x) u[i] = 0.0F;
+    for (int j = lane; j <= columns; j += blockDim.x) {
+        v[j] = 0.0F;
+        p[j] = 0;
+        way[j] = 0;
+    }
+    __syncthreads();
+
+    // Rectangular Hungarian assignment with one dummy column per track.
+    // CUDA lanes scan and relax columns in parallel; row augmentations remain
+    // ordered to preserve the exact minimum-cost one-to-one solution.
+    for (int row = 1; row <= tracks; ++row) {
+        if (lane == 0) {
+            p[0] = row;
+            column_zero = 0;
+            for (int j = 0; j <= columns; ++j) {
+                minv[j] = CUDART_INF_F;
+                used_columns[j] = 0;
+            }
+        }
+        __syncthreads();
+        do {
+            if (lane == 0) {
+                used_columns[column_zero] = 1;
+                current_row = p[column_zero];
+            }
+            __syncthreads();
+            for (int column = lane + 1; column <= columns; column += blockDim.x) {
+                if (used_columns[column]) continue;
+                float edge = gate;
+                if (column <= temporal_candidates) {
+                    const int candidate = column - 1;
+                    edge = CUDART_INF_F;
+                    if (active[current_row - 1])
+                        edge = costs[(view * tracks + current_row - 1) * temporal_candidates + candidate];
+                    if (!isfinite(edge)) edge = 1e6F;
+                }
+                const float current = edge - u[current_row] - v[column];
+                if (current < minv[column]) {
+                    minv[column] = current;
+                    way[column] = column_zero;
+                }
+            }
+            __syncthreads();
+            if (lane == 0) {
+                delta = CUDART_INF_F;
+                column_one = 0;
+                for (int column = 1; column <= columns; ++column) {
+                    if (!used_columns[column] && minv[column] < delta) {
+                        delta = minv[column];
+                        column_one = column;
+                    }
+                }
+            }
+            __syncthreads();
+            for (int column = lane; column <= columns; column += blockDim.x) {
+                if (used_columns[column]) {
+                    u[p[column]] += delta;
+                    v[column] -= delta;
+                } else {
+                    minv[column] -= delta;
+                }
+            }
+            __syncthreads();
+            if (lane == 0) {
+                column_zero = column_one;
+                done = p[column_zero] == 0;
+            }
+            __syncthreads();
+        } while (!done);
+
+        if (lane == 0) {
+            do {
+                const int previous_column = way[column_zero];
+                p[column_zero] = p[previous_column];
+                column_zero = previous_column;
+            } while (column_zero != 0);
+        }
+        __syncthreads();
+    }
+
+    for (int track = lane; track < tracks; track += blockDim.x) {
+        int selected = -1;
+        for (int column = 1; column <= temporal_candidates; ++column)
+            if (p[column] == track + 1) { selected = column - 1; break; }
+        const float value = selected >= 0
+            ? costs[(view * tracks + track) * temporal_candidates + selected]
+            : CUDART_INF_F;
+        assignments[track * views + view] = active[track] && selected >= 0 && value < gate
+            ? static_cast<unsigned char>(selected) : 255;
+    }
+}
+
+__global__ void temporal_lifecycle_kernel(
+    const unsigned char* candidates, const unsigned char* seeds,
+    unsigned char* assignments, unsigned char* active, unsigned char* missed,
+    unsigned char* joint_valid, unsigned char* joint_missed, float* velocity, std::uint64_t* ids,
+    std::uint64_t* next_id, int views, int tracks) {
+    if (blockIdx.x || threadIdx.x) return;
+    bool used[temporal_max_views][temporal_candidates]{};
+    for (int view = 0; view < views; ++view)
+        for (int track = 0; track < tracks; ++track) {
+            const int candidate = assignments[track * views + view];
+            if (candidate < temporal_candidates) used[view][candidate] = true;
+        }
+    for (int track = 0; track < tracks; ++track) {
+        int observed_views = 0;
+        for (int view = 0; view < views; ++view)
+            observed_views += assignments[track * views + view] != 255;
+        if (active[track] && observed_views < 2) {
+            if (++missed[track] > temporal_missed_limit) active[track] = 0;
+            for (int joint = 0; joint < temporal_joints; ++joint)
+                for (int axis = 0; axis < 3; ++axis)
+                    velocity[(track * temporal_joints + joint) * 3 + axis] *= 0.8F;
+        } else if (observed_views >= 2) missed[track] = 0;
+    }
+    // Cross-view association is the seed/recovery path. Only consume a seed
+    // when at least two of its detections remain unclaimed by live tracks.
+    for (int seed = 0; seed < tracks; ++seed) {
+        int available = 0;
+        for (int view = 0; view < views; ++view) {
+            const int candidate = seeds[seed * views + view];
+            if (candidate < temporal_candidates && !used[view][candidate] && candidates[view * temporal_candidates + candidate]) ++available;
+        }
+        if (available < 2) continue;
+        int slot = -1;
+        for (int track = 0; track < tracks; ++track) if (!active[track]) { slot = track; break; }
+        if (slot < 0) break;
+        active[slot] = 1; missed[slot] = 0; ids[slot] = (*next_id)++;
+        for (int joint = 0; joint < temporal_joints; ++joint) {
+            joint_valid[slot * temporal_joints + joint] = 0;
+            joint_missed[slot * temporal_joints + joint] = 0;
+            for (int axis = 0; axis < 3; ++axis) velocity[(slot * temporal_joints + joint) * 3 + axis] = 0.0F;
+        }
+        for (int view = 0; view < views; ++view) {
+            const int candidate = seeds[seed * views + view];
+            if (candidate < temporal_candidates && !used[view][candidate] && candidates[view * temporal_candidates + candidate]) {
+                assignments[slot * views + view] = static_cast<unsigned char>(candidate);
+                used[view][candidate] = true;
+            }
+        }
+    }
+    for (int track = 0; track < tracks; ++track) {
+        if (!active[track] || ids[track] != 0) continue;
+        bool assigned = false;
+        for (int view = 0; view < views; ++view) assigned |= assignments[track * views + view] != 255;
+        if (assigned) ids[track] = (*next_id)++;
+    }
+}
+
+__global__ void temporal_update_kernel(
+    const float* points, const float* scores, const unsigned char* candidates,
+    const unsigned char* assignments, const float* projections,
+    float minimum_score, float max_error, float dt,
+    int views, int tracks, float* xyz, float* velocity,
+    unsigned char* joint_valid, unsigned char* joint_missed,
+    const unsigned char* active) {
+    const int work = blockIdx.x * blockDim.x + threadIdx.x;
+    if (work >= tracks * temporal_joints) return;
+    const int track = work / temporal_joints, joint = work % temporal_joints;
+    float normal[4][4]{};
+    int observations = 0;
+    for (int view = 0; view < views; ++view) {
+        const int candidate = assignments[track * views + view];
+        if (candidate >= temporal_candidates) continue;
+        const int index = (view * temporal_candidates + candidate) * temporal_joints + joint;
+        const float score = scores[index], x = points[index * 2], y = points[index * 2 + 1];
+        if (!candidates[view * temporal_candidates + candidate] || !isfinite(score) || score < minimum_score || !isfinite(x) || !isfinite(y)) continue;
+        const float* p = projections + view * 12;
+        const float a[4] = {x*p[8]-p[0], x*p[9]-p[1], x*p[10]-p[2], x*p[11]-p[3]};
+        const float b[4] = {y*p[8]-p[4], y*p[9]-p[5], y*p[10]-p[6], y*p[11]-p[7]};
+        const float weight = score * score;
+        for (int r = 0; r < 4; ++r) for (int c = 0; c < 4; ++c) normal[r][c] += weight * (a[r]*a[c] + b[r]*b[c]);
+        ++observations;
+    }
+    const int state = track * temporal_joints + joint;
+    bool solved = observations >= 2;
+    float matrix[3][4]{};
+    if (solved) {
+        for (int r = 0; r < 3; ++r) { for (int c = 0; c < 3; ++c) matrix[r][c] = normal[r][c]; matrix[r][3] = -normal[r][3]; }
+        for (int pivot = 0; pivot < 3 && solved; ++pivot) {
+            int best = pivot;
+            for (int r = pivot + 1; r < 3; ++r) if (fabsf(matrix[r][pivot]) > fabsf(matrix[best][pivot])) best = r;
+            if (fabsf(matrix[best][pivot]) < 1e-7F) { solved = false; break; }
+            if (best != pivot) for (int c = pivot; c < 4; ++c) { float t = matrix[pivot][c]; matrix[pivot][c] = matrix[best][c]; matrix[best][c] = t; }
+            for (int r = pivot + 1; r < 3; ++r) { const float f = matrix[r][pivot] / matrix[pivot][pivot]; for (int c = pivot; c < 4; ++c) matrix[r][c] -= f * matrix[pivot][c]; }
+        }
+    }
+    float measured[3]{};
+    if (solved) {
+        measured[2] = matrix[2][3] / matrix[2][2];
+        measured[1] = (matrix[1][3] - matrix[1][2]*measured[2]) / matrix[1][1];
+        measured[0] = (matrix[0][3] - matrix[0][1]*measured[1] - matrix[0][2]*measured[2]) / matrix[0][0];
+        solved = isfinite(measured[0]) && isfinite(measured[1]) && isfinite(measured[2]);
+    }
+    if (solved) {
+        for (int view = 0; view < views; ++view) {
+            const int candidate = assignments[track * views + view];
+            if (candidate >= temporal_candidates) continue;
+            const int index = (view * temporal_candidates + candidate) * temporal_joints + joint;
+            if (!isfinite(scores[index]) || scores[index] < minimum_score) continue;
+            const float* p = projections + view * 12;
+            const float w = p[8]*measured[0]+p[9]*measured[1]+p[10]*measured[2]+p[11];
+            if (!(w > 1e-5F)) { solved = false; break; }
+            const float px = (p[0]*measured[0]+p[1]*measured[1]+p[2]*measured[2]+p[3])/w;
+            const float py = (p[4]*measured[0]+p[5]*measured[1]+p[6]*measured[2]+p[7])/w;
+            if (hypotf(px-points[index*2], py-points[index*2+1]) > max_error) { solved = false; break; }
+        }
+    }
+    if (solved) {
+        if (joint_valid[state] && dt > 1e-4F) {
+            for (int axis = 0; axis < 3; ++axis) {
+                const float old = xyz[state*3+axis];
+                const float measured_velocity = (measured[axis] - old) / dt;
+                velocity[state*3+axis] = 0.5F * velocity[state*3+axis] + 0.5F * measured_velocity;
+            }
+        }
+        for (int axis = 0; axis < 3; ++axis) xyz[state*3+axis] = measured[axis];
+        joint_valid[state] = 1;
+        joint_missed[state] = 0;
+    } else if (joint_valid[state]) {
+        if (joint_missed[state] == 0) {
+            for (int axis = 0; axis < 3; ++axis) xyz[state*3+axis] += velocity[state*3+axis] * dt;
+            joint_missed[state] = 1;
+        } else {
+            joint_valid[state] = 0;
+            joint_missed[state] = 0;
+            for (int axis = 0; axis < 3; ++axis) velocity[state*3+axis] = 0.0F;
+        }
+    }
+    if (!active[track]) {
+        joint_valid[state] = 0;
+        joint_missed[state] = 0;
+    }
+}
+
+__global__ void unwarp_keypoints_kernel(const float* input, const float* intrinsics,
+    const float* distortion, const float* mapping, int views,
+    float* output, unsigned char* valid) {
+    const int work = blockIdx.x * blockDim.x + threadIdx.x;
+    const int total = views * temporal_candidates * temporal_joints;
+    if (work >= total) return;
+    const int view = work / (temporal_candidates * temporal_joints);
+    const int point = work * 2;
+    const float x = input[point], y = input[point + 1];
+    valid[work] = 0;
+    output[point] = output[point + 1] = 0.0F;
+    if (!isfinite(x) || !isfinite(y)) return;
+    const float* meta = mapping + view * 3;
+    const float scale = meta[0], pad_x = meta[1], pad_y = meta[2];
+    if (!(scale > 0.0F)) return;
+    const float* k = intrinsics + view * 9;
+    const float* d = distortion + view * 5;
+    const float model_x = (x - pad_x) / scale;
+    const float model_y = (y - pad_y) / scale;
+    const float xu = (model_x - k[2]) / k[0];
+    const float yu = (model_y - k[5]) / k[4];
+    const float r2 = xu*xu + yu*yu;
+    const float radial = 1.0F + d[0]*r2 + d[1]*r2*r2 + d[4]*r2*r2*r2;
+    const float xd = xu*radial + 2.0F*d[2]*xu*yu + d[3]*(r2 + 2.0F*xu*xu);
+    const float yd = yu*radial + d[2]*(r2 + 2.0F*yu*yu) + 2.0F*d[3]*xu*yu;
+    const float px = k[0]*xd + k[2], py = k[4]*yd + k[5];
+    if (!isfinite(px) || !isfinite(py)) return;
+    output[point] = px; output[point+1] = py; valid[work] = 1;
+}
+
 } // namespace
 
 struct MultiviewAssociationWorkspace {
@@ -630,9 +971,149 @@ struct MultiviewAssociationWorkspace {
     unsigned char* assignments{};
     unsigned int* output_count{};
     float* host_fundamentals{};
-    unsigned char* host_assignments{};
-    unsigned int* host_output_count{};
 };
+
+struct MultiviewTemporalWorkspace {
+    std::size_t views{}, tracks{};
+    float *projection{}, *costs{}, *xyz{}, *velocity{};
+    unsigned char *joint_valid{}, *joint_missed{}, *active{}, *missed{}, *assignments{};
+    std::uint64_t *ids{}, *next_id{};
+    unsigned char *host_assignments{}, *host_valid{}, *host_predicted{}, *host_active{};
+    std::uint64_t *host_ids{};
+    float *host_xyz{};
+};
+
+cudaError_t create_multiview_temporal_workspace(std::size_t views, std::size_t tracks,
+                                                 MultiviewTemporalWorkspace** output) {
+    if (!output || views == 0 || views > temporal_max_views || tracks == 0 || tracks > temporal_max_tracks)
+        return cudaErrorInvalidValue;
+    *output = nullptr;
+    auto* w = new MultiviewTemporalWorkspace{};
+    w->views = views; w->tracks = tracks;
+    auto fail = [&](cudaError_t e) { destroy_multiview_temporal_workspace(w); return e; };
+    cudaError_t e = cudaMalloc(&w->projection, sizeof(float) * views * 12); if (e != cudaSuccess) return fail(e);
+    e = cudaMalloc(&w->costs, sizeof(float) * views * tracks * temporal_candidates); if (e != cudaSuccess) return fail(e);
+    e = cudaMalloc(&w->xyz, sizeof(float) * tracks * temporal_joints * 3); if (e != cudaSuccess) return fail(e);
+    e = cudaMalloc(&w->velocity, sizeof(float) * tracks * temporal_joints * 3); if (e != cudaSuccess) return fail(e);
+    e = cudaMalloc(&w->joint_valid, sizeof(unsigned char) * tracks * temporal_joints); if (e != cudaSuccess) return fail(e);
+    e = cudaMalloc(&w->joint_missed, sizeof(unsigned char) * tracks * temporal_joints); if (e != cudaSuccess) return fail(e);
+    e = cudaMalloc(&w->active, sizeof(unsigned char) * tracks); if (e != cudaSuccess) return fail(e);
+    e = cudaMalloc(&w->missed, sizeof(unsigned char) * tracks); if (e != cudaSuccess) return fail(e);
+    e = cudaMalloc(&w->assignments, sizeof(unsigned char) * tracks * views); if (e != cudaSuccess) return fail(e);
+    e = cudaMalloc(&w->ids, sizeof(std::uint64_t) * tracks); if (e != cudaSuccess) return fail(e);
+    e = cudaMalloc(&w->next_id, sizeof(std::uint64_t)); if (e != cudaSuccess) return fail(e);
+    e = cudaMemset(w->xyz, 0, sizeof(float) * tracks * temporal_joints * 3); if (e != cudaSuccess) return fail(e);
+    e = cudaMemset(w->velocity, 0, sizeof(float) * tracks * temporal_joints * 3); if (e != cudaSuccess) return fail(e);
+    e = cudaMemset(w->joint_valid, 0, sizeof(unsigned char) * tracks * temporal_joints); if (e != cudaSuccess) return fail(e);
+    e = cudaMemset(w->joint_missed, 0, sizeof(unsigned char) * tracks * temporal_joints); if (e != cudaSuccess) return fail(e);
+    e = cudaMemset(w->active, 0, sizeof(unsigned char) * tracks); if (e != cudaSuccess) return fail(e);
+    e = cudaMemset(w->missed, 0, sizeof(unsigned char) * tracks); if (e != cudaSuccess) return fail(e);
+    e = cudaMemset(w->ids, 0, sizeof(std::uint64_t) * tracks); if (e != cudaSuccess) return fail(e);
+    { const std::uint64_t first_id = 1; e = cudaMemcpy(w->next_id, &first_id, sizeof(first_id), cudaMemcpyHostToDevice); }
+    if (e != cudaSuccess) return fail(e);
+    e = cudaHostAlloc(&w->host_assignments, sizeof(unsigned char) * tracks * views, cudaHostAllocPortable); if (e != cudaSuccess) return fail(e);
+    e = cudaHostAlloc(&w->host_ids, sizeof(std::uint64_t) * tracks, cudaHostAllocPortable); if (e != cudaSuccess) return fail(e);
+    e = cudaHostAlloc(&w->host_xyz, sizeof(float) * tracks * temporal_joints * 3, cudaHostAllocPortable); if (e != cudaSuccess) return fail(e);
+    e = cudaHostAlloc(&w->host_valid, sizeof(unsigned char) * tracks * temporal_joints, cudaHostAllocPortable); if (e != cudaSuccess) return fail(e);
+    e = cudaHostAlloc(&w->host_predicted, sizeof(unsigned char) * tracks * temporal_joints, cudaHostAllocPortable); if (e != cudaSuccess) return fail(e);
+    e = cudaHostAlloc(&w->host_active, sizeof(unsigned char) * tracks, cudaHostAllocPortable); if (e != cudaSuccess) return fail(e);
+    *output = w;
+    return cudaSuccess;
+}
+
+void destroy_multiview_temporal_workspace(MultiviewTemporalWorkspace* w) {
+    if (!w) return;
+    if (w->host_active) cudaFreeHost(w->host_active);
+    if (w->host_predicted) cudaFreeHost(w->host_predicted);
+    if (w->host_valid) cudaFreeHost(w->host_valid);
+    if (w->host_xyz) cudaFreeHost(w->host_xyz);
+    if (w->host_ids) cudaFreeHost(w->host_ids);
+    if (w->host_assignments) cudaFreeHost(w->host_assignments);
+    if (w->next_id) cudaFree(w->next_id);
+    if (w->ids) cudaFree(w->ids);
+    if (w->assignments) cudaFree(w->assignments);
+    if (w->missed) cudaFree(w->missed);
+    if (w->active) cudaFree(w->active);
+    if (w->joint_missed) cudaFree(w->joint_missed);
+    if (w->joint_valid) cudaFree(w->joint_valid);
+    if (w->velocity) cudaFree(w->velocity);
+    if (w->xyz) cudaFree(w->xyz);
+    if (w->costs) cudaFree(w->costs);
+    if (w->projection) cudaFree(w->projection);
+    delete w;
+}
+
+cudaError_t launch_multiview_temporal_update(MultiviewTemporalWorkspace* w,
+    const float* keypoints, const float* scores, const unsigned char* candidate_valid,
+    const unsigned char* seeds, const float* projections_host, float dt,
+    float gate, float minimum_score, float maximum_reprojection_error,
+    cudaEvent_t assignment_begin, cudaEvent_t assignment_end, cudaStream_t stream) {
+    if (!w || !keypoints || !scores || !candidate_valid || !seeds || !projections_host)
+        return cudaErrorInvalidValue;
+    dt = fminf(0.1F, fmaxf(0.0F, dt));
+    cudaError_t e = cudaMemcpyAsync(w->projection, projections_host,
+        sizeof(float) * w->views * 12, cudaMemcpyHostToDevice, stream);
+    if (e != cudaSuccess) return e;
+    const int work = static_cast<int>(w->views * w->tracks * temporal_candidates);
+    temporal_cost_kernel<<<(work + 127) / 128, 128, 0, stream>>>(keypoints, scores, candidate_valid,
+        w->projection, w->xyz, w->velocity, w->joint_valid, w->active, dt, minimum_score,
+        gate, static_cast<int>(w->views), static_cast<int>(w->tracks), w->costs);
+    e = cudaGetLastError(); if (e != cudaSuccess) return e;
+    e = cudaEventRecord(assignment_begin, stream); if (e != cudaSuccess) return e;
+    temporal_assignment_kernel<<<static_cast<unsigned>(w->views), 32, 0, stream>>>(
+        w->costs, w->active, w->assignments, static_cast<int>(w->views),
+        static_cast<int>(w->tracks), gate);
+    e = cudaGetLastError(); if (e != cudaSuccess) return e;
+    temporal_lifecycle_kernel<<<1, 1, 0, stream>>>(candidate_valid, seeds, w->assignments,
+        w->active, w->missed, w->joint_valid, w->joint_missed, w->velocity, w->ids, w->next_id,
+        static_cast<int>(w->views), static_cast<int>(w->tracks));
+    e = cudaGetLastError(); if (e != cudaSuccess) return e;
+    e = cudaEventRecord(assignment_end, stream); if (e != cudaSuccess) return e;
+    const int joint_work = static_cast<int>(w->tracks * temporal_joints);
+    temporal_update_kernel<<<(joint_work + 127) / 128, 128, 0, stream>>>(keypoints, scores,
+        candidate_valid, w->assignments, w->projection, minimum_score, maximum_reprojection_error, dt,
+        static_cast<int>(w->views), static_cast<int>(w->tracks), w->xyz, w->velocity,
+        w->joint_valid, w->joint_missed, w->active);
+    return cudaGetLastError();
+}
+
+cudaError_t launch_multiview_unwarp_keypoints(const float* model_keypoints,
+    const float* source_intrinsics, const float* distortion, const float* mapping,
+    std::size_t views, float* image_keypoints, unsigned char* joint_valid,
+    cudaStream_t stream) {
+    if (!model_keypoints || !source_intrinsics || !distortion || !mapping ||
+        !image_keypoints || !joint_valid || views == 0 || views > temporal_max_views)
+        return cudaErrorInvalidValue;
+    const int work = static_cast<int>(views * temporal_candidates * temporal_joints);
+    unwarp_keypoints_kernel<<<(work + 255) / 256, 256, 0, stream>>>(model_keypoints,
+        source_intrinsics, distortion, mapping, static_cast<int>(views), image_keypoints,
+        joint_valid);
+    return cudaGetLastError();
+}
+
+cudaError_t copy_multiview_temporal_result(MultiviewTemporalWorkspace* w,
+    unsigned char* assignments, std::uint64_t* ids, float* xyz, unsigned char* valid,
+    unsigned char* predicted,
+    std::uint32_t* count, cudaStream_t stream) {
+    if (!w || !assignments || !ids || !xyz || !valid || !predicted || !count) return cudaErrorInvalidValue;
+    cudaError_t e = cudaMemcpyAsync(w->host_assignments, w->assignments,
+        sizeof(unsigned char) * w->tracks * w->views, cudaMemcpyDeviceToHost, stream); if (e != cudaSuccess) return e;
+    e = cudaMemcpyAsync(w->host_ids, w->ids, sizeof(std::uint64_t) * w->tracks, cudaMemcpyDeviceToHost, stream); if (e != cudaSuccess) return e;
+    e = cudaMemcpyAsync(w->host_xyz, w->xyz, sizeof(float) * w->tracks * temporal_joints * 3, cudaMemcpyDeviceToHost, stream); if (e != cudaSuccess) return e;
+    e = cudaMemcpyAsync(w->host_valid, w->joint_valid, sizeof(unsigned char) * w->tracks * temporal_joints, cudaMemcpyDeviceToHost, stream); if (e != cudaSuccess) return e;
+    e = cudaMemcpyAsync(w->host_predicted, w->joint_missed, sizeof(unsigned char) * w->tracks * temporal_joints, cudaMemcpyDeviceToHost, stream); if (e != cudaSuccess) return e;
+    e = cudaMemcpyAsync(w->host_active, w->active, sizeof(unsigned char) * w->tracks, cudaMemcpyDeviceToHost, stream); if (e != cudaSuccess) return e;
+    e = cudaStreamSynchronize(stream); if (e != cudaSuccess) return e;
+    std::memcpy(assignments, w->host_assignments, sizeof(unsigned char) * w->tracks * w->views);
+    std::memcpy(ids, w->host_ids, sizeof(std::uint64_t) * w->tracks);
+    for (std::size_t i = 0; i < w->tracks; ++i) if (!w->host_active[i]) ids[i] = 0;
+    std::memcpy(xyz, w->host_xyz, sizeof(float) * w->tracks * temporal_joints * 3);
+    std::memcpy(valid, w->host_valid, sizeof(unsigned char) * w->tracks * temporal_joints);
+    std::memcpy(predicted, w->host_predicted, sizeof(unsigned char) * w->tracks * temporal_joints);
+    *count = 0;
+    for (std::size_t i = 0; i < w->tracks; ++i) *count += w->host_active[i] != 0;
+    return cudaSuccess;
+}
 
 cudaError_t create_multiview_association_workspace(
     std::size_t view_count, std::size_t max_persons,
@@ -684,12 +1165,6 @@ cudaError_t create_multiview_association_workspace(
     error = cudaHostAlloc(&workspace->host_fundamentals,
         sizeof(float) * view_count * view_count * 9, cudaHostAllocPortable);
     if (error != cudaSuccess) return fail(error);
-    error = cudaHostAlloc(&workspace->host_assignments,
-        sizeof(unsigned char) * max_persons * view_count, cudaHostAllocPortable);
-    if (error != cudaSuccess) return fail(error);
-    error = cudaHostAlloc(&workspace->host_output_count, sizeof(unsigned int), cudaHostAllocPortable);
-    if (error != cudaSuccess) return fail(error);
-
     if (workspace->edge_count > 0) {
         error = cudaMalloc(&workspace->pair_views, sizeof(unsigned char) * pair_views.size());
         if (error != cudaSuccess) return fail(error);
@@ -713,8 +1188,6 @@ cudaError_t create_multiview_association_workspace(
 void destroy_multiview_association_workspace(MultiviewAssociationWorkspace* workspace) {
     if (!workspace) return;
     if (workspace->sort_temp) cudaFree(workspace->sort_temp);
-    if (workspace->host_output_count) cudaFreeHost(workspace->host_output_count);
-    if (workspace->host_assignments) cudaFreeHost(workspace->host_assignments);
     if (workspace->host_fundamentals) cudaFreeHost(workspace->host_fundamentals);
     if (workspace->edge_keys_out) cudaFree(workspace->edge_keys_out);
     if (workspace->edge_keys_in) cudaFree(workspace->edge_keys_in);
@@ -734,8 +1207,8 @@ cudaError_t launch_multiview_current_association(
     const float* fundamentals,
     float gate_px, float minimum_score,
     cudaStream_t stream, double* host_ms) {
-    if (!workspace || !keypoints || !scores || !candidate_valid || !fundamentals ||
-        !workspace->host_assignments || !workspace->host_output_count) return cudaErrorInvalidValue;
+    if (!workspace || !keypoints || !scores || !candidate_valid || !fundamentals)
+        return cudaErrorInvalidValue;
     const auto start = std::chrono::steady_clock::now();
     if (workspace->edge_count == 0) {
         if (host_ms) *host_ms = std::chrono::duration<double, std::milli>(
@@ -768,28 +1241,21 @@ cudaError_t launch_multiview_current_association(
         workspace->canonical_view_order, workspace->assignments, workspace->output_count);
     error = cudaGetLastError();
     if (error != cudaSuccess) return error;
-    error = cudaMemcpyAsync(workspace->host_assignments, workspace->assignments,
-        workspace->max_persons * workspace->view_count, cudaMemcpyDeviceToHost, stream);
-    if (error != cudaSuccess) return error;
-    error = cudaMemcpyAsync(workspace->host_output_count, workspace->output_count,
-        sizeof(unsigned int), cudaMemcpyDeviceToHost, stream);
     if (host_ms) *host_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - start).count();
-    return error;
+    return cudaSuccess;
 }
 
-void copy_multiview_association_result(
-    const MultiviewAssociationWorkspace* workspace,
-    unsigned char* host_assignments, std::uint32_t* host_track_count) {
-    if (!workspace || !host_assignments || !host_track_count) return;
-    if (workspace->edge_count == 0) {
-        std::memset(host_assignments, 255, workspace->max_persons * workspace->view_count);
-        *host_track_count = 0;
-        return;
-    }
-    std::memcpy(host_assignments, workspace->host_assignments,
-        workspace->max_persons * workspace->view_count);
-    *host_track_count = *workspace->host_output_count;
+cudaError_t clear_multiview_association_assignments(
+    MultiviewAssociationWorkspace* workspace, cudaStream_t stream) {
+    if (!workspace || !workspace->assignments) return cudaErrorInvalidValue;
+    return cudaMemsetAsync(workspace->assignments, 255,
+        workspace->max_persons * workspace->view_count, stream);
+}
+
+const unsigned char* multiview_association_assignments_device(
+    const MultiviewAssociationWorkspace* workspace) {
+    return workspace ? workspace->assignments : nullptr;
 }
 
 cudaError_t launch_multiview_weighted_dlt(const float* keypoints, const float* scores,

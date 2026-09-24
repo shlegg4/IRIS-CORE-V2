@@ -48,6 +48,8 @@ def main():
                         help="path to iris_app.exe")
     parser.add_argument("--output-dir", required=True, type=pathlib.Path)
     parser.add_argument("--cuda-device", type=int, default=0)
+    parser.add_argument("--metrics-port", type=int, default=9464,
+                        help="local Prometheus exporter port (default: 9464)")
     parser.add_argument("--realtime", action="store_true",
                         help="pace ingestion using source presentation timestamps")
     parser.add_argument("--skip-evaluation", action="store_true")
@@ -69,7 +71,8 @@ def main():
     command = [str(args.iris.resolve()), "--video", "--engine", str(args.engine.resolve()),
                "--calibration", str(converted_calibration), "--output-dir",
                str(args.output_dir.resolve()), "--realtime", str(args.realtime).lower(),
-               "--cuda-device", str(args.cuda_device), "--loop", "false"]
+               "--cuda-device", str(args.cuda_device), "--metrics-port", str(args.metrics_port),
+               "--loop", "false"]
     for camera_id in camera_ids:
         video = sequence / "hdVideos" / f"hd_00_{camera_id:02d}.mp4"
         if not video.is_file():

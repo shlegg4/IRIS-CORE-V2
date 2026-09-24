@@ -18,16 +18,24 @@ struct TensorRtMultiviewResult {
         double preprocess_stream_ms{}, engine_stream_ms{};
         double association_stream_ms{}, gather_stream_ms{}, triangulation_stream_ms{};
         double association_host_ms{}, triangulation_host_ms{};
+        double mapping_stream_ms{};
+        double temporal_assignment_stream_ms{};
+        double postprocess_gpu_stream_ms{};
+        double temporal_stream_ms{}, temporal_host_ms{};
         double output_copy_stream_ms{}, download_stream_ms{};
         bool cuda_graph_active{};
     } timings;
-    // Raw detector tensors are retained for camera-local 2-D output. Selected
-    // observations remain the input to epipolar triangulation only.
-    std::vector<float> keypoints;
+    // Calibrated 2-D packet points and selected track state copied from CUDA.
+    std::vector<float> image_keypoints;
+    std::vector<unsigned char> image_joint_valid;
     std::vector<float> keypoint_scores;
     std::vector<unsigned char> candidate_valid;
     std::vector<unsigned char> assignments;
     std::uint32_t track_count{};
+    std::vector<std::uint64_t> track_ids;
+    std::vector<float> tracked_xyz;
+    std::vector<unsigned char> tracked_valid;
+    std::vector<unsigned char> tracked_predicted;
 };
 
 class TensorRtMultiviewEngine {
@@ -42,6 +50,8 @@ class TensorRtMultiviewEngine {
                const std::vector<std::uint32_t>& widths,
                const std::vector<std::uint32_t>& heights,
                const std::vector<float>& fundamentals,
+               const std::vector<float>& projections,
+               float dt_seconds, float maximum_reprojection_error_px,
                TensorRtMultiviewResult& result);
 
   private:

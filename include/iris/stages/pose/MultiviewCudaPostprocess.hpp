@@ -8,6 +8,34 @@
 namespace iris {
 
 struct MultiviewAssociationWorkspace;
+struct MultiviewTemporalWorkspace;
+
+cudaError_t create_multiview_temporal_workspace(
+    std::size_t view_count, std::size_t max_tracks,
+    MultiviewTemporalWorkspace** workspace);
+void destroy_multiview_temporal_workspace(MultiviewTemporalWorkspace* workspace);
+// Matches detections to persistent 3D tracks, seeds unmatched tracks from the
+// cross-view fallback assignments, triangulates updates, and predicts through
+// short occlusions. Projections are a small host array; other inputs are device pointers.
+cudaError_t launch_multiview_temporal_update(
+    MultiviewTemporalWorkspace* workspace,
+    const float* keypoints, const float* scores,
+    const unsigned char* candidate_valid,
+    const unsigned char* seed_assignments,
+    const float* projections_host, float dt_seconds,
+    float gate_px, float minimum_score, float maximum_reprojection_error_px,
+    cudaEvent_t assignment_begin, cudaEvent_t assignment_end, cudaStream_t stream);
+cudaError_t launch_multiview_unwarp_keypoints(
+    const float* model_keypoints, const float* source_intrinsics,
+    const float* distortion, const float* mapping_meta_device,
+    std::size_t view_count, float* image_keypoints,
+    unsigned char* joint_valid, cudaStream_t stream);
+cudaError_t copy_multiview_temporal_result(
+    MultiviewTemporalWorkspace* workspace,
+    unsigned char* host_assignments, std::uint64_t* host_track_ids,
+    float* host_xyz, unsigned char* host_valid, unsigned char* host_predicted,
+    std::uint32_t* host_track_count,
+    cudaStream_t stream);
 
 cudaError_t create_multiview_association_workspace(
     std::size_t view_count, std::size_t max_persons,
@@ -26,9 +54,10 @@ cudaError_t launch_multiview_current_association(
     const float* fundamentals,
     float gate_px, float minimum_score,
     cudaStream_t stream, double* host_ms);
-void copy_multiview_association_result(
-    const MultiviewAssociationWorkspace* workspace,
-    unsigned char* host_assignments, std::uint32_t* host_track_count);
+cudaError_t clear_multiview_association_assignments(
+    MultiviewAssociationWorkspace* workspace, cudaStream_t stream);
+const unsigned char* multiview_association_assignments_device(
+    const MultiviewAssociationWorkspace* workspace);
 
 // Triangulates the fixed RTMO layout [view][candidate][joint]. All pointers are
 // device pointers and the operation is enqueued on stream. Invalid or

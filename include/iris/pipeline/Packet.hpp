@@ -12,11 +12,15 @@ inline constexpr std::size_t coco_joint_count = 17;
 
 struct MultiviewPose {
     bool active{};
+    // Stable identity maintained by the GPU-resident cross-view tracker.
+    std::uint64_t track_id{};
     std::vector<CameraId> view_camera_ids;
-    // Candidate index selected by the cross-view association stage, or -1 if unmatched.
+    // Candidate index selected for this camera, or -1 if unmatched.
     std::vector<std::int32_t> selected_detection_indices;
     std::array<std::array<float, 3>, coco_joint_count> joints_3d{};
     std::array<bool, coco_joint_count> joint_valid{};
+    // True only for the single frame predicted after the last 3-D measurement.
+    std::array<bool, coco_joint_count> joint_predicted{};
     std::vector<std::array<float, coco_joint_count>> joint_scores;
     std::vector<std::array<std::array<float, 2>, coco_joint_count>> points_2d_px;
     std::vector<std::array<bool, coco_joint_count>> point_valid;
@@ -65,8 +69,8 @@ struct Packet {
     std::uint64_t sequence{};
     FrameBatch frames;
     std::optional<PoseBatch> poses;
-    // Results from the fixed three-view COCO-17 TensorRT engine. Coordinates
-    // use the calibration world frame and units (e.g. centimetres for Panoptic).
+    // Results from the COCO-17 TensorRT engine. Coordinates use the calibration
+    // world frame and units (e.g. centimetres for Panoptic).
     std::optional<std::vector<MultiviewPose>> multiview_poses;
     // Raw per-camera RTMO detections, before epipolar assignment or triangulation.
     std::optional<std::vector<ViewPose2d>> view_poses_2d;

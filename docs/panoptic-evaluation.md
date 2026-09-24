@@ -45,7 +45,7 @@ in the output directory.
 ## Outputs
 
 - `poses.jsonl`: batch index and per-camera source frame sequence/time, all 2-D detections, selected
-  detection indices for each 3-D person, 3-D joints, validity, and per-view scores.
+  detection indices for each 3-D person, 3-D joints, validity, one-frame prediction flags, and per-view scores.
 - `run_summary.json`: run status, configured inputs, processed batch/frame counts, elapsed time,
   effective batches per second, and the final counters, gauges, and histograms.
 - `run_config.json`: dataset, camera selection, engine, and exact command used by the launcher.
@@ -81,12 +81,14 @@ These per-camera scores evaluate detector localization and coverage, not cross-c
 those per-camera ground-truth labels; it counts only poses with at least two selected detections
 whose reprojection error is <=150 px. This is a within-frame association metric, not a tracker metric.
 
-The current epipolar matcher compares all cross-camera candidate pairs, uses a confidence-weighted
-trimmed mean of joint residuals (trimming the highest 20% of residual weight), requires at least five
-shared joints above 0.35 confidence, and gates pairs at 8 px in the 640 x 640 inference canvas.
-Compatible detections are joined through a cost-sorted pair graph; a track is retained only when it
-contains at least two cameras. The graph ordering uses camera IDs as deterministic tie-breakers, so
-the selected groups do not depend on the camera list order.
+The temporal matcher projects each persistent 3-D track into every camera and solves a one-to-one
+track/detection assignment per view on CUDA using robust joint reprojection costs. It predicts
+each joint through one missed update, invalidates it on the next miss, updates measured 3-D joints
+by weighted DLT, and exposes stable track IDs. A track can persist for up to 30 missed frames.
+The cross-view epipolar matcher seeds tracks for detections unmatched by live 3-D tracks every tenth frame. It uses a
+confidence-weighted trimmed mean of joint residuals (trimming the highest 20% of residual weight),
+requires at least five shared joints above 0.35 confidence, and gates pairs at 8 px in the 640 x 640
+inference canvas. Its assignments are deterministic through camera-ID tie-breaking.
 
 `epipolar_pair_diagnostics` samples every twentieth overlapping frame. It labels candidate pairs
 using independent per-camera ground-truth assignments (accepted at <=150 px), reports same-person

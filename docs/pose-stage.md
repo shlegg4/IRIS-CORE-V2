@@ -41,3 +41,14 @@ Or provide an engine explicitly with `pose 2d <engine-path>`. The stage emits CO
 keypoints and confidence scores through the same preview pose events used by multiview mode. The
 shipped engine has a fixed batch size of three, so the implementation duplicates the input frame
 inside the inference batch and ignores the two duplicate results.
+
+## Multiview tracking
+
+In multiview mode, CUDA retains each 3-D skeleton and joint velocity between frames. It projects
+predicted joints into each camera, solves one-to-one detection assignments per view, and updates joints
+with weighted DLT. A joint may be predicted for one frame after its last successful triangulation;
+the next failed update invalidates it. The `predicted` flag distinguishes that frame from a measured
+joint. The track itself can remain active for up to 30 missed frames. The cross-view epipolar matcher
+seeds tracks for detections unmatched by live 3-D tracks every ten frames. Multiview outputs include stable `track_id`
+values; detection indices remain frame-local. GPU postprocessing duration is exposed as
+`iris_pose_last_postprocess_gpu_stream_ms` and excludes TensorRT and output copies.

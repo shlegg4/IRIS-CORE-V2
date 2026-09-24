@@ -73,49 +73,6 @@ Eigen::Matrix3f fundamental_matrix(const PoseConfig::CameraCalibration& first,
     return second_k.inverse().transpose() * cross * relative_rotation * first_k.inverse();
 }
 
-std::optional<Eigen::Vector3f> triangulate_joint(
-    const TensorRtMultiviewResult& result, const std::vector<int>& track, std::size_t joint,
-    const std::vector<Projection>& projections, float minimum_score, float max_reprojection_error) {
-    Eigen::Matrix4f normal = Eigen::Matrix4f::Zero();
-    std::size_t observations = 0;
-    for (std::size_t view = 0; view < track.size(); ++view) {
-        if (track[view] < 0) continue;
-        const auto index = (view * candidate_capacity + static_cast<std::size_t>(track[view])) * joint_capacity + joint;
-        const float score = result.keypoint_scores[index];
-        const float x = result.keypoints[index * 2], y = result.keypoints[index * 2 + 1];
-        if (!std::isfinite(score) || score < minimum_score || !std::isfinite(x) || !std::isfinite(y)) continue;
-        const auto& p = projections[view];
-        const Eigen::Vector4f row_x(x * p(2, 0) - p(0, 0), x * p(2, 1) - p(0, 1),
-                                    x * p(2, 2) - p(0, 2), x * p(2, 3) - p(0, 3));
-        const Eigen::Vector4f row_y(y * p(2, 0) - p(1, 0), y * p(2, 1) - p(1, 1),
-                                    y * p(2, 2) - p(1, 2), y * p(2, 3) - p(1, 3));
-        normal.noalias() += score * score * (row_x * row_x.transpose() + row_y * row_y.transpose());
-        ++observations;
-    }
-    if (observations < 2) return std::nullopt;
-    const Eigen::Matrix3f lhs = normal.block<3, 3>(0, 0);
-    const Eigen::Vector3f rhs = -normal.block<3, 1>(0, 3);
-    Eigen::FullPivLU<Eigen::Matrix3f> solver(lhs);
-    if (solver.rank() < 3) return std::nullopt;
-    const Eigen::Vector3f point = solver.solve(rhs);
-    if (!point.allFinite()) return std::nullopt;
-    for (std::size_t view = 0; view < track.size(); ++view) {
-        if (track[view] < 0) continue;
-        const auto index = (view * candidate_capacity + static_cast<std::size_t>(track[view])) * joint_capacity + joint;
-        const float score = result.keypoint_scores[index];
-        if (!std::isfinite(score) || score < minimum_score) continue;
-        const auto& p = projections[view];
-        const float denominator = p(2, 0) * point.x() + p(2, 1) * point.y() + p(2, 2) * point.z() + p(2, 3);
-        if (!(denominator > 1e-5F)) return std::nullopt;
-        const float projected_x = (p(0, 0) * point.x() + p(0, 1) * point.y() + p(0, 2) * point.z() + p(0, 3)) / denominator;
-        const float projected_y = (p(1, 0) * point.x() + p(1, 1) * point.y() + p(1, 2) * point.z() + p(1, 3)) / denominator;
-        const float dx = projected_x - result.keypoints[index * 2];
-        const float dy = projected_y - result.keypoints[index * 2 + 1];
-        if (!std::isfinite(projected_x) || !std::isfinite(projected_y) ||
-            std::hypot(dx, dy) > max_reprojection_error) return std::nullopt;
-    }
-    return point;
-}
 }
 
 class MultiviewPoseStage::Impl {
@@ -127,12 +84,13 @@ class MultiviewPoseStage::Impl {
           last_process_ms_(metrics ? metrics->gauge("iris_pose_last_process_ms") : infrastructure::metrics::Gauge{}),
           cuda_graph_active_(metrics ? metrics->gauge("iris_pose_cuda_graph_active") : infrastructure::metrics::Gauge{}) {
         if (metrics) {
-            const std::array<const char*, 18> names{
+            const std::array<const char*, 23> names{
                 "frame_ready_wait", "preprocess_host", "trt_setup_host", "trt_enqueue_host",
                 "download_host", "result_wait_host", "preprocess_stream", "engine_stream",
                 "download_stream", "postprocess_cpu", "engine_call_host", "geometry_setup_host",
                 "association_stream", "gather_stream", "triangulation_stream", "output_copy_stream",
-                "association_host", "triangulation_host"};
+                "association_host", "triangulation_host", "temporal_stream", "temporal_host",
+                "mapping_stream", "postprocess_gpu_stream", "temporal_assignment_stream"};
             for (std::size_t i=0; i<names.size(); ++i) {
                 breakdown_[i] = metrics->histogram(std::string("iris_pose_")+names[i]+"_ms", {0.01,0.05,0.1,0.25,0.5,1,2,3,5,10,20});
                 latest_[i] = metrics->gauge(std::string("iris_pose_last_")+names[i]+"_ms");
@@ -221,7 +179,6 @@ class MultiviewPoseStage::Impl {
             cached_heights_ = heights;
             geometry_cache_valid_ = true;
         }
-        const auto& projections = cached_projections_;
         const auto& fundamentals = cached_fundamentals_;
         const double geometry_setup_ms = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - geometry_start).count();
@@ -233,16 +190,37 @@ class MultiviewPoseStage::Impl {
                         fundamentals_flat[(first * view_count + second) * 9 + row * 3 + column] =
                             fundamentals[first * view_count + second](row, column);
 
+        std::vector<float> projections_flat(view_count * 12);
+        for (std::size_t view = 0; view < view_count; ++view)
+            std::copy(cached_projections_[view].data(), cached_projections_[view].data() + 12,
+                      projections_flat.data() + view * 12);
+        float dt_seconds = 0.01F;
+        if (!packet.frames.empty()) {
+            const auto frame_time = packet.frames.front().timing.estimated_capture_time;
+            if (frame_time.time_since_epoch().count() != 0) {
+                if (last_track_time_.time_since_epoch().count() != 0 && frame_time > last_track_time_)
+                    dt_seconds = std::chrono::duration<float>(frame_time - last_track_time_).count();
+                last_track_time_ = frame_time;
+            }
+        }
+
         TensorRtMultiviewResult result;
         result.timings.geometry_setup_host_ms = geometry_setup_ms;
         const auto engine_start = std::chrono::steady_clock::now();
-        engine_->infer(buffers, strides, widths, heights, fundamentals_flat, result);
+        engine_->infer(buffers, strides, widths, heights, fundamentals_flat, projections_flat,
+                       dt_seconds, config_.maximum_reprojection_error_px, result);
         cuda_graph_active_.set(result.timings.cuda_graph_active ? 1.0 : 0.0);
         const auto postprocess_start = std::chrono::steady_clock::now();
         std::vector<std::vector<int>> tracks;
+        std::vector<std::uint64_t> track_ids;
+        std::vector<std::size_t> track_slots;
         tracks.reserve(result.track_count);
-        for (std::size_t person = 0; person < result.track_count; ++person) {
+        track_ids.reserve(result.track_count);
+        for (std::size_t person = 0; person < result.track_ids.size(); ++person) {
+            if (result.track_ids[person] == 0) continue;
             auto& track = tracks.emplace_back(view_count, -1);
+            track_ids.push_back(result.track_ids[person]);
+            track_slots.push_back(person);
             for (std::size_t view = 0; view < view_count; ++view) {
                 const auto candidate = result.assignments[person * view_count + view];
                 if (candidate != 255) track[view] = candidate;
@@ -254,13 +232,7 @@ class MultiviewPoseStage::Impl {
         std::array<int, maximum_view_capacity * candidate_capacity> observation_by_detection;
         observation_by_detection.fill(-1);
         for (std::size_t view = 0; view < view_count; ++view) {
-            const auto& source = *std::ranges::find(packet.frames,
-                config_.multiview_calibration[view].camera_id, &Frame::camera);
             const auto& calibration = config_.multiview_calibration[view];
-            const float scale = std::min(640.0F / static_cast<float>(source.extent.width),
-                                         640.0F / static_cast<float>(source.extent.height));
-            const float resized_width = static_cast<float>(std::max(1, static_cast<int>(source.extent.width * scale + 0.5F)));
-            const float resized_height = static_cast<float>(std::max(1, static_cast<int>(source.extent.height * scale + 0.5F)));
             for (std::size_t candidate = 0; candidate < candidate_capacity; ++candidate) {
                 if (!result.candidate_valid[view * candidate_capacity + candidate]) continue;
                 auto& observation = view_poses_2d.emplace_back();
@@ -272,31 +244,25 @@ class MultiviewPoseStage::Impl {
                     const auto score_index = (view * candidate_capacity + candidate) * joint_capacity + joint;
                     const auto point_index = score_index * 2;
                     const float score = result.keypoint_scores[score_index];
-                    const float x = result.keypoints[point_index];
-                    const float y = result.keypoints[point_index + 1];
                     observation.scores[joint] = score;
-                    if (!std::isfinite(score) || !std::isfinite(x) || !std::isfinite(y)) continue;
-                    const float model_x = (x - (640.0F - resized_width) * 0.5F) / scale;
-                    const float model_y = (y - (640.0F - resized_height) * 0.5F) / scale;
-                    const float fx = calibration.intrinsics[0], fy = calibration.intrinsics[4];
-                    const float cx = calibration.intrinsics[2], cy = calibration.intrinsics[5];
-                    const float xu = (model_x - cx) / fx, yu = (model_y - cy) / fy;
-                    const float r2 = xu * xu + yu * yu;
-                    const float radial = 1.0F + calibration.distortion[0] * r2 + calibration.distortion[1] * r2 * r2 + calibration.distortion[4] * r2 * r2 * r2;
-                    const float xd = xu * radial + 2.0F * calibration.distortion[2] * xu * yu + calibration.distortion[3] * (r2 + 2.0F * xu * xu);
-                    const float yd = yu * radial + calibration.distortion[2] * (r2 + 2.0F * yu * yu) + 2.0F * calibration.distortion[3] * xu * yu;
-                    observation.points_px[joint] = {fx * xd + cx, fy * yd + cy};
+                    if (!std::isfinite(score) || !result.image_joint_valid[score_index]) continue;
+                    const float x = result.image_keypoints[point_index];
+                    const float y = result.image_keypoints[point_index + 1];
+                    if (!std::isfinite(x) || !std::isfinite(y)) continue;
+                    observation.points_px[joint] = {x, y};
                     observation.valid[joint] = true;
                 }
             }
         }
         packet.view_poses_2d = std::move(view_poses_2d);
 
-        const auto triangulation_start = std::chrono::steady_clock::now();
         std::vector<MultiviewPose> poses;
         poses.reserve(tracks.size());
-        for (const auto& track : tracks) {
+        for (std::size_t person = 0; person < tracks.size(); ++person) {
+            const auto& track = tracks[person];
+            const auto slot = track_slots[person];
             auto& pose = poses.emplace_back();
+            pose.track_id = track_ids[person];
             pose.view_camera_ids.reserve(view_count);
             pose.selected_detection_indices = track;
             pose.joint_scores.resize(view_count);
@@ -316,25 +282,23 @@ class MultiviewPoseStage::Impl {
                 pose.point_valid[view] = observation.valid;
             }
             for (std::size_t joint = 0; joint < joint_capacity; ++joint) {
-                if (config_.two_d_only) break;
-                const auto point = triangulate_joint(result, track, joint, projections,
-                    config_.minimum_joint_confidence, config_.maximum_reprojection_error_px);
-                if (!point) continue;
-                pose.joints_3d[joint] = {point->x(), point->y(), point->z()};
+                const auto state = slot * joint_capacity + joint;
+                if (state >= result.tracked_valid.size() || !result.tracked_valid[state]) continue;
+                const auto xyz = state * 3;
+                pose.joints_3d[joint] = {result.tracked_xyz[xyz], result.tracked_xyz[xyz + 1], result.tracked_xyz[xyz + 2]};
                 pose.joint_valid[joint] = true;
+                pose.joint_predicted[joint] = result.tracked_predicted[state] != 0;
             }
             const auto valid_2d = std::ranges::count_if(pose.point_valid, [](const auto& view) {
                 return std::ranges::count(view, true) >= 5;
             });
-            pose.active = valid_2d >= 1;
+            pose.active = valid_2d >= 1 || std::ranges::any_of(pose.joint_valid, [](bool v) { return v; });
         }
-        result.timings.triangulation_host_ms = std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - triangulation_start).count();
         packet.multiview_poses = std::move(poses);
         const auto finished = std::chrono::steady_clock::now();
         if (metrics_enabled_) {
             const auto& t=result.timings;
-            const std::array<double,18> values{ready_wait_ms, t.preprocess_host_ms, t.setup_host_ms,
+            const std::array<double,23> values{ready_wait_ms, t.preprocess_host_ms, t.setup_host_ms,
                 t.enqueue_host_ms, t.download_host_ms, t.wait_host_ms, t.preprocess_stream_ms,
                 t.engine_stream_ms, t.download_stream_ms,
                 t.geometry_setup_host_ms +
@@ -342,7 +306,9 @@ class MultiviewPoseStage::Impl {
                 std::chrono::duration<double,std::milli>(postprocess_start-engine_start).count(),
                 t.geometry_setup_host_ms, t.association_stream_ms, t.gather_stream_ms,
                 t.triangulation_stream_ms, t.output_copy_stream_ms,
-                t.association_host_ms, t.triangulation_host_ms};
+                t.association_host_ms, t.triangulation_host_ms, t.temporal_stream_ms,
+                t.temporal_host_ms, t.mapping_stream_ms, t.postprocess_gpu_stream_ms,
+                t.temporal_assignment_stream_ms};
             for(std::size_t i=0;i<values.size();++i) {
                 breakdown_[i].observe(values[i]); latest_[i].set(values[i]);
             }
@@ -394,6 +360,7 @@ class MultiviewPoseStage::Impl {
     std::unique_ptr<TensorRtMultiviewEngine> engine_;
     bool started_{};
     std::uint64_t calibration_revision_{};
+    MonotonicTime last_track_time_{};
     bool metrics_enabled_{};
     bool geometry_cache_valid_{};
     std::vector<std::uint32_t> cached_widths_, cached_heights_;
@@ -403,8 +370,8 @@ class MultiviewPoseStage::Impl {
     infrastructure::metrics::Gauge last_capture_to_result_ms_;
     infrastructure::metrics::Gauge last_process_ms_;
     infrastructure::metrics::Gauge cuda_graph_active_;
-    std::array<infrastructure::metrics::Histogram,18> breakdown_;
-    std::array<infrastructure::metrics::Gauge,18> latest_;
+    std::array<infrastructure::metrics::Histogram,23> breakdown_;
+    std::array<infrastructure::metrics::Gauge,23> latest_;
 };
 
 MultiviewPoseStage::MultiviewPoseStage(Channel<Packet>& input, Channel<Packet>* output, PoseConfig config, infrastructure::metrics::MetricRegistry* metrics)

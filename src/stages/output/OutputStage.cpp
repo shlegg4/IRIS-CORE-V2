@@ -69,8 +69,9 @@ Json pose_export_record(const Packet& packet) {
             for (std::size_t joint = 0; joint < pose.joints_3d.size(); ++joint) {
                 joints.push_back({{"x", finite_number(pose.joints_3d[joint][0])},
                                   {"y", finite_number(pose.joints_3d[joint][1])},
-                                  {"z", finite_number(pose.joints_3d[joint][2])},
-                                  {"valid", pose.joint_valid[joint]}});
+                                   {"z", finite_number(pose.joints_3d[joint][2])},
+                                   {"valid", pose.joint_valid[joint]},
+                                   {"predicted", pose.joint_predicted[joint]}});
             }
             Json views = Json::array();
             for (const auto camera_id : pose.view_camera_ids) views.push_back(camera_id);
@@ -84,6 +85,7 @@ Json pose_export_record(const Packet& packet) {
                 scores_by_view.push_back(std::move(scores));
             }
             record["persons_3d"].push_back({{"active", pose.active},
+                                            {"track_id", pose.track_id},
                                             {"camera_ids", std::move(views)},
                                             {"selected_detection_indices", std::move(selected)},
                                             {"joints", std::move(joints)},

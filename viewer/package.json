@@ -23,6 +23,7 @@
   "dependencies": {
     "@electron-toolkit/preload": "^3.0.2",
     "@electron-toolkit/utils": "^4.0.0",
+    "@tabler/icons-vue": "^3.48.0",
     "@types/three": "^0.186.0",
     "@types/ws": "^8.18.1",
     "three": "^0.186.0",

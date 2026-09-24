@@ -21,6 +21,14 @@ EPIPOLAR_DIAGNOSTIC_FRAME_STRIDE = 20
 EPIPOLAR_DIAGNOSTIC_LABEL_ERROR_PX = 150.0
 
 
+def percentile(values, percentage):
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, max(0, math.ceil(percentage / 100.0 * len(ordered)) - 1))
+    return ordered[index]
+
+
 def flatten(values):
     if isinstance(values, list):
         return [item for value in values for item in flatten(value)]
@@ -567,6 +575,11 @@ def main():
     assignment_correct = assignment_total = 0
     matched_frames = 0
     prediction_count = 0
+    frame_error_records = []
+    last_track_by_person = {}
+    track_assignments_by_person = {}
+    person_assignments_by_track = {}
+    temporal_identity_matches = identity_switches = 0
     direct_detection_metrics = new_detection_metrics(detection_thresholds)
     epipolar_diagnostics = new_epipolar_diagnostics()
 
@@ -579,6 +592,8 @@ def main():
             if frame_id not in gt:
                 continue
             matched_frames += 1
+            per_frame_joint_errors = []
+            frame_person_matches = 0
             truth = gt[frame_id]["people"]
             direct_matches = frame_detection_matches(
                 record, truth, cameras, camera_ids, minimum_score=0.35,
@@ -607,17 +622,33 @@ def main():
                         not math.isfinite(costs[pi][gi]) or costs[pi][gi] > unmatched_cost):
                     continue
                 matched_people += 1
-                frame_joint_errors = []
+                per_person_joint_errors = []
                 for p, g in zip(pred_joints[pi], truth[gi]["joints"]):
                     if p is None or g[3] <= 0:
                         continue
                     error = distance(p[:3], g[:3])
                     errors.append(error)
-                    frame_joint_errors.append(error)
+                    per_person_joint_errors.append(error)
                     joint_total += 1
                     joint_hits += error <= args.pck_threshold_cm
-                if frame_joint_errors:
-                    frame_errors.append(sum(frame_joint_errors) / len(frame_joint_errors))
+                if per_person_joint_errors:
+                    frame_errors.append(sum(per_person_joint_errors) / len(per_person_joint_errors))
+
+                per_frame_joint_errors.extend(per_person_joint_errors)
+                frame_person_matches += 1
+                track_id = int(predicted[pi].get("track_id", 0) or 0)
+                person_id = truth[gi].get("id")
+                if track_id > 0 and person_id is not None:
+                    person_key = str(person_id)
+                    track_key = str(track_id)
+                    previous_track = last_track_by_person.get(person_key)
+                    if previous_track is not None and previous_track != track_id:
+                        identity_switches += 1
+                    last_track_by_person[person_key] = track_id
+                    track_assignments_by_person.setdefault(person_key, set()).add(track_id)
+                    person_assignments_by_track.setdefault(track_key, {}).setdefault(person_key, 0)
+                    person_assignments_by_track[track_key][person_key] += 1
+                    temporal_identity_matches += 1
 
                 detection_map = {(int(d["camera_id"]), int(d["detection_index"])): d
                                  for d in record.get("detections_2d", [])}
@@ -639,11 +670,40 @@ def main():
                         assignment_total += 1
                         assignment_correct += min(range(len(candidate_errors)),
                                                   key=candidate_errors.__getitem__) == gi
+            if per_frame_joint_errors:
+                frame_error_records.append({
+                    "frame_id": frame_id,
+                    "mpjpe_cm": sum(per_frame_joint_errors) / len(per_frame_joint_errors),
+                    "joint_error_sum_cm": sum(per_frame_joint_errors),
+                    "valid_joints": len(per_frame_joint_errors),
+                    "matched_people": frame_person_matches,
+                })
 
     if matched_frames == 0:
         raise ValueError("no prediction frame indices overlap the Panoptic ground truth")
     finalize_detection_metrics(direct_detection_metrics)
     epipolar_diagnostics = summarize_epipolar_diagnostics(epipolar_diagnostics)
+    frame_mpjpe_values = [frame["mpjpe_cm"] for frame in frame_error_records]
+    total_frame_joint_error = sum(frame["joint_error_sum_cm"] for frame in frame_error_records)
+    tail_frames = sorted(frame_error_records, key=lambda frame: frame["mpjpe_cm"], reverse=True)
+    tail_frame_count = max(1, math.ceil(len(tail_frames) * 0.01)) if tail_frames else 0
+    tail_joint_error = sum(frame["joint_error_sum_cm"] for frame in tail_frames[:tail_frame_count])
+    matched_person_keys = list(track_assignments_by_person.values())
+    track_purity_correct = sum(max(person_counts.values())
+                               for person_counts in person_assignments_by_track.values())
+    track_purity_total = sum(sum(person_counts.values())
+                             for person_counts in person_assignments_by_track.values())
+    temporal_track_identity = {
+        "matched_track_person_observations": temporal_identity_matches,
+        "unique_track_ids": len(person_assignments_by_track),
+        "ground_truth_people_with_track_ids": len(matched_person_keys),
+        "ground_truth_people_with_multiple_track_ids": sum(len(track_ids) > 1
+                                                            for track_ids in matched_person_keys),
+        "track_id_switches": identity_switches,
+        "track_id_purity": track_purity_correct / track_purity_total if track_purity_total else None,
+        "notes": ["Per-frame person matches use the existing 3-D assignment and 100 cm cutoff.",
+                  "Switches count a change in assigned track ID for a ground-truth person across matched frames."],
+    }
     result = {
         "schema_version": 1,
         "coordinate_units": "Panoptic calibration units (centimeters for the supplied dataset)",
@@ -659,6 +719,16 @@ def main():
         "mpjpe_cm": statistics.mean(errors) if errors else None,
         "median_joint_error_cm": statistics.median(errors) if errors else None,
         "mean_frame_mpjpe_cm": statistics.mean(frame_errors) if frame_errors else None,
+        "frame_error_distribution": {
+            "frames_with_valid_matches": len(frame_mpjpe_values),
+            "frame_mpjpe_cm_p50": percentile(frame_mpjpe_values, 50),
+            "frame_mpjpe_cm_p90": percentile(frame_mpjpe_values, 90),
+            "frame_mpjpe_cm_p95": percentile(frame_mpjpe_values, 95),
+            "frame_mpjpe_cm_p99": percentile(frame_mpjpe_values, 99),
+            "worst_frames": tail_frames[:10],
+            "top_1_percent_frames_joint_error_share": tail_joint_error / total_frame_joint_error
+                if total_frame_joint_error else None,
+        },
         "pck_threshold_cm": args.pck_threshold_cm,
         "pck": joint_hits / joint_total if joint_total else None,
         "mean_2d_reprojection_error_px": statistics.mean(reprojection_errors) if reprojection_errors else None,
@@ -666,6 +736,7 @@ def main():
         "correct_detection_assignments": assignment_correct,
         "detection_assignment_accuracy": assignment_correct / assignment_total if assignment_total else None,
         "direct_detection_matching": direct_detection_metrics,
+        "temporal_track_identity": temporal_track_identity,
         "epipolar_pair_diagnostics": epipolar_diagnostics,
         "notes": ["Frame association uses the decoded batch index and the Panoptic body3DScene frame suffix.",
                   "People are matched independently within each frame by minimum mean 3-D joint error.",

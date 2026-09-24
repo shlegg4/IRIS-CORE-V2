@@ -84,15 +84,19 @@ std::string multiview_pose_event(const Packet& packet) {
         if (joint) out << ',';
         out << (pose3d && pose3d->joint_valid[joint] ? "true" : "false");
     }
+    out << "],\"predicted\":[";
+    for (std::size_t joint = 0; joint < coco_joint_count; ++joint) {
+        if (joint) out << ',';
+        out << (pose3d && pose3d->joint_predicted[joint] ? "true" : "false");
+    }
     out << "],\"people\":[";
     if (packet.multiview_poses) {
         bool first_person = true;
-        for (std::size_t person_id = 0; person_id < packet.multiview_poses->size(); ++person_id) {
-            const auto& pose = (*packet.multiview_poses)[person_id];
+        for (const auto& pose : *packet.multiview_poses) {
             if (!pose.active) continue;
             if (!first_person) out << ',';
             first_person = false;
-            out << "{\"id\":" << person_id << ",\"joints3d\":[";
+            out << "{\"id\":" << pose.track_id << ",\"joints3d\":[";
             for (std::size_t joint = 0; joint < coco_joint_count; ++joint) {
                 if (joint) out << ',';
                 const auto& value = pose.joints_3d[joint];
@@ -102,6 +106,11 @@ std::string multiview_pose_event(const Packet& packet) {
             for (std::size_t joint = 0; joint < coco_joint_count; ++joint) {
                 if (joint) out << ',';
                 out << (pose.joint_valid[joint] ? "true" : "false");
+            }
+            out << "],\"predicted\":[";
+            for (std::size_t joint = 0; joint < coco_joint_count; ++joint) {
+                if (joint) out << ',';
+                out << (pose.joint_predicted[joint] ? "true" : "false");
             }
             out << "]}";
         }
