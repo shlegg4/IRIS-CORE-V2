@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import type {
   CameraStatus,
+  CameraRotation,
   CreateCameraRequest,
   DiscoveredCamera,
   RuntimeStatus
@@ -9,8 +10,7 @@ import type {
 
 const props = defineProps<{ status: RuntimeStatus }>()
 const api = window.api
-type Rotation = 'none' | 'cw90' | '180' | 'ccw90'
-type VideoFeed = { camera_id: number; path: string; rotation: Rotation }
+type VideoFeed = { camera_id: number; path: string; rotation: CameraRotation }
 type CameraDraft = {
   camera_id: number
   device_index: number | null
@@ -23,7 +23,7 @@ type CameraDraft = {
   sample_queue_capacity: number
   frame_pool_capacity: number
   overflow: string
-  rotation: Rotation
+  rotation: CameraRotation
   allow_format_fallback: boolean
   reconnect: boolean
 }
@@ -59,7 +59,7 @@ const discovered = ref<DiscoveredCamera[]>([])
 const addingKey = ref<string | null>(null)
 const rotationBusy = ref<string | null>(null)
 const rotationErrors = ref<Record<string, string>>({})
-const rotationSelections = ref<Record<string, Rotation>>({})
+const rotationSelections = ref<Record<string, CameraRotation>>({})
 const enabledLocally = ref<Record<string, number>>({})
 const sourcePanel = ref<'live' | 'video'>(props.status.input_mode === 'video' ? 'video' : 'live')
 const videoFeeds = ref<VideoFeed[]>([])
@@ -106,7 +106,7 @@ function fromCamera(camera: CameraStatus): CameraDraft {
     sample_queue_capacity: camera.sample_queue_capacity ?? 1,
     frame_pool_capacity: camera.frame_pool_capacity ?? 4,
     overflow: camera.overflow ?? 'drop-oldest',
-    rotation: (camera.rotation as Rotation) ?? 'none',
+    rotation: camera.rotation ?? 'none',
     allow_format_fallback: camera.allow_format_fallback ?? false,
     reconnect: camera.reconnect ?? true
   }
@@ -132,9 +132,9 @@ function cameraName(camera: CameraStatus): string {
   )?.name || camera.device_symbolic_link || `Device ${camera.device_index ?? '—'}`
 }
 
-function rotationFor(device: DiscoveredCamera): Rotation {
+function rotationFor(device: DiscoveredCamera): CameraRotation {
   const key = keyFor(device)
-  return rotationSelections.value[key] ?? (configuredCamera(device)?.rotation as Rotation) ?? 'none'
+  return rotationSelections.value[key] ?? configuredCamera(device)?.rotation ?? 'none'
 }
 
 function nextCameraId(): number {
@@ -264,9 +264,8 @@ async function enable(device: DiscoveredCamera): Promise<void> {
   }
 }
 
-async function setRotation(device: DiscoveredCamera, value: string): Promise<void> {
+async function setRotation(device: DiscoveredCamera, rotation: CameraRotation): Promise<void> {
   const key = keyFor(device)
-  const rotation = value as Rotation
   const previous = rotationFor(device)
   rotationSelections.value = { ...rotationSelections.value, [key]: rotation }
   rotationErrors.value = { ...rotationErrors.value, [key]: '' }
@@ -287,7 +286,10 @@ async function setRotation(device: DiscoveredCamera, value: string): Promise<voi
 }
 
 function rotationChanged(device: DiscoveredCamera, event: Event): void {
-  if (event.target instanceof HTMLSelectElement) void setRotation(device, event.target.value)
+  if (!(event.target instanceof HTMLSelectElement)) return
+  const value = event.target.value
+  if (value === 'none' || value === 'cw90' || value === '180' || value === 'ccw90')
+    void setRotation(device, value)
 }
 
 async function remove(camera: CameraStatus): Promise<void> {

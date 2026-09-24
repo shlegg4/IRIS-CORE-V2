@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import type { CalibrationSnapshot, MetricsSnapshot, RuntimeStatus } from '../types/iris'
+import type { CalibrationSnapshot, CreateCameraRequest, MetricsSnapshot, RuntimeStatus } from '../types/iris'
 import CameraManager from './CameraManager.vue'
 const props = defineProps<{ status: RuntimeStatus; metrics: MetricsSnapshot | null; logs: string[][] }>()
 const emit = defineEmits<{ (event: 'calibration-refresh', value: CalibrationSnapshot | null): void }>()
@@ -8,7 +8,7 @@ const api = window.api
 const busy = ref(''), message = ref('')
 const selectedCamera = ref<number | null>(null)
 const metricPrefix = ref('')
-const camera = ref({ camera_id: 1, device_index: 1, device_symbolic_link: '', width: 1920, height: 1080, frame_rate: 30, format: 'mjpeg', cuda_device: 0, sample_queue_capacity: 1, frame_pool_capacity: 4, overflow: 'drop-oldest', rotation: 'none', allow_format_fallback: false, reconnect: true })
+const camera = ref<CreateCameraRequest>({ camera_id: 1, device_index: 1, device_symbolic_link: '', width: 1920, height: 1080, frame_rate: 30, format: 'mjpeg', cuda_device: 0, sample_queue_capacity: 1, frame_pool_capacity: 4, overflow: 'drop-oldest', rotation: 'none', allow_format_fallback: false, reconnect: true })
 const pose = ref({ backend: 'off', model_path: '@assets/pear_ehm_libtorch.pt', engine_path: '@assets/rtmo_s.engine', calibration_path: '' })
 const recording = ref({ destination: 'recordings/iris-recording.mp4', bitrate: 8000000, frame_rate: 30 })
 const calibration = ref({ output_path: 'rig-calibration.json' })

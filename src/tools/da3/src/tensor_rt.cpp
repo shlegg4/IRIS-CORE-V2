@@ -47,6 +47,7 @@ nvinfer1::Dims MakeInputDims() {
 nvinfer1::Dims MakeBaseInputDims(const int num_views) {
     nvinfer1::Dims dims{};
     dims.nbDims = 5;
+    // Keep batch fixed and vary DA3's view axis: [1, num_views, C, H, W].
     dims.d[0] = kBatchSize;
     dims.d[1] = num_views;
     dims.d[2] = kNumChannels;

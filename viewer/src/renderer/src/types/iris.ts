@@ -32,6 +32,7 @@ export interface CalibrationSnapshot {
   source?: string
   cameras: CameraExtrinsic[]
 }
+export type CameraRotation = 'none' | 'cw90' | '180' | 'ccw90'
 export interface CameraStatus {
   camera_id: number
   connected?: boolean
@@ -53,7 +54,7 @@ export interface CameraStatus {
   sample_queue_capacity?: number
   frame_pool_capacity?: number
   overflow?: string
-  rotation?: string
+  rotation?: CameraRotation
   allow_format_fallback?: boolean
   reconnect: boolean
 }
@@ -73,7 +74,7 @@ export interface CameraCaptureSettings {
   sample_queue_capacity: number
   frame_pool_capacity: number
   overflow: string
-  rotation: string
+  rotation: CameraRotation
   allow_format_fallback: boolean
   reconnect: boolean
 }
@@ -84,7 +85,7 @@ export type UpdateCameraRequest = Partial<CameraCaptureSettings>
 export interface RuntimeStatus {
   state?: string
   input_mode?: 'live' | 'video' | string
-  video_inputs?: Array<{ camera_id: number; path: string; rotation?: 'none' | 'cw90' | '180' | 'ccw90' }>
+  video_inputs?: Array<{ camera_id: number; path: string; rotation?: CameraRotation }>
   video_decode_status?: VideoDecodeStatus[]
   video_cuda_device?: number
   video_frame_pool_capacity?: number

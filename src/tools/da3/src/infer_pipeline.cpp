@@ -299,8 +299,8 @@ void ValidateConfig(const InferenceConfig& config) {
     }
     if (config.model_type == "base") {
         const std::size_t n = config.image_paths.size();
-        if (n < 2 || n > 10) {
-            throw std::runtime_error("DA3 base model inference expects between 2 and 10 input images.");
+        if (n < 1 || n > 10) {
+            throw std::runtime_error("DA3 base model inference expects between 1 and 10 input images.");
         }
     }
     ResolveCameraIds(config.camera_ids);
@@ -881,6 +881,7 @@ InferenceResult RunPreparedInferenceBase(
              }},
             {"reconstruction",
              {
+                 {"cross_view_inference", true},
                  {"viewer_align", config.viewer_align},
                  {"alignment_mode",
                   !config.viewer_align ? "raw" :

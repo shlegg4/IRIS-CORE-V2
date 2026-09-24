@@ -53,11 +53,19 @@ bundle; `pose monocular` is rejected by this build. It still requires a compatib
 IRIS can use engines compiled for the target GPU. Keep the TensorRT SDK available on the machine
 that prepares the deployment, then:
 
-1. The engine builder requires the RTMO candidate ONNX and the DA3 four-view, 504x504 ONNX graph
-   plus its `.onnx.data` sidecar. If these files are missing, it downloads them from the private
-   `shlegg4/iris-models` Hub repository. Run `hf auth login` first. Source checkpoints and model
-   provenance are documented in `models/source/README.md`; exporting the DA3 graph remains an
-   external step.
+1. The engine builder requires the RTMO candidate ONNX and a DA3-base ONNX graph with input
+   `[1, dynamic_views, 3, 504, 504]`, plus its `.onnx.data` sidecar. Export DA3 from the
+   local checkpoint first:
+
+   ```powershell
+   python tools/deployment/export_da3_onnx.py
+   ```
+
+   The Python environment needs the official `depth-anything-3` package, PyTorch, and `onnx`.
+   The exporter writes `models/source/da3-base/da3-base-mv4-504.onnx` and validates the dynamic
+   dynamic view / fixed batch input dimensions. The model files can be downloaded from the private
+   `shlegg4/iris-models` Hub repository if needed; run `hf auth login` first. Source checkpoint
+   provenance is documented in `models/source/README.md`.
 2. Build and cache both engines for the current GPU and TensorRT version by running the VS Code
    task `IRIS: build TensorRT engines`, or directly:
 
@@ -76,8 +84,9 @@ smoke-runs each built engine under `models/cache/<GPU>_sm<capability>_TensorRT<v
 updates `models/cache/current.txt`; CMake copies the selected cached engines into the app's
 `assets` directory. The TensorRT builder SDK is required during generation; the final app folder
 uses only TensorRT inference runtime DLLs.
-RTMO uses a fixed three-image profile; DA3 uses four 504x504 views for rig calibration. Engine
-generation on a new host takes several minutes and requires enough GPU memory for the DA3 build.
+RTMO uses a dynamic one-to-ten image profile. DA3 uses a dynamic one-to-ten view profile with batch
+fixed at one, so views participate together in multiview inference. Engine generation on a new host
+takes several minutes and requires enough GPU memory for the DA3 build.
 
 ## Diagnostics
 

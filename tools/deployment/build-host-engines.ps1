@@ -49,6 +49,15 @@ foreach ($requiredModelFile in $modelFiles) {
     }
 }
 
+$python = Get-Command "python.exe" -ErrorAction SilentlyContinue
+if (-not $python) { $python = Get-Command "python" -ErrorAction SilentlyContinue }
+if (-not $python) { throw "Python is required to validate the DA3 ONNX graph." }
+$da3Exporter = Join-Path $repoRoot "tools\deployment\export_da3_onnx.py"
+& $python.Source $da3Exporter --validate-only --output $da3Onnx --resolution 504
+if ($LASTEXITCODE -ne 0) {
+    throw "DA3 ONNX is not the dynamic-view graph. Run 'python tools/deployment/export_da3_onnx.py' in the DA3 Python environment, then rebuild engines."
+}
+
 $gpuOutput = & $nvidiaSmi.Source "--query-gpu=name,compute_cap" "--format=csv,noheader" "-i" $Device
 $gpuExitCode = $LASTEXITCODE
 $gpu = $gpuOutput | Select-Object -First 1
@@ -77,6 +86,9 @@ $da3Hash = (Get-FileHash -LiteralPath $da3Onnx -Algorithm SHA256).Hash.ToLowerIn
 $rtmoMinBatch = 1
 $rtmoOptBatch = 3
 $rtmoMaxBatch = 10
+$da3MinViews = 1
+$da3OptViews = 4
+$da3MaxViews = 10
 $safeGpu = $gpuName -replace "[^A-Za-z0-9._-]", "_"
 $cacheName = "${safeGpu}_sm${computeCapability}_$($trtVersion.Replace(' ',''))"
 $cacheRoot = Join-Path $cacheBase $cacheName
@@ -152,6 +164,9 @@ if ($commonCacheValid -and -not $Force) {
     }
     if ($metadata.da3 -and
         $metadata.da3.onnx_sha256 -eq $da3Hash -and
+        $metadata.da3.min_views -eq $da3MinViews -and
+        $metadata.da3.opt_views -eq $da3OptViews -and
+        $metadata.da3.max_views -eq $da3MaxViews -and
         (Test-Path -LiteralPath $da3Engine)) {
         $da3CacheValid = $metadata.da3.engine_sha256 -eq (Get-FileHash -LiteralPath $da3Engine -Algorithm SHA256).Hash.ToLowerInvariant()
     }
@@ -178,7 +193,11 @@ $builds = @(
         Engine = $da3Engine
         CacheValid = $da3CacheValid
         CacheState = if ($da3CacheValid) { $metadata.da3 } else { $null }
-        Shapes = @("--minShapes=images:1x4x3x504x504", "--optShapes=images:1x4x3x504x504", "--maxShapes=images:1x4x3x504x504")
+        Shapes = @(
+            "--minShapes=images:1x${da3MinViews}x3x504x504",
+            "--optShapes=images:1x${da3OptViews}x3x504x504",
+            "--maxShapes=images:1x${da3MaxViews}x3x504x504"
+        )
     }
 )
 
@@ -268,6 +287,10 @@ foreach ($build in $builds) {
         $state.min_batch = $rtmoMinBatch
         $state.opt_batch = $rtmoOptBatch
         $state.max_batch = $rtmoMaxBatch
+    } elseif ($build.Name -eq "da3_base") {
+        $state.min_views = $da3MinViews
+        $state.opt_views = $da3OptViews
+        $state.max_views = $da3MaxViews
     }
     $build.CacheState = $state
     $buildResult.status = "built"
