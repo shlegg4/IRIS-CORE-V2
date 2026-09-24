@@ -18,6 +18,7 @@ struct TensorRtMultiviewResult {
         double association_stream_ms{}, gather_stream_ms{}, triangulation_stream_ms{};
         double association_host_ms{}, triangulation_host_ms{};
         double output_copy_stream_ms{}, download_stream_ms{};
+        bool cuda_graph_active{};
     } timings;
     // Raw detector tensors are retained for camera-local 2-D output. Selected
     // observations remain the input to epipolar triangulation only.

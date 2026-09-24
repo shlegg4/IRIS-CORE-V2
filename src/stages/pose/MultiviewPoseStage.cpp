@@ -364,7 +364,8 @@ class MultiviewPoseStage::Impl {
         : config_(std::move(config)), metrics_enabled_(metrics != nullptr), process_ms_(metrics ? metrics->histogram("iris_pose_process_ms", {1, 2, 5, 10, 20, 50, 100, 250, 500, 1000}) : infrastructure::metrics::Histogram{}),
           capture_to_result_ms_(metrics ? metrics->histogram("iris_pose_capture_to_result_ms", {5, 10, 20, 50, 100, 250, 500, 1000, 2000, 5000}) : infrastructure::metrics::Histogram{}),
           last_capture_to_result_ms_(metrics ? metrics->gauge("iris_pose_last_capture_to_result_ms") : infrastructure::metrics::Gauge{}),
-          last_process_ms_(metrics ? metrics->gauge("iris_pose_last_process_ms") : infrastructure::metrics::Gauge{}) {
+          last_process_ms_(metrics ? metrics->gauge("iris_pose_last_process_ms") : infrastructure::metrics::Gauge{}),
+          cuda_graph_active_(metrics ? metrics->gauge("iris_pose_cuda_graph_active") : infrastructure::metrics::Gauge{}) {
         if (metrics) {
             const std::array<const char*, 18> names{
                 "frame_ready_wait", "preprocess_host", "trt_setup_host", "trt_enqueue_host",
@@ -444,6 +445,7 @@ class MultiviewPoseStage::Impl {
         TensorRtMultiviewResult result;
         const auto engine_start = std::chrono::steady_clock::now();
         engine_->infer(buffers, strides, widths, heights, result);
+        cuda_graph_active_.set(result.timings.cuda_graph_active ? 1.0 : 0.0);
         const auto postprocess_start = std::chrono::steady_clock::now();
 
         const auto geometry_start = std::chrono::steady_clock::now();
@@ -633,6 +635,7 @@ class MultiviewPoseStage::Impl {
     infrastructure::metrics::Histogram process_ms_, capture_to_result_ms_;
     infrastructure::metrics::Gauge last_capture_to_result_ms_;
     infrastructure::metrics::Gauge last_process_ms_;
+    infrastructure::metrics::Gauge cuda_graph_active_;
     std::array<infrastructure::metrics::Histogram,18> breakdown_;
     std::array<infrastructure::metrics::Gauge,18> latest_;
 };
