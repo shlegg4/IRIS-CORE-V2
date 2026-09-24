@@ -42,6 +42,11 @@ class MediaFoundationSource {
     Microsoft::WRL::ComPtr<IMFSourceReaderCallback> callback_;
     std::mutex queue_mutex_;
     std::condition_variable queue_cv_;
+    // Media Foundation may invoke the async callback while CaptureStage is
+    // stopping and replacing a camera. Keep the owner and COM interfaces
+    // alive until every callback has left the object.
+    std::condition_variable callback_cv_;
+    std::size_t callbacks_inflight_{};
     std::deque<CaptureSample> queue_;
     HRESULT async_error_{S_OK};
     bool closing_{};

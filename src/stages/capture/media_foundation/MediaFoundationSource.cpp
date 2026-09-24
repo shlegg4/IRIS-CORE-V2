@@ -67,10 +67,26 @@ class SourceReaderCallback final : public IMFSourceReaderCallback {
     }
     STDMETHODIMP OnReadSample(HRESULT status, DWORD, DWORD flags, LONGLONG timestamp,
                               IMFSample* sample) override {
+        {
+            std::scoped_lock lock(owner_->queue_mutex_);
+            if (owner_->closing_) return S_OK;
+            ++owner_->callbacks_inflight_;
+        }
+        struct CallbackGuard {
+            MediaFoundationSource* owner;
+            ~CallbackGuard() {
+                std::scoped_lock lock(owner->queue_mutex_);
+                if (--owner->callbacks_inflight_ == 0) owner->callback_cv_.notify_all();
+            }
+        } guard{owner_};
         owner_->on_sample(status, flags, timestamp, sample);
-        std::scoped_lock lock(owner_->queue_mutex_);
-        if (!owner_->closing_ && owner_->reader_) {
-            owner_->reader_->ReadSample(kVideoStream, 0, nullptr, nullptr, nullptr, nullptr);
+        Microsoft::WRL::ComPtr<IMFSourceReader> reader;
+        {
+            std::scoped_lock lock(owner_->queue_mutex_);
+            if (!owner_->closing_) reader = owner_->reader_;
+        }
+        if (reader) {
+            reader->ReadSample(kVideoStream, 0, nullptr, nullptr, nullptr, nullptr);
         }
         return S_OK;
     }
@@ -275,20 +291,27 @@ void MediaFoundationSource::on_sample(HRESULT status, DWORD flags, LONGLONG ts, 
     queue_cv_.notify_one();
 }
 void MediaFoundationSource::close() {
+    Microsoft::WRL::ComPtr<IMFSourceReader> reader;
+    Microsoft::WRL::ComPtr<IMFMediaSource> source;
     {
         std::scoped_lock lock(queue_mutex_);
         closing_ = true;
+        reader = reader_;
     }
     queue_cv_.notify_all();
-    if (reader_) {
-        reader_->Flush(kVideoStream);
+    if (reader) {
+        reader->Flush(kVideoStream);
     }
-    reader_.Reset();
-    callback_.Reset();
-    if (source_) {
-        source_->Shutdown();
+    {
+        std::unique_lock lock(queue_mutex_);
+        callback_cv_.wait(lock, [this] { return callbacks_inflight_ == 0; });
+        reader_.Reset();
+        callback_.Reset();
+        source = std::move(source_);
     }
-    source_.Reset();
+    if (source) {
+        source->Shutdown();
+    }
     sequence_ = 0;
 }
 } // namespace iris::capture
