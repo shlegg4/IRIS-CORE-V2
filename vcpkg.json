@@ -7,6 +7,7 @@
     "boost-asio",
     "boost-beast",
     "eigen3",
+    "nlohmann-json",
     {
       "name": "opencv4",
       "default-features": false

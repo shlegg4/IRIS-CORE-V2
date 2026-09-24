@@ -156,6 +156,8 @@ class MultiviewPoseStage::Impl {
         auto& pose = poses.emplace_back();
         for (std::size_t view = 0; view < view_count; ++view)
             pose.view_camera_ids[view] = config_.multiview_calibration[view].camera_id;
+        for (std::size_t view = 0; view < view_count; ++view)
+            pose.selected_detection_indices[view] = selected[view];
         for (std::size_t joint = 0; joint < 17; ++joint) {
             for (std::size_t view = 0; view < view_count; ++view) {
                 if (selected[view] < 0) continue;

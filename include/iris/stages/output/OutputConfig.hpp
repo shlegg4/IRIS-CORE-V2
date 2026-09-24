@@ -59,6 +59,8 @@ struct OutputConfig {
     DiskOutputConfig disk;
     std::size_t shared_memory_queue_capacity{2};
     std::size_t camera_count{1};
+    // One JSON object per processed packet. Empty disables pose export.
+    std::filesystem::path pose_output_path;
 };
 
 } // namespace iris

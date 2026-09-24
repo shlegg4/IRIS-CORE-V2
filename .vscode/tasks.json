@@ -2,6 +2,23 @@
   "version": "2.0.0",
   "tasks": [
     {
+      "label": "IRIS: build TensorRT engines",
+      "type": "process",
+      "command": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/tools/deployment/build-host-engines.ps1",
+        "-TensorRtRoot",
+        "C:/TensorRT-10.10.0.31",
+        "-CacheRoot",
+        "${workspaceFolder}/models/cache"
+      ],
+      "problemMatcher": []
+    },
+    {
       "label": "IRIS: install dependencies",
       "type": "shell",
       "command": "call \"C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\Common7\\Tools\\VsDevCmd.bat\" -arch=x64 && set VCPKG_ROOT=C:\\vcpkg && C:\\vcpkg\\vcpkg.exe install --triplet x64-windows --overlay-triplets vcpkg-triplets --x-manifest-root . --x-install-root vcpkg_installed",

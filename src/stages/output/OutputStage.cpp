@@ -6,9 +6,12 @@
 #include <cuda_runtime_api.h>
 
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <future>
+#include <fstream>
+#include <filesystem>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -16,6 +19,7 @@
 #include <utility>
 #include <variant>
 #include <vector>
+#include <nlohmann/json.hpp>
 
 #ifdef _WIN32
 #include <Windows.h>
@@ -26,6 +30,68 @@ namespace {
 
 using infrastructure::metrics::MetricRegistry;
 using PacketPtr = std::shared_ptr<const Packet>;
+using Json = nlohmann::json;
+
+Json finite_number(float value) {
+    return std::isfinite(value) ? Json(value) : Json(nullptr);
+}
+
+Json pose_export_record(const Packet& packet) {
+    Json record;
+    record["batch_sequence"] = packet.sequence;
+    record["frames"] = Json::array();
+    for (const auto& frame : packet.frames) {
+        record["frames"].push_back({{"camera_id", frame.camera},
+                                     {"frame_sequence", frame.sequence},
+                                     {"source_time_ns", frame.timing.source_time.count()},
+                                     {"width", frame.extent.width},
+                                     {"height", frame.extent.height}});
+    }
+    record["detections_2d"] = Json::array();
+    if (packet.view_poses_2d) {
+        for (const auto& pose : *packet.view_poses_2d) {
+            Json points = Json::array();
+            for (std::size_t joint = 0; joint < pose.points_px.size(); ++joint) {
+                points.push_back({{"x", finite_number(pose.points_px[joint][0])},
+                                  {"y", finite_number(pose.points_px[joint][1])},
+                                  {"score", finite_number(pose.scores[joint])},
+                                  {"valid", pose.valid[joint]}});
+            }
+            record["detections_2d"].push_back({{"camera_id", pose.camera_id},
+                                               {"detection_index", pose.person_id},
+                                               {"joints", std::move(points)}});
+        }
+    }
+    record["persons_3d"] = Json::array();
+    if (packet.multiview_poses) {
+        for (const auto& pose : *packet.multiview_poses) {
+            Json joints = Json::array();
+            for (std::size_t joint = 0; joint < pose.joints_3d.size(); ++joint) {
+                joints.push_back({{"x", finite_number(pose.joints_3d[joint][0])},
+                                  {"y", finite_number(pose.joints_3d[joint][1])},
+                                  {"z", finite_number(pose.joints_3d[joint][2])},
+                                  {"valid", pose.joint_valid[joint]}});
+            }
+            Json views = Json::array();
+            for (const auto camera_id : pose.view_camera_ids) views.push_back(camera_id);
+            Json selected = Json::array();
+            for (const auto detection_index : pose.selected_detection_indices)
+                selected.push_back(detection_index);
+            Json scores_by_view = Json::array();
+            for (const auto& view_scores : pose.joint_scores) {
+                Json scores = Json::array();
+                for (const auto score : view_scores) scores.push_back(finite_number(score));
+                scores_by_view.push_back(std::move(scores));
+            }
+            record["persons_3d"].push_back({{"active", pose.active},
+                                            {"camera_ids", std::move(views)},
+                                            {"selected_detection_indices", std::move(selected)},
+                                            {"joints", std::move(joints)},
+                                            {"scores_by_view", std::move(scores_by_view)}});
+        }
+    }
+    return record;
+}
 
 std::filesystem::path camera_recording_path(const std::filesystem::path& destination,
                                             CameraId camera) {
@@ -221,6 +287,16 @@ class OutputStage::Impl {
         if (running_.exchange(true)) {
             return;
         }
+        if (!config_.pose_output_path.empty()) {
+            const auto parent = config_.pose_output_path.parent_path();
+            if (!parent.empty()) std::filesystem::create_directories(parent);
+            pose_output_.open(config_.pose_output_path, std::ios::out | std::ios::trunc);
+            if (!pose_output_) {
+                running_.store(false);
+                throw std::runtime_error("could not open pose output file: " +
+                                         config_.pose_output_path.string());
+            }
+        }
         if (config_.shared_memory.enabled) {
             const auto result = configure_shared_memory(config_.shared_memory);
             if (!result) {
@@ -239,6 +315,10 @@ class OutputStage::Impl {
         }
         if (coordinator_.joinable()) {
             coordinator_.join();
+        }
+        if (pose_output_.is_open()) {
+            pose_output_.flush();
+            pose_output_.close();
         }
         preview_.stop();
         shm_queue_.close();
@@ -332,6 +412,10 @@ class OutputStage::Impl {
 
     std::size_t processed_count() const noexcept { return processed_count_.load(); }
     PreviewTransportHealth preview_health() const { return preview_.shared_memory_health(); }
+    std::string failure() const {
+        std::scoped_lock lock(pose_output_mutex_);
+        return pose_output_error_;
+    }
 
   private:
     void run_coordinator() {
@@ -339,6 +423,17 @@ class OutputStage::Impl {
             metrics_.packets_received.increment();
             auto retained = std::make_shared<Packet>(std::move(*packet));
             ++processed_count_;
+            if (pose_output_.is_open()) {
+                try {
+                    const auto record = pose_export_record(*retained);
+                    pose_output_ << record.dump() << '\n';
+                    if (!pose_output_) throw std::runtime_error("failed writing pose output");
+                } catch (const std::exception& error) {
+                    std::scoped_lock lock(pose_output_mutex_);
+                    if (pose_output_error_.empty()) pose_output_error_ = error.what();
+                    pose_output_.setstate(std::ios::badbit);
+                }
+            }
             {
                 if (snapshots_) snapshots_->publish(retained);
                 preview_.publish(retained);
@@ -466,6 +561,9 @@ class OutputStage::Impl {
     std::thread disk_worker_;
     std::mutex disk_submit_mutex_;
     std::mutex shm_config_mutex_;
+    std::ofstream pose_output_;
+    mutable std::mutex pose_output_mutex_;
+    std::string pose_output_error_;
 #ifdef _WIN32
     std::unique_ptr<SharedMapping> shm_mapping_;
 #endif
@@ -494,6 +592,7 @@ OutputCommandResult OutputStage::configure_disk(DiskOutputConfig config) {
 OutputCommandResult OutputStage::start_recording() { return impl_->start_recording(); }
 
 OutputCommandResult OutputStage::stop_recording() { return impl_->stop_recording(); }
+std::string OutputStage::failure() const { return impl_->failure(); }
 
 std::size_t OutputStage::processed_count() const noexcept { return impl_->processed_count(); }
 PreviewTransportHealth OutputStage::preview_health() const { return impl_->preview_health(); }

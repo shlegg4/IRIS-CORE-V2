@@ -37,6 +37,43 @@ cmake --build --preset default
 ctest --preset unit
 ```
 
+For a hosted RTMO 2-D / multiview deployment, use the lean Release preset:
+
+```powershell
+cmake --preset hosted
+cmake --build --preset hosted
+```
+
+This preset disables LibTorch/PEAR monocular inference, tests, and diagnostic tools while retaining
+the TensorRT engines and runtime. The resulting `build/hosted/bin` directory is the deployment
+bundle; `pose monocular` is rejected by this build. It still requires a compatible NVIDIA driver.
+
+### Per-host TensorRT engines
+
+IRIS can use engines compiled for the target GPU. Keep the TensorRT SDK available on the machine
+that prepares the deployment, then:
+
+1. Stage the source checkpoints and ONNX graphs under `models/source/` as documented in
+   `models/source/README.md`. The DA3 graph must use the fixed four-view, 504x504 calibration
+   contract. The ONNX export step is performed externally; this repository consumes the staged
+   graph and its `.onnx.data` file.
+2. Build and cache both engines for the current GPU and TensorRT version by running the VS Code
+   task `IRIS: build TensorRT engines`, or directly:
+
+   ```powershell
+   ./tools/deployment/build-host-engines.ps1 `
+     -TensorRtRoot C:/TensorRT-10.10.0.31 `
+     -CacheRoot models/cache
+   ```
+
+The helper keys its cache by GPU, compute capability, TensorRT version, and both ONNX hashes. It
+smoke-runs each built engine under `models/cache/<GPU>_sm<capability>_TensorRT<version>/` and
+updates `models/cache/current.txt`; CMake copies the selected cached engines into the app's
+`assets` directory. The TensorRT builder SDK is required during generation; the final app folder
+uses only TensorRT inference runtime DLLs.
+RTMO uses a fixed three-image profile; DA3 uses four 504x504 views for rig calibration. Engine
+generation on a new host takes several minutes and requires enough GPU memory for the DA3 build.
+
 ## Diagnostics
 
 Ensure the selected CUDA Toolkit `bin` directory is on `PATH`, then run:
@@ -98,6 +135,11 @@ Add `--rotation <camera-id> <none|cw90|180|ccw90>` to either video CLI form to r
 feed; the viewer also provides a rotation selector for each video feed.
 Use `--loop true` to restart all files together after they reach EOF. The viewer exposes the same
 option under Video processing options.
+
+For unattended inference runs, direct `--video` startup accepts `--engine`, `--calibration`, and
+`--output-dir`; it runs multiview pose to EOF and writes `poses.jsonl` plus `run_summary.json`.
+The CMU Panoptic runner converts the native calibration file and evaluates predictions against the
+sequence ground truth. See [docs/panoptic-evaluation.md](docs/panoptic-evaluation.md).
 
 Runtime metrics are periodically written to `iris_metrics.json`. Detailed design and validation notes are under `docs/`.
 They are also exposed in Prometheus format at `http://127.0.0.1:9464/metrics`. A provisioned

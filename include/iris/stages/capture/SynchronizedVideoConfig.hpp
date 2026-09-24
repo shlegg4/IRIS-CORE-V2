@@ -28,6 +28,8 @@ struct SynchronizedVideoConfig {
     std::size_t frame_pool_capacity{8};
     bool realtime{};
     bool loop{};
+    // Optional lossless pose export used by unattended offline runs.
+    std::filesystem::path pose_output_path;
 };
 
 } // namespace iris

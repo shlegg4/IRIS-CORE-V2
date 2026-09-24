@@ -377,14 +377,16 @@ class Runtime::Impl {
         {
             std::scoped_lock lock(state_mutex_);
             state_ = RuntimeState::Starting;
+            pipeline_start_completed_ = false;
+            pipeline_start_succeeded_ = false;
             recording_ = false;
             last_error_.clear();
         }
         pipeline_thread_ = std::thread(&Impl::pipeline_loop, this);
         {
             std::unique_lock lock(state_mutex_);
-            state_changed_.wait(lock, [this] { return state_ != RuntimeState::Starting; });
-            if (state_ == RuntimeState::Running) {
+            state_changed_.wait(lock, [this] { return pipeline_start_completed_; });
+            if (pipeline_start_succeeded_) {
                 return {RuntimeCommandStatus::Applied, "pipeline started", snapshot_unlocked()};
             }
             return {RuntimeCommandStatus::Failed,
@@ -402,9 +404,14 @@ class Runtime::Impl {
     RuntimeCommandResponse handle(const ConfigurePoseCommand& command) {
         const bool was_running = pipeline_running();
         PoseConfig requested;
-        if (command.backend == ConfigurePoseCommand::Backend::Monocular)
+        if (command.backend == ConfigurePoseCommand::Backend::Monocular) {
+#ifdef IRIS_HAS_TORCH
             requested.model_path = resolve_pose_asset(command.model_path);
-        else if (command.backend == ConfigurePoseCommand::Backend::TwoDimensional) {
+#else
+            return {RuntimeCommandStatus::Rejected,
+                    "PEAR HMR monocular inference is disabled in this build", snapshot()};
+#endif
+        } else if (command.backend == ConfigurePoseCommand::Backend::TwoDimensional) {
             requested.multiview_engine_path = resolve_pose_asset(command.engine_path);
             requested.two_d_only = true;
         }
@@ -757,6 +764,8 @@ class Runtime::Impl {
             pipeline_->start();
             {
                 std::scoped_lock lock(state_mutex_);
+                pipeline_start_completed_ = true;
+                pipeline_start_succeeded_ = true;
                 state_ = RuntimeState::Running;
             }
             state_changed_.notify_all();
@@ -772,6 +781,10 @@ class Runtime::Impl {
             pipeline_->stop();
             {
                 std::scoped_lock lock(state_mutex_);
+                if (!pipeline_start_completed_) {
+                    pipeline_start_completed_ = true;
+                    pipeline_start_succeeded_ = false;
+                }
                 state_ = RuntimeState::Failed;
                 recording_ = false;
                 last_error_ = error.what();
@@ -781,39 +794,43 @@ class Runtime::Impl {
     }
 
     bool stop_pipeline() {
+        bool should_stop{};
         {
             std::scoped_lock lock(state_mutex_);
-            if (state_ != RuntimeState::Running && state_ != RuntimeState::Starting &&
-                state_ != RuntimeState::Failed) {
+            should_stop = state_ == RuntimeState::Running || state_ == RuntimeState::Starting ||
+                          state_ == RuntimeState::Failed;
+            if (!should_stop && !pipeline_thread_.joinable()) {
                 return false;
             }
-            state_ = RuntimeState::Stopping;
+            if (should_stop) state_ = RuntimeState::Stopping;
         }
-        rig_tool_->cancel();
-        bool was_recording = false;
-        {
-            std::scoped_lock lock(state_mutex_);
-            was_recording = recording_;
-        }
-        if (was_recording && pipeline_) {
-            auto finalized = pipeline_->stop_recording();
-            if (!finalized) {
+        if (should_stop) {
+            rig_tool_->cancel();
+            bool was_recording = false;
+            {
                 std::scoped_lock lock(state_mutex_);
-                last_error_ = finalized.message;
+                was_recording = recording_;
             }
-        }
-        if (pipeline_) {
-            pipeline_->stop_producing();
+            if (was_recording && pipeline_) {
+                auto finalized = pipeline_->stop_recording();
+                if (!finalized) {
+                    std::scoped_lock lock(state_mutex_);
+                    last_error_ = finalized.message;
+                }
+            }
+            if (pipeline_) {
+                pipeline_->stop_producing();
+            }
         }
         if (pipeline_thread_.joinable()) {
             pipeline_thread_.join();
         }
-        {
+        if (should_stop) {
             std::scoped_lock lock(state_mutex_);
             state_ = RuntimeState::Stopped;
             recording_ = false;
         }
-        return true;
+        return should_stop;
     }
 
     bool pipeline_running() const {
@@ -877,6 +894,8 @@ class Runtime::Impl {
     mutable std::mutex state_mutex_;
     std::condition_variable state_changed_;
     RuntimeState state_{RuntimeState::Stopped};
+    bool pipeline_start_completed_{};
+    bool pipeline_start_succeeded_{};
     bool recording_{};
     std::string last_error_;
     PoseConfig pose_config_;

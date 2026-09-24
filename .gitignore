@@ -13,3 +13,9 @@ capture-*.json
 *.pt
 *.trt
 *.engine
+models/source/**/*.pth
+models/source/**/*.safetensors
+models/source/**/*.onnx
+models/source/**/*.onnx.data
+models/cache/
+__pycache__/

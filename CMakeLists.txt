@@ -8,6 +8,7 @@ option(IRIS_BUILD_TESTS "Build IRIS tests" ON)
 option(IRIS_BUILD_TOOLS "Build IRIS diagnostic tools" ON)
 option(IRIS_BUILD_HARDWARE_TESTS "Build tests requiring a camera and CUDA GPU" OFF)
 option(IRIS_ENABLE_TENSORRT "Enable TensorRT multiview inference" ON)
+option(IRIS_ENABLE_TORCH "Enable LibTorch PEAR monocular inference" ON)
 option(IRIS_ENABLE_H264_PREVIEW "Enable FFmpeg NVENC H.264 preview transport" ON)
 set(IRIS_TENSORRT_ROOT "" CACHE PATH "TensorRT SDK root")
 set(IRIS_VCPKG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/vcpkg_installed/x64-windows"
@@ -15,11 +16,16 @@ set(IRIS_VCPKG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/vcpkg_installed/x64-windows"
 set(IRIS_FFMPEG_ROOT "${IRIS_VCPKG_ROOT}"
     CACHE PATH "FFmpeg x64-windows package root")
 set(IRIS_TORCH_ROOT "C:/libtorch" CACHE PATH "LibTorch installation root")
+set(IRIS_TENSORRT_ENGINE_CACHE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/models/cache"
+    CACHE PATH "Root directory for per-host TensorRT engine caches")
 find_package(CUDAToolkit REQUIRED)
 list(PREPEND CMAKE_PREFIX_PATH "${IRIS_TORCH_ROOT}" "${IRIS_VCPKG_ROOT}" "${IRIS_FFMPEG_ROOT}")
 find_package(Boost CONFIG REQUIRED COMPONENTS system)
-find_package(Torch REQUIRED)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
+find_package(nlohmann_json CONFIG REQUIRED)
+if(IRIS_ENABLE_TORCH)
+  find_package(Torch REQUIRED)
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
+endif()
 
 if(IRIS_ENABLE_TENSORRT AND IRIS_TENSORRT_ROOT)
   find_path(IRIS_TENSORRT_INCLUDE NvInfer.h PATHS "${IRIS_TENSORRT_ROOT}/include" NO_DEFAULT_PATH)
@@ -61,7 +67,7 @@ add_library(iris
   src/stages/capture/media_foundation/MediaFoundationSource.cpp
   src/stages/capture/decoding/GpuDecoder.cpp src/stages/capture/decoding/Yuy2CudaConverter.cu
   src/stages/capture/decoding/BgrRotate.cu src/stages/pose/MultiviewPreprocess.cu src/stages/pose/MultiviewCudaPostprocess.cu
-  src/stages/pose/PoseStage.cpp src/stages/pose/MultiviewPoseStage.cpp src/stages/pose/TensorRtMultiviewEngine.cpp src/stages/output/OutputStage.cpp src/stages/output/SnapshotBatchSource.cpp src/stages/output/PreviewSink.cpp
+  src/stages/pose/MultiviewPoseStage.cpp src/stages/pose/TensorRtMultiviewEngine.cpp src/stages/output/OutputStage.cpp src/stages/output/SnapshotBatchSource.cpp src/stages/output/PreviewSink.cpp
   src/stages/output/PreviewHttpServer.cpp
   src/stages/output/H264PreviewProtocol.cpp
   src/stages/output/H264Transport.cpp
@@ -72,6 +78,13 @@ target_compile_features(iris PUBLIC cxx_std_20)
 target_compile_definitions(iris PRIVATE IRIS_BUILD_ASSET_DIRECTORY="${IRIS_BUILD_ASSET_DIRECTORY}")
 set_target_properties(iris PROPERTIES CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED YES)
 target_include_directories(iris PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include> PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src "${IRIS_VCPKG_ROOT}/include")
+if(IRIS_ENABLE_TORCH)
+  target_sources(iris PRIVATE src/stages/pose/PoseStage.cpp)
+  target_link_libraries(iris PRIVATE "${TORCH_LIBRARIES}")
+  target_compile_definitions(iris PRIVATE IRIS_HAS_TORCH=1)
+else()
+  target_sources(iris PRIVATE src/stages/pose/PoseStageNoTorch.cpp)
+endif()
 if(IRIS_ENABLE_H264_PREVIEW)
   target_compile_definitions(iris PRIVATE IRIS_HAS_H264_PREVIEW=1)
 endif()
@@ -84,7 +97,6 @@ if(IRIS_HAS_TENSORRT)
 endif()
 target_link_libraries(iris PUBLIC CUDA::cudart PRIVATE CUDA::nvjpeg FFmpeg::avformat
   FFmpeg::avcodec FFmpeg::avutil CUDA::cuda_driver Boost::system)
-target_link_libraries(iris PRIVATE "${TORCH_LIBRARIES}")
 if(WIN32)
   target_compile_definitions(iris PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
   target_link_libraries(iris PRIVATE mf mfplat mfreadwrite mfuuid ole32 strmiids ws2_32)
@@ -93,27 +105,73 @@ if(MSVC)
   target_compile_options(iris PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/W4 /permissive->)
 endif()
 add_executable(iris_app src/main.cpp)
-target_link_libraries(iris_app PRIVATE iris::iris)
+target_link_libraries(iris_app PRIVATE iris::iris nlohmann_json::nlohmann_json)
 
-add_custom_command(TARGET iris_app POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:iris_app>/assets"
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different
-    "${CMAKE_CURRENT_SOURCE_DIR}/pear_ehm_libtorch.pt"
-    "$<TARGET_FILE_DIR:iris_app>/assets/pear_ehm_libtorch.pt"
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different
-    "${CMAKE_CURRENT_SOURCE_DIR}/rtmo_s.engine"
-    "$<TARGET_FILE_DIR:iris_app>/assets/rtmo_s.engine"
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different
-    "${CMAKE_CURRENT_SOURCE_DIR}/da3_base.trt"
-    "$<TARGET_FILE_DIR:iris_app>/assets/da3_base.trt"
-  COMMENT "Provisioning IRIS pose assets")
+if(IRIS_ENABLE_TORCH OR IRIS_HAS_TENSORRT)
+  add_custom_command(TARGET iris_app POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:iris_app>/assets"
+    COMMENT "Preparing IRIS pose assets directory")
+endif()
+if(IRIS_ENABLE_TORCH)
+  add_custom_command(TARGET iris_app POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${CMAKE_CURRENT_SOURCE_DIR}/pear_ehm_libtorch.pt"
+      "$<TARGET_FILE_DIR:iris_app>/assets/pear_ehm_libtorch.pt"
+    COMMENT "Provisioning PEAR HMR model")
+endif()
+if(IRIS_HAS_TENSORRT)
+  set(_iris_tensorrt_engine_cache "${IRIS_TENSORRT_ENGINE_CACHE_ROOT}")
+  set(_iris_tensorrt_cache_pointer "${IRIS_TENSORRT_ENGINE_CACHE_ROOT}/current.txt")
+  if(EXISTS "${_iris_tensorrt_cache_pointer}")
+    file(STRINGS "${_iris_tensorrt_cache_pointer}" _iris_tensorrt_cache_key LIMIT_COUNT 1)
+    if(NOT _iris_tensorrt_cache_key MATCHES "^[A-Za-z0-9][A-Za-z0-9._-]*$")
+      message(FATAL_ERROR "Invalid TensorRT engine cache key in ${_iris_tensorrt_cache_pointer}")
+    endif()
+    set(_iris_tensorrt_engine_cache
+        "${IRIS_TENSORRT_ENGINE_CACHE_ROOT}/${_iris_tensorrt_cache_key}")
+  endif()
+  foreach(_engine rtmo_s.engine da3_base.trt)
+    if(NOT EXISTS "${_iris_tensorrt_engine_cache}/${_engine}")
+      message(FATAL_ERROR
+        "TensorRT engine missing: ${_iris_tensorrt_engine_cache}/${_engine}. "
+        "Run the VS Code task 'IRIS: build TensorRT engines'.")
+    endif()
+  endforeach()
+  add_custom_command(TARGET iris_app POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${_iris_tensorrt_engine_cache}/rtmo_s.engine"
+      "$<TARGET_FILE_DIR:iris_app>/assets/rtmo_s.engine"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${_iris_tensorrt_engine_cache}/da3_base.trt"
+      "$<TARGET_FILE_DIR:iris_app>/assets/da3_base.trt"
+    COMMENT "Copying cached TensorRT engines")
+endif()
 
-add_custom_command(TARGET iris_app POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E copy_directory
-    "${IRIS_FFMPEG_ROOT}/$<IF:$<CONFIG:Debug>,debug/bin,bin>"
-    "$<TARGET_FILE_DIR:iris_app>"
-  COMMENT "Copying pinned FFmpeg runtime bundle")
-if(WIN32 AND TORCH_INSTALL_PREFIX)
+foreach(_component avformat avcodec avutil)
+  file(GLOB _iris_ffmpeg_release_dll "${IRIS_FFMPEG_ROOT}/bin/${_component}-*.dll")
+  file(GLOB _iris_ffmpeg_debug_dll "${IRIS_FFMPEG_ROOT}/debug/bin/${_component}-*.dll")
+  if(_iris_ffmpeg_release_dll AND _iris_ffmpeg_debug_dll)
+    list(GET _iris_ffmpeg_release_dll 0 _iris_ffmpeg_release_dll)
+    list(GET _iris_ffmpeg_debug_dll 0 _iris_ffmpeg_debug_dll)
+    add_custom_command(TARGET iris_app POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "$<IF:$<CONFIG:Debug>,${_iris_ffmpeg_debug_dll},${_iris_ffmpeg_release_dll}>"
+        "$<TARGET_FILE_DIR:iris_app>"
+      COMMENT "Copying FFmpeg ${_component} runtime")
+  else()
+    message(FATAL_ERROR "Could not find release and debug FFmpeg runtime DLLs for ${_component}")
+  endif()
+endforeach()
+set(_iris_zlib_release_dll "${IRIS_FFMPEG_ROOT}/bin/zlib1.dll")
+set(_iris_zlib_debug_dll "${IRIS_FFMPEG_ROOT}/debug/bin/zlibd1.dll")
+if(EXISTS "${_iris_zlib_release_dll}" AND EXISTS "${_iris_zlib_debug_dll}")
+  add_custom_command(TARGET iris_app POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "$<IF:$<CONFIG:Debug>,${_iris_zlib_debug_dll},${_iris_zlib_release_dll}>"
+      "$<TARGET_FILE_DIR:iris_app>"
+    COMMENT "Copying zlib runtime")
+endif()
+if(WIN32 AND IRIS_ENABLE_TORCH AND TORCH_INSTALL_PREFIX)
   file(GLOB _iris_torch_dlls "${TORCH_INSTALL_PREFIX}/lib/*.dll")
   add_custom_command(TARGET iris_app POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -123,6 +181,7 @@ if(WIN32 AND TORCH_INSTALL_PREFIX)
 endif()
 if(WIN32 AND IRIS_HAS_TENSORRT)
   file(GLOB _iris_tensorrt_dlls "${IRIS_TENSORRT_ROOT}/bin/nvinfer*.dll" "${IRIS_TENSORRT_ROOT}/lib/nvinfer*.dll")
+  list(FILTER _iris_tensorrt_dlls INCLUDE REGEX "[/\\\\]nvinfer(_plugin)?(_[0-9]+)?\\.dll$")
   if(_iris_tensorrt_dlls)
     add_custom_command(TARGET iris_app POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_iris_tensorrt_dlls} "$<TARGET_FILE_DIR:iris_app>"
@@ -130,9 +189,22 @@ if(WIN32 AND IRIS_HAS_TENSORRT)
   endif()
 endif()
 if(WIN32)
-  file(GLOB _iris_opencv_dlls "${IRIS_VCPKG_ROOT}/bin/opencv_*.dll")
-  if(_iris_opencv_dlls)
-    add_custom_command(TARGET iris_app POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_iris_opencv_dlls} "$<TARGET_FILE_DIR:iris_app>" COMMAND_EXPAND_LISTS COMMENT "Copying OpenCV runtime")
+  file(GLOB _iris_cuda_runtime_dlls "${CUDAToolkit_BIN_DIR}/cudart64_*.dll" "${CUDAToolkit_BIN_DIR}/nvjpeg64_*.dll")
+  if(_iris_cuda_runtime_dlls)
+    add_custom_command(TARGET iris_app POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_iris_cuda_runtime_dlls} "$<TARGET_FILE_DIR:iris_app>"
+      COMMAND_EXPAND_LISTS COMMENT "Copying CUDA runtime libraries")
+  endif()
+endif()
+if(WIN32)
+  if(IRIS_HAS_TENSORRT)
+    foreach(_component core imgproc)
+      add_custom_command(TARGET iris_app POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${IRIS_VCPKG_ROOT}/bin/opencv_${_component}4$<$<CONFIG:Debug>:d>.dll"
+          "$<TARGET_FILE_DIR:iris_app>"
+        COMMENT "Copying OpenCV ${_component} runtime")
+    endforeach()
   endif()
 endif()
 if(IRIS_BUILD_TOOLS)

@@ -12,6 +12,8 @@
 #include <cstdint>
 #include <vector>
 #include <utility>
+#include <fstream>
+#include <nlohmann/json.hpp>
 
 namespace {
 std::optional<iris::FrameRotation> parse_video_rotation(std::string_view value) {
@@ -30,7 +32,10 @@ std::optional<bool> parse_video_bool(std::string_view value) {
 
 std::optional<iris::SynchronizedVideoConfig> video_config_from_args(int argc, char** argv,
                                                                    int first,
-                                                                   std::string& error) {
+                                                                   std::string& error,
+                                                                   std::filesystem::path& engine,
+                                                                   std::filesystem::path& calibration,
+                                                                   std::filesystem::path& output_dir) {
     if (first >= argc) return std::nullopt;
     iris::SynchronizedVideoConfig config;
     std::vector<std::pair<iris::CameraId, iris::FrameRotation>> rotations;
@@ -46,6 +51,37 @@ std::optional<iris::SynchronizedVideoConfig> video_config_from_args(int argc, ch
                 return std::nullopt;
             }
             config.loop = *loop;
+            index += 2;
+            continue;
+        }
+        if (std::string_view(argv[index]) == "--realtime") {
+            if (index + 1 >= argc) { error = "--realtime requires true or false"; return std::nullopt; }
+            const auto realtime = parse_video_bool(argv[index + 1]);
+            if (!realtime) { error = "--realtime requires true or false"; return std::nullopt; }
+            config.realtime = *realtime;
+            index += 2;
+            continue;
+        }
+        if (std::string_view(argv[index]) == "--cuda-device") {
+            if (index + 1 >= argc) { error = "--cuda-device requires an integer"; return std::nullopt; }
+            try {
+                std::size_t used{};
+                const auto value = std::stoi(argv[index + 1], &used);
+                if (used != std::string_view(argv[index + 1]).size() || value < 0)
+                    throw std::invalid_argument("invalid CUDA device");
+                config.cuda_device = value;
+            } catch (...) { error = "--cuda-device requires a non-negative integer"; return std::nullopt; }
+            index += 2;
+            continue;
+        }
+        if (std::string_view(argv[index]) == "--engine" ||
+            std::string_view(argv[index]) == "--calibration" ||
+            std::string_view(argv[index]) == "--output-dir") {
+            if (index + 1 >= argc) { error = std::string(argv[index]) + " requires a path"; return std::nullopt; }
+            const auto option = std::string_view(argv[index]);
+            if (option == "--engine") engine = argv[index + 1];
+            else if (option == "--calibration") calibration = argv[index + 1];
+            else output_dir = argv[index + 1];
             index += 2;
             continue;
         }
@@ -124,12 +160,65 @@ int main(int argc, char** argv) {
                                              : 0));
     if (video_args != 0) {
         std::string error;
-        auto config = video_config_from_args(argc, argv, video_args, error);
+        std::filesystem::path engine, calibration, output_dir;
+        auto config = video_config_from_args(argc, argv, video_args, error, engine, calibration, output_dir);
         if (!config) {
             std::cerr << "invalid video source: "
                       << (error.empty() ? "at least one camera/file pair is required" : error)
                       << '\n';
             return 2;
+        }
+        const bool batch_run = !output_dir.empty() || !engine.empty() || !calibration.empty();
+        if (batch_run) {
+            if (output_dir.empty() || engine.empty() || calibration.empty()) {
+                std::cerr << "batch video mode requires --output-dir, --engine, and --calibration\n";
+                return 2;
+            }
+            if (api_mode || non_interactive) {
+                std::cerr << "batch video mode cannot be combined with --api or --non-interactive\n";
+                return 2;
+            }
+            std::error_code ec;
+            std::filesystem::create_directories(output_dir, ec);
+            if (ec) { std::cerr << "could not create output directory: " << ec.message() << '\n'; return 1; }
+            config->pose_output_path = output_dir / "poses.jsonl";
+            runtime.start();
+            iris::ConfigurePoseCommand pose;
+            pose.backend = iris::ConfigurePoseCommand::Backend::Multiview;
+            pose.engine_path = engine;
+            pose.calibration_path = calibration;
+            auto pose_configured = runtime.execute(pose);
+            if (!pose_configured) { std::cerr << "could not configure pose: " << pose_configured.message << '\n'; runtime.stop(); return 1; }
+            auto video_configured = runtime.execute(iris::ConfigureVideoIngestionCommand{*config});
+            if (!video_configured) { std::cerr << "could not configure video source: " << video_configured.message << '\n'; runtime.stop(); return 1; }
+            const auto started_at = std::chrono::steady_clock::now();
+            const int result = runtime.run();
+            const auto elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - started_at).count();
+            const auto final = runtime.snapshot();
+            nlohmann::json metrics;
+            for (const auto& [name, value] : final.metrics.counters) metrics["counters"][name] = value;
+            for (const auto& [name, value] : final.metrics.gauges) metrics["gauges"][name] = value;
+            for (const auto& [name, value] : final.metrics.histograms) {
+                metrics["histograms"][name] = {{"count", value.count}, {"sum", value.sum},
+                                                {"bounds", value.bounds}, {"counts", value.counts}};
+            }
+            const auto batches = final.processed_packets;
+            const auto summary = nlohmann::json{
+                {"schema_version", 1}, {"status", result == 0 ? "completed" : "failed"},
+                {"error", final.last_error}, {"pose_engine", engine.string()},
+                {"calibration", calibration.string()}, {"output_dir", output_dir.string()},
+                {"realtime", config->realtime}, {"loop", config->loop},
+                {"camera_ids", [&] { nlohmann::json ids = nlohmann::json::array(); for (const auto& c : config->cameras) ids.push_back(c.camera_id); return ids; }()},
+                {"input_videos", [&] { nlohmann::json inputs = nlohmann::json::array(); for (const auto& c : config->cameras) inputs.push_back(c.path.string()); return inputs; }()},
+                {"processed_batches", batches}, {"processed_camera_frames", batches * config->cameras.size()},
+                {"elapsed_seconds", elapsed}, {"batches_per_second", elapsed > 0 ? batches / elapsed : 0.0},
+                {"metrics", std::move(metrics)}};
+            std::ofstream summary_file(output_dir / "run_summary.json", std::ios::trunc);
+            if (!summary_file) { std::cerr << "could not write run_summary.json\n"; return 1; }
+            summary_file << summary.dump(2) << '\n';
+            std::cout << "processed " << batches << " batches in " << elapsed << " s ("
+                      << (elapsed > 0 ? batches / elapsed : 0.0) << " batches/s)\n";
+            return result;
         }
         runtime.start();
         const auto configured = runtime.execute(iris::ConfigureVideoIngestionCommand{*config});

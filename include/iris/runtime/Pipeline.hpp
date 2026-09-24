@@ -9,6 +9,7 @@
 
 #include <memory>
 #include <functional>
+#include <string>
 
 namespace iris {
 class RigCalibrationTool;
@@ -39,6 +40,7 @@ class Pipeline {
     std::vector<VideoDecodeStatus> video_decode_status() const;
     PreviewTransportHealth preview_health() const;
     bool healthy() const noexcept;
+    std::string output_failure() const;
 
   private:
     class Impl;

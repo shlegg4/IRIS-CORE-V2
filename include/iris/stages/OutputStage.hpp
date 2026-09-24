@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <memory>
 #include <functional>
+#include <string>
 
 namespace iris {
 
@@ -36,6 +37,7 @@ class OutputStage final {
 
     [[nodiscard]] std::size_t processed_count() const noexcept;
     [[nodiscard]] PreviewTransportHealth preview_health() const;
+    [[nodiscard]] std::string failure() const;
 
   private:
     class Impl;

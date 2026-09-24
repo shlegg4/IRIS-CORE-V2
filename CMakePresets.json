@@ -32,12 +32,27 @@
       "displayName": "IRIS Release",
       "binaryDir": "${sourceDir}/build/release",
       "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "hosted",
+      "inherits": "default",
+      "displayName": "IRIS Hosted RTMO and Multiview",
+      "binaryDir": "${sourceDir}/build/hosted",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "IRIS_BUILD_TESTS": "OFF",
+        "IRIS_BUILD_TOOLS": "OFF",
+        "IRIS_BUILD_HARDWARE_TESTS": "OFF",
+        "IRIS_ENABLE_TORCH": "OFF",
+        "IRIS_ENABLE_TENSORRT": "ON"
+      }
     }
   ],
   "buildPresets": [
     { "name": "default", "configurePreset": "default" },
     { "name": "hardware", "configurePreset": "hardware" },
-    { "name": "release", "configurePreset": "release" }
+    { "name": "release", "configurePreset": "release" },
+    { "name": "hosted", "configurePreset": "hosted" }
   ],
   "testPresets": [
     {

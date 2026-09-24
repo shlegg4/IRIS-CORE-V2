@@ -29,9 +29,10 @@ MultiCameraCaptureConfig single_camera_config(CaptureConfig config) {
     result.cameras.push_back({0, std::move(config)});
     return result;
 }
-OutputConfig output_config(std::size_t camera_count) {
+OutputConfig output_config(std::size_t camera_count, std::filesystem::path pose_output_path = {}) {
     OutputConfig result;
     result.camera_count = camera_count;
+    result.pose_output_path = std::move(pose_output_path);
     return result;
 }
 } // namespace
@@ -64,7 +65,8 @@ class Pipeline::Impl {
           tap_to_pose_(2, video_config ? OverflowPolicy::Block : OverflowPolicy::DropOldest),
           tap_(capture_to_pose_, &tap_to_pose_, [rig_tool](const Packet& packet){ if(rig_tool) rig_tool->observe(packet); }),
           output_(pose_to_output_, metrics,
-                  output_config(video_config ? video_config->cameras.size() : config.cameras.size()),
+                  output_config(video_config ? video_config->cameras.size() : config.cameras.size(),
+                                video_config ? video_config->pose_output_path : std::filesystem::path{}),
                   std::move(snapshots)) {
         auto source_cameras = config.cameras;
         if (video_config) {
@@ -239,6 +241,11 @@ class Pipeline::Impl {
         }
         output_.stop();
         if (!failure && pose_->failure()) failure = pose_->failure();
+        if (!failure) {
+            const auto export_failure = output_.failure();
+            if (!export_failure.empty())
+                failure = std::make_exception_ptr(std::runtime_error(export_failure));
+        }
         if (failure) {
             std::rethrow_exception(failure);
         }
@@ -275,6 +282,7 @@ class Pipeline::Impl {
         }
         return true;
     }
+    std::string output_failure() const { return output_.failure(); }
     std::vector<VideoDecodeStatus> video_decode_status() const {
         return video_stage_ ? video_stage_->camera_decode_status()
                             : std::vector<VideoDecodeStatus>{};
@@ -325,4 +333,5 @@ std::vector<VideoDecodeStatus> Pipeline::video_decode_status() const {
 }
 PreviewTransportHealth Pipeline::preview_health() const { return impl_->output_.preview_health(); }
 bool Pipeline::healthy() const noexcept { return impl_->healthy(); }
+std::string Pipeline::output_failure() const { return impl_->output_failure(); }
 } // namespace iris
