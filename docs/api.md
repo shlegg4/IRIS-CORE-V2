@@ -117,3 +117,40 @@ Unknown routes return `404`. Runtime command rejection returns `422`; command fa
 The image and event transports use the preview server on `127.0.0.1:8080`, separate from the
 REST API. MJPEG, pose-event WebSocket, H.264 WebSocket, and compatibility behavior are
 documented in [Preview sink protocol](preview-sink.md).
+
+## API stress test
+
+`tools/api_stress_test.py` exercises the live API from several concurrent clients and reports
+request counts, transport failures, HTTP failures, command failures, and latency percentiles.
+The default workload is read-only:
+
+```powershell
+python tools/api_stress_test.py --duration 60 --workers 8
+```
+
+Add `--mutate` to rapidly update synchronizer, preview, and shared-memory settings while the
+read workers are polling. This deliberately exercises the runtime control queue and can restart
+the active pipeline, so use it against a disposable IRIS instance:
+
+```powershell
+python tools/api_stress_test.py --duration 120 --workers 8 --mutate
+```
+
+To target camera lifecycle failures, add `--camera-churn`. The harness repeatedly rotates
+configured cameras and, when at least two cameras are present, removes and re-adds them from the
+captured configuration. It stops on the first transport or server failure and makes a best-effort
+attempt to restore the original camera set:
+
+```powershell
+python tools/api_stress_test.py --duration 300 --workers 16 --camera-churn --camera-workers 4 --seed-camera --mutate
+```
+
+`--seed-camera` adds a temporary clone when only one camera is configured, allowing the test to
+exercise removal of a non-final camera. Camera churn is intentionally destructive to the active
+pipeline while it is running. Use a dedicated IRIS process and keep the viewer Terminal panel or
+the IRIS stderr stream visible.
+
+The test exits with code `1` if any request loses the API connection, which is the signal to
+inspect the viewer Terminal panel and the IRIS stderr output. It exits with code `2` when the API
+was not reachable at the start. HTTP `4xx` responses and rejected commands are reported but do
+not by themselves indicate that the process crashed.
