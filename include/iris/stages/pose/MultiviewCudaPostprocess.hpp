@@ -3,8 +3,32 @@
 #include <cuda_runtime_api.h>
 
 #include <cstddef>
+#include <cstdint>
 
 namespace iris {
+
+struct MultiviewAssociationWorkspace;
+
+cudaError_t create_multiview_association_workspace(
+    std::size_t view_count, std::size_t max_persons,
+    const std::uint32_t* camera_ids,
+    MultiviewAssociationWorkspace** workspace, cudaStream_t stream);
+void destroy_multiview_association_workspace(MultiviewAssociationWorkspace* workspace);
+
+// Runs the current confidence-weighted, trimmed epipolar edge matching on the
+// GPU. fundamentals is a row-major [view][view][3][3] host array with the
+// upper triangle populated. Assignments are [max_persons][view_count]; 255
+// represents a missing detection.
+cudaError_t launch_multiview_current_association(
+    MultiviewAssociationWorkspace* workspace,
+    const float* keypoints, const float* scores,
+    const unsigned char* candidate_valid,
+    const float* fundamentals,
+    float gate_px, float minimum_score,
+    cudaStream_t stream, double* host_ms);
+void copy_multiview_association_result(
+    const MultiviewAssociationWorkspace* workspace,
+    unsigned char* host_assignments, std::uint32_t* host_track_count);
 
 // Triangulates the fixed RTMO layout [view][candidate][joint]. All pointers are
 // device pointers and the operation is enqueued on stream. Invalid or

@@ -1,9 +1,300 @@
 #include "iris/stages/pose/MultiviewCudaPostprocess.hpp"
 
+#include <cub/cub.cuh>
+#include <math_constants.h>
+
+#include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <vector>
 
 namespace iris {
 namespace {
+constexpr int association_candidate_capacity = 10;
+constexpr int association_joint_capacity = 17;
+constexpr int association_max_views = 10;
+constexpr int association_max_tracks = 50;
+constexpr int association_max_nodes = association_max_views * association_candidate_capacity;
+
+__device__ float weighted_trimmed_epipolar_cost(
+    const float* keypoints, const float* scores, const unsigned char* candidates,
+    const float* fundamentals, int view_count, int first_view, int first_candidate,
+    int second_view, int second_candidate, float minimum_score) {
+    if (!candidates[first_view * association_candidate_capacity + first_candidate] ||
+        !candidates[second_view * association_candidate_capacity + second_candidate])
+        return CUDART_INF_F;
+
+    float f[9];
+    const int low_view = min(first_view, second_view);
+    const int high_view = max(first_view, second_view);
+    const float* stored = fundamentals + (low_view * view_count + high_view) * 9;
+    for (int row = 0; row < 3; ++row)
+        for (int column = 0; column < 3; ++column)
+            f[row * 3 + column] = first_view < second_view
+                ? stored[row * 3 + column] : stored[column * 3 + row];
+
+    float residuals[association_joint_capacity];
+    float weights[association_joint_capacity];
+    int count = 0;
+    for (int joint = 0; joint < association_joint_capacity; ++joint) {
+        const int first_index = (first_view * association_candidate_capacity + first_candidate) * association_joint_capacity + joint;
+        const int second_index = (second_view * association_candidate_capacity + second_candidate) * association_joint_capacity + joint;
+        const float first_score = scores[first_index];
+        const float second_score = scores[second_index];
+        const float x1 = keypoints[first_index * 2];
+        const float y1 = keypoints[first_index * 2 + 1];
+        const float x2 = keypoints[second_index * 2];
+        const float y2 = keypoints[second_index * 2 + 1];
+        if (!isfinite(first_score) || !isfinite(second_score) ||
+            first_score < minimum_score || second_score < minimum_score ||
+            !isfinite(x1) || !isfinite(y1) || !isfinite(x2) || !isfinite(y2)) continue;
+
+        const float line2_x = f[0] * x1 + f[1] * y1 + f[2];
+        const float line2_y = f[3] * x1 + f[4] * y1 + f[5];
+        const float line2_z = f[6] * x1 + f[7] * y1 + f[8];
+        const float line1_x = f[0] * x2 + f[3] * y2 + f[6];
+        const float line1_y = f[1] * x2 + f[4] * y2 + f[7];
+        const float residual = fabsf(x2 * line2_x + y2 * line2_y + line2_z);
+        const float distance = 0.5F * residual *
+            (1.0F / fmaxf(1e-6F, hypotf(line2_x, line2_y)) +
+             1.0F / fmaxf(1e-6F, hypotf(line1_x, line1_y)));
+        if (!isfinite(distance)) continue;
+        const float confidence = sqrtf(fminf(1.0F, fmaxf(0.0F, first_score))) *
+                                 sqrtf(fminf(1.0F, fmaxf(0.0F, second_score)));
+        if (!(confidence > 0.0F)) continue;
+        residuals[count] = distance;
+        weights[count] = confidence;
+        ++count;
+    }
+    if (count < 5) return CUDART_INF_F;
+
+    // The COCO-17 array is small; insertion sort avoids general-purpose sort
+    // machinery while preserving the CPU matcher's residual ordering.
+    for (int index = 1; index < count; ++index) {
+        const float residual = residuals[index];
+        const float weight = weights[index];
+        int position = index;
+        while (position > 0 && residuals[position - 1] > residual) {
+            residuals[position] = residuals[position - 1];
+            weights[position] = weights[position - 1];
+            --position;
+        }
+        residuals[position] = residual;
+        weights[position] = weight;
+    }
+    float total_weight = 0.0F;
+    for (int index = 0; index < count; ++index) total_weight += weights[index];
+    const float retained_weight = total_weight * 0.8F;
+    float accumulated_weight = 0.0F;
+    float weighted_residual = 0.0F;
+    for (int index = 0; index < count && accumulated_weight < retained_weight; ++index) {
+        const float weight = fminf(weights[index], retained_weight - accumulated_weight);
+        weighted_residual += residuals[index] * weight;
+        accumulated_weight += weight;
+    }
+    return accumulated_weight > 0.0F ? weighted_residual / accumulated_weight : CUDART_INF_F;
+}
+
+__global__ void association_pair_cost_kernel(
+    const float* keypoints, const float* scores, const unsigned char* candidates,
+    const float* fundamentals, int view_count, int pair_count,
+    const unsigned char* pair_views, float gate, float minimum_score,
+    float* pair_costs, unsigned long long* edge_keys) {
+    const int edge_index = blockIdx.x * blockDim.x + threadIdx.x;
+    const int edge_count = pair_count * association_candidate_capacity * association_candidate_capacity;
+    if (edge_index >= edge_count) return;
+    const int pair_index = edge_index / (association_candidate_capacity * association_candidate_capacity);
+    const int local_index = edge_index % (association_candidate_capacity * association_candidate_capacity);
+    const int first_candidate = local_index / association_candidate_capacity;
+    const int second_candidate = local_index % association_candidate_capacity;
+    const int first_view = pair_views[pair_index * 2];
+    const int second_view = pair_views[pair_index * 2 + 1];
+    const float cost = weighted_trimmed_epipolar_cost(
+        keypoints, scores, candidates, fundamentals, view_count,
+        first_view, first_candidate, second_view, second_candidate, minimum_score);
+    const int node_count = view_count * association_candidate_capacity;
+    const int first_node = first_view * association_candidate_capacity + first_candidate;
+    const int second_node = second_view * association_candidate_capacity + second_candidate;
+    pair_costs[first_node * node_count + second_node] = cost;
+    pair_costs[second_node * node_count + first_node] = cost;
+    const unsigned long long bits = static_cast<unsigned long long>(__float_as_uint(cost));
+    edge_keys[edge_index] = (bits << 32) | static_cast<unsigned int>(edge_index);
+    (void)gate;
+}
+
+__device__ bool association_tracks_compatible(const int* first, const int* second,
+                                               int view_count, int node_count,
+                                               const float* pair_costs, float gate) {
+    for (int first_view = 0; first_view < view_count; ++first_view) {
+        const int first_candidate = first[first_view];
+        if (first_candidate < 0) continue;
+        if (second[first_view] >= 0) return false;
+        const int first_node = first_view * association_candidate_capacity + first_candidate;
+        for (int second_view = 0; second_view < view_count; ++second_view) {
+            const int second_candidate = second[second_view];
+            if (second_candidate < 0) continue;
+            const int second_node = second_view * association_candidate_capacity + second_candidate;
+            const float cost = pair_costs[first_node * node_count + second_node];
+            if (!isfinite(cost) || cost >= gate) return false;
+        }
+    }
+    return true;
+}
+
+__device__ bool association_node_compatible(const int* track, int view,
+                                             int candidate, int view_count,
+                                             int node_count, const float* pair_costs,
+                                             float gate) {
+    if (track[view] >= 0) return false;
+    const int candidate_node = view * association_candidate_capacity + candidate;
+    for (int other_view = 0; other_view < view_count; ++other_view) {
+        if (track[other_view] < 0) continue;
+        const int other_node = other_view * association_candidate_capacity + track[other_view];
+        const float cost = pair_costs[other_node * node_count + candidate_node];
+        if (!isfinite(cost) || cost >= gate) return false;
+    }
+    return true;
+}
+
+__global__ void association_merge_kernel(
+    const unsigned long long* sorted_edge_keys, int edge_count,
+    const unsigned char* pair_views, int pair_count, int view_count,
+    int max_persons, float gate, const float* pair_costs,
+    const int* canonical_view_order,
+    unsigned char* assignments, unsigned int* output_count) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    const int node_count = view_count * association_candidate_capacity;
+    int tracks[association_max_tracks][association_max_views];
+    unsigned char active[association_max_tracks]{};
+    int node_track[association_max_nodes];
+    for (int track = 0; track < association_max_tracks; ++track)
+        for (int view = 0; view < association_max_views; ++view) tracks[track][view] = -1;
+    for (int node = 0; node < association_max_nodes; ++node) node_track[node] = -1;
+    for (int index = 0; index < max_persons * view_count; ++index) assignments[index] = 255;
+    unsigned int track_count = 0;
+
+    for (int edge_index = 0; edge_index < edge_count; ++edge_index) {
+        const unsigned long long key = sorted_edge_keys[edge_index];
+        const float cost = __uint_as_float(static_cast<unsigned int>(key >> 32));
+        if (!isfinite(cost) || cost >= gate) break;
+        const unsigned int original_index = static_cast<unsigned int>(key);
+        const int pair_index = original_index /
+            (association_candidate_capacity * association_candidate_capacity);
+        if (pair_index >= pair_count) continue;
+        const int local_index = original_index %
+            (association_candidate_capacity * association_candidate_capacity);
+        const int first_candidate = local_index / association_candidate_capacity;
+        const int second_candidate = local_index % association_candidate_capacity;
+        const int first_view = pair_views[pair_index * 2];
+        const int second_view = pair_views[pair_index * 2 + 1];
+        const int first_node = first_view * association_candidate_capacity + first_candidate;
+        const int second_node = second_view * association_candidate_capacity + second_candidate;
+        const int first_track = node_track[first_node];
+        const int second_track = node_track[second_node];
+
+        if (first_track < 0 && second_track < 0) {
+            if (track_count >= association_max_tracks) continue;
+            int* track = tracks[track_count];
+            track[first_view] = first_candidate;
+            track[second_view] = second_candidate;
+            active[track_count] = 1;
+            node_track[first_node] = node_track[second_node] = static_cast<int>(track_count);
+            ++track_count;
+        } else if (first_track >= 0 && second_track < 0) {
+            int* track = tracks[first_track];
+            if (association_node_compatible(track, second_view, second_candidate,
+                                            view_count, node_count, pair_costs, gate)) {
+                track[second_view] = second_candidate;
+                node_track[second_node] = first_track;
+            }
+        } else if (first_track < 0 && second_track >= 0) {
+            int* track = tracks[second_track];
+            if (association_node_compatible(track, first_view, first_candidate,
+                                            view_count, node_count, pair_costs, gate)) {
+                track[first_view] = first_candidate;
+                node_track[first_node] = second_track;
+            }
+        } else if (first_track != second_track && active[first_track] && active[second_track]) {
+            int* first = tracks[first_track];
+            int* second = tracks[second_track];
+            if (!association_tracks_compatible(first, second, view_count,
+                                               node_count, pair_costs, gate)) continue;
+            for (int view = 0; view < view_count; ++view) {
+                if (second[view] < 0) continue;
+                first[view] = second[view];
+                const int node = view * association_candidate_capacity + second[view];
+                node_track[node] = first_track;
+                second[view] = -1;
+            }
+            active[second_track] = 0;
+        }
+    }
+
+    int ranked_tracks[association_max_tracks];
+    int ranked_view_counts[association_max_tracks];
+    float ranked_mean_costs[association_max_tracks];
+    int ranked_count = 0;
+    for (int track_index = 0; track_index < static_cast<int>(track_count); ++track_index) {
+        if (!active[track_index]) continue;
+        int assigned_views = 0;
+        int pairs = 0;
+        float total_cost = 0.0F;
+        const int* track = tracks[track_index];
+        for (int first_view = 0; first_view < view_count; ++first_view) {
+            if (track[first_view] < 0) continue;
+            ++assigned_views;
+            const int first_node = first_view * association_candidate_capacity + track[first_view];
+            for (int second_view = first_view + 1; second_view < view_count; ++second_view) {
+                if (track[second_view] < 0) continue;
+                const int second_node = second_view * association_candidate_capacity + track[second_view];
+                total_cost += pair_costs[first_node * node_count + second_node];
+                ++pairs;
+            }
+        }
+        if (assigned_views < 2) continue;
+        const float mean_cost = pairs ? total_cost / static_cast<float>(pairs) : gate;
+        int insert_at = ranked_count;
+        while (insert_at > 0) {
+            const int previous = ranked_tracks[insert_at - 1];
+            bool before = assigned_views > ranked_view_counts[insert_at - 1];
+            if (assigned_views == ranked_view_counts[insert_at - 1]) {
+                before = mean_cost < ranked_mean_costs[insert_at - 1];
+                if (mean_cost == ranked_mean_costs[insert_at - 1]) {
+                    const int* previous_track = tracks[previous];
+                    for (int order = 0; order < view_count; ++order) {
+                        const int view = canonical_view_order[order];
+                        const int current_value = track[view] < 0 ? association_candidate_capacity : track[view];
+                        const int previous_value = previous_track[view] < 0
+                            ? association_candidate_capacity : previous_track[view];
+                        if (current_value == previous_value) continue;
+                        before = current_value < previous_value;
+                        break;
+                    }
+                }
+            }
+            if (!before) break;
+            ranked_tracks[insert_at] = ranked_tracks[insert_at - 1];
+            ranked_view_counts[insert_at] = ranked_view_counts[insert_at - 1];
+            ranked_mean_costs[insert_at] = ranked_mean_costs[insert_at - 1];
+            --insert_at;
+        }
+        ranked_tracks[insert_at] = track_index;
+        ranked_view_counts[insert_at] = assigned_views;
+        ranked_mean_costs[insert_at] = mean_cost;
+        ++ranked_count;
+    }
+
+    const int selected_count = min(max_persons, ranked_count);
+    for (int output = 0; output < selected_count; ++output) {
+        const int* track = tracks[ranked_tracks[output]];
+        for (int view = 0; view < view_count; ++view)
+            assignments[output * view_count + view] = track[view] < 0
+                ? 255 : static_cast<unsigned char>(track[view]);
+    }
+    *output_count = static_cast<unsigned int>(selected_count);
+}
 
 __global__ void triangulate_kernel(const float* points, const float* scores,
                                    const unsigned char* candidates, const unsigned char* assignments,
@@ -322,6 +613,184 @@ __global__ void gather_selected_kernel(const float* points, const float* scores,
 }
 
 } // namespace
+
+struct MultiviewAssociationWorkspace {
+    std::size_t view_count{};
+    std::size_t max_persons{};
+    std::size_t pair_count{};
+    std::size_t edge_count{};
+    std::size_t sort_temp_bytes{};
+    unsigned char* pair_views{};
+    int* canonical_view_order{};
+    float* fundamentals{};
+    float* pair_costs{};
+    unsigned long long* edge_keys_in{};
+    unsigned long long* edge_keys_out{};
+    void* sort_temp{};
+    unsigned char* assignments{};
+    unsigned int* output_count{};
+    float* host_fundamentals{};
+    unsigned char* host_assignments{};
+    unsigned int* host_output_count{};
+};
+
+cudaError_t create_multiview_association_workspace(
+    std::size_t view_count, std::size_t max_persons,
+    const std::uint32_t* camera_ids,
+    MultiviewAssociationWorkspace** output, cudaStream_t stream) {
+    if (!output || !camera_ids || view_count == 0 || view_count > association_max_views ||
+        max_persons == 0 || max_persons > association_candidate_capacity)
+        return cudaErrorInvalidValue;
+    *output = nullptr;
+    auto* workspace = new MultiviewAssociationWorkspace{};
+    workspace->view_count = view_count;
+    workspace->max_persons = max_persons;
+
+    std::vector<int> view_order(view_count);
+    for (std::size_t view = 0; view < view_count; ++view) view_order[view] = static_cast<int>(view);
+    std::sort(view_order.begin(), view_order.end(), [&](int lhs, int rhs) {
+        return camera_ids[lhs] < camera_ids[rhs];
+    });
+    std::vector<unsigned char> pair_views;
+    for (std::size_t first = 0; first < view_count; ++first)
+        for (std::size_t second = first + 1; second < view_count; ++second) {
+            pair_views.push_back(static_cast<unsigned char>(view_order[first]));
+            pair_views.push_back(static_cast<unsigned char>(view_order[second]));
+        }
+    workspace->pair_count = pair_views.size() / 2;
+    workspace->edge_count = workspace->pair_count * association_candidate_capacity * association_candidate_capacity;
+
+    auto fail = [&](cudaError_t error) {
+        destroy_multiview_association_workspace(workspace);
+        return error;
+    };
+    cudaError_t error = cudaMalloc(&workspace->fundamentals,
+        sizeof(float) * view_count * view_count * 9);
+    if (error != cudaSuccess) return fail(error);
+    error = cudaMalloc(&workspace->pair_costs,
+        sizeof(float) * view_count * association_candidate_capacity *
+        view_count * association_candidate_capacity);
+    if (error != cudaSuccess) return fail(error);
+    error = cudaMalloc(&workspace->canonical_view_order, sizeof(int) * view_count);
+    if (error != cudaSuccess) return fail(error);
+    error = cudaMemcpy(workspace->canonical_view_order, view_order.data(),
+                       sizeof(int) * view_count, cudaMemcpyHostToDevice);
+    if (error != cudaSuccess) return fail(error);
+    error = cudaMalloc(&workspace->assignments,
+                       sizeof(unsigned char) * max_persons * view_count);
+    if (error != cudaSuccess) return fail(error);
+    error = cudaMalloc(&workspace->output_count, sizeof(unsigned int));
+    if (error != cudaSuccess) return fail(error);
+    error = cudaHostAlloc(&workspace->host_fundamentals,
+        sizeof(float) * view_count * view_count * 9, cudaHostAllocPortable);
+    if (error != cudaSuccess) return fail(error);
+    error = cudaHostAlloc(&workspace->host_assignments,
+        sizeof(unsigned char) * max_persons * view_count, cudaHostAllocPortable);
+    if (error != cudaSuccess) return fail(error);
+    error = cudaHostAlloc(&workspace->host_output_count, sizeof(unsigned int), cudaHostAllocPortable);
+    if (error != cudaSuccess) return fail(error);
+
+    if (workspace->edge_count > 0) {
+        error = cudaMalloc(&workspace->pair_views, sizeof(unsigned char) * pair_views.size());
+        if (error != cudaSuccess) return fail(error);
+        error = cudaMemcpy(workspace->pair_views, pair_views.data(), pair_views.size(), cudaMemcpyHostToDevice);
+        if (error != cudaSuccess) return fail(error);
+        error = cudaMalloc(&workspace->edge_keys_in, sizeof(unsigned long long) * workspace->edge_count);
+        if (error != cudaSuccess) return fail(error);
+        error = cudaMalloc(&workspace->edge_keys_out, sizeof(unsigned long long) * workspace->edge_count);
+        if (error != cudaSuccess) return fail(error);
+        error = cub::DeviceRadixSort::SortKeys(nullptr, workspace->sort_temp_bytes,
+            workspace->edge_keys_in, workspace->edge_keys_out,
+            static_cast<int>(workspace->edge_count), 0, 64, stream);
+        if (error != cudaSuccess) return fail(error);
+        error = cudaMalloc(&workspace->sort_temp, workspace->sort_temp_bytes);
+        if (error != cudaSuccess) return fail(error);
+    }
+    *output = workspace;
+    return cudaSuccess;
+}
+
+void destroy_multiview_association_workspace(MultiviewAssociationWorkspace* workspace) {
+    if (!workspace) return;
+    if (workspace->sort_temp) cudaFree(workspace->sort_temp);
+    if (workspace->host_output_count) cudaFreeHost(workspace->host_output_count);
+    if (workspace->host_assignments) cudaFreeHost(workspace->host_assignments);
+    if (workspace->host_fundamentals) cudaFreeHost(workspace->host_fundamentals);
+    if (workspace->edge_keys_out) cudaFree(workspace->edge_keys_out);
+    if (workspace->edge_keys_in) cudaFree(workspace->edge_keys_in);
+    if (workspace->pair_views) cudaFree(workspace->pair_views);
+    if (workspace->output_count) cudaFree(workspace->output_count);
+    if (workspace->assignments) cudaFree(workspace->assignments);
+    if (workspace->canonical_view_order) cudaFree(workspace->canonical_view_order);
+    if (workspace->pair_costs) cudaFree(workspace->pair_costs);
+    if (workspace->fundamentals) cudaFree(workspace->fundamentals);
+    delete workspace;
+}
+
+cudaError_t launch_multiview_current_association(
+    MultiviewAssociationWorkspace* workspace,
+    const float* keypoints, const float* scores,
+    const unsigned char* candidate_valid,
+    const float* fundamentals,
+    float gate_px, float minimum_score,
+    cudaStream_t stream, double* host_ms) {
+    if (!workspace || !keypoints || !scores || !candidate_valid || !fundamentals ||
+        !workspace->host_assignments || !workspace->host_output_count) return cudaErrorInvalidValue;
+    const auto start = std::chrono::steady_clock::now();
+    if (workspace->edge_count == 0) {
+        if (host_ms) *host_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - start).count();
+        return cudaSuccess;
+    }
+
+    const auto fundamental_bytes = sizeof(float) * workspace->view_count * workspace->view_count * 9;
+    std::memcpy(workspace->host_fundamentals, fundamentals, fundamental_bytes);
+    cudaError_t error = cudaMemcpyAsync(workspace->fundamentals, workspace->host_fundamentals,
+        fundamental_bytes,
+        cudaMemcpyHostToDevice, stream);
+    if (error != cudaSuccess) return error;
+    const int edge_count = static_cast<int>(workspace->edge_count);
+    association_pair_cost_kernel<<<(edge_count + 127) / 128, 128, 0, stream>>>(
+        keypoints, scores, candidate_valid, workspace->fundamentals,
+        static_cast<int>(workspace->view_count), static_cast<int>(workspace->pair_count),
+        workspace->pair_views, gate_px, minimum_score, workspace->pair_costs,
+        workspace->edge_keys_in);
+    error = cudaGetLastError();
+    if (error != cudaSuccess) return error;
+    error = cub::DeviceRadixSort::SortKeys(workspace->sort_temp,
+        workspace->sort_temp_bytes, workspace->edge_keys_in, workspace->edge_keys_out,
+        edge_count, 0, 64, stream);
+    if (error != cudaSuccess) return error;
+    association_merge_kernel<<<1, 1, 0, stream>>>(
+        workspace->edge_keys_out, edge_count, workspace->pair_views,
+        static_cast<int>(workspace->pair_count), static_cast<int>(workspace->view_count),
+        static_cast<int>(workspace->max_persons), gate_px, workspace->pair_costs,
+        workspace->canonical_view_order, workspace->assignments, workspace->output_count);
+    error = cudaGetLastError();
+    if (error != cudaSuccess) return error;
+    error = cudaMemcpyAsync(workspace->host_assignments, workspace->assignments,
+        workspace->max_persons * workspace->view_count, cudaMemcpyDeviceToHost, stream);
+    if (error != cudaSuccess) return error;
+    error = cudaMemcpyAsync(workspace->host_output_count, workspace->output_count,
+        sizeof(unsigned int), cudaMemcpyDeviceToHost, stream);
+    if (host_ms) *host_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - start).count();
+    return error;
+}
+
+void copy_multiview_association_result(
+    const MultiviewAssociationWorkspace* workspace,
+    unsigned char* host_assignments, std::uint32_t* host_track_count) {
+    if (!workspace || !host_assignments || !host_track_count) return;
+    if (workspace->edge_count == 0) {
+        std::memset(host_assignments, 255, workspace->max_persons * workspace->view_count);
+        *host_track_count = 0;
+        return;
+    }
+    std::memcpy(host_assignments, workspace->host_assignments,
+        workspace->max_persons * workspace->view_count);
+    *host_track_count = *workspace->host_output_count;
+}
 
 cudaError_t launch_multiview_weighted_dlt(const float* keypoints, const float* scores,
                                           const unsigned char* candidate_valid,

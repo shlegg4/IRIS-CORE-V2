@@ -8,11 +8,8 @@
 #include <array>
 #include <chrono>
 #include <cmath>
-#include <limits>
-#include <numeric>
 #include <optional>
 #include <stdexcept>
-#include <tuple>
 #include <utility>
 #include <ranges>
 #include <vector>
@@ -29,9 +26,6 @@ namespace {
 constexpr std::size_t candidate_capacity = 10;
 constexpr std::size_t joint_capacity = coco_joint_count;
 constexpr std::size_t maximum_view_capacity = 10;
-constexpr float invalid_match_cost = std::numeric_limits<float>::infinity();
-constexpr std::size_t minimum_epipolar_joints = 5;
-constexpr float epipolar_trim_fraction = 0.2F;
 
 using Projection = Eigen::Matrix<float, 3, 4, Eigen::RowMajor>;
 
@@ -77,240 +71,6 @@ Eigen::Matrix3f fundamental_matrix(const PoseConfig::CameraCalibration& first,
              relative_translation.z(), 0.0F, -relative_translation.x(),
              -relative_translation.y(), relative_translation.x(), 0.0F;
     return second_k.inverse().transpose() * cross * relative_rotation * first_k.inverse();
-}
-
-float symmetric_epipolar_distance(const Eigen::Matrix3f& fundamental,
-                                  float x1, float y1, float x2, float y2) {
-    const Eigen::Vector3f first(x1, y1, 1.0F), second(x2, y2, 1.0F);
-    const Eigen::Vector3f line_second = fundamental * first;
-    const Eigen::Vector3f line_first = fundamental.transpose() * second;
-    const float residual = std::abs(second.dot(line_second));
-    return 0.5F * (residual / std::max(1e-6F, line_second.head<2>().norm()) +
-                   residual / std::max(1e-6F, line_first.head<2>().norm()));
-}
-
-float detection_pair_cost(const TensorRtMultiviewResult& result,
-                          std::size_t first_view, int first_candidate,
-                          std::size_t second_view, int second_candidate,
-                          const Eigen::Matrix3f& fundamental, float minimum_score) {
-    if (first_candidate < 0 || second_candidate < 0) return invalid_match_cost;
-    std::array<std::pair<float, float>, joint_capacity> residuals{};
-    std::size_t count = 0;
-    const auto first_base = (first_view * candidate_capacity + static_cast<std::size_t>(first_candidate)) * joint_capacity;
-    const auto second_base = (second_view * candidate_capacity + static_cast<std::size_t>(second_candidate)) * joint_capacity;
-    for (std::size_t joint = 0; joint < joint_capacity; ++joint) {
-        const auto first_index = first_base + joint;
-        const auto second_index = second_base + joint;
-        const float first_score = result.keypoint_scores[first_index];
-        const float second_score = result.keypoint_scores[second_index];
-        const float x1 = result.keypoints[first_index * 2];
-        const float y1 = result.keypoints[first_index * 2 + 1];
-        const float x2 = result.keypoints[second_index * 2];
-        const float y2 = result.keypoints[second_index * 2 + 1];
-        if (!std::isfinite(first_score) || !std::isfinite(second_score) ||
-            first_score < minimum_score || second_score < minimum_score ||
-            !std::isfinite(x1) || !std::isfinite(y1) || !std::isfinite(x2) || !std::isfinite(y2))
-            continue;
-        const float residual = symmetric_epipolar_distance(fundamental, x1, y1, x2, y2);
-        if (!std::isfinite(residual)) continue;
-        const float confidence = std::sqrt(std::clamp(first_score, 0.0F, 1.0F) *
-                                           std::clamp(second_score, 0.0F, 1.0F));
-        if (!(confidence > 0.0F)) continue;
-        residuals[count++] = {residual, confidence};
-    }
-    if (count < minimum_epipolar_joints) return invalid_match_cost;
-
-    std::sort(residuals.begin(), residuals.begin() + static_cast<std::ptrdiff_t>(count),
-              [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
-    float total_weight = 0.0F;
-    for (std::size_t i = 0; i < count; ++i) total_weight += residuals[i].second;
-    const float retained_weight = total_weight * (1.0F - epipolar_trim_fraction);
-    float accumulated_weight = 0.0F;
-    float weighted_residual = 0.0F;
-    for (std::size_t i = 0; i < count && accumulated_weight < retained_weight; ++i) {
-        const float weight = std::min(residuals[i].second, retained_weight - accumulated_weight);
-        weighted_residual += residuals[i].first * weight;
-        accumulated_weight += weight;
-    }
-    return accumulated_weight > 0.0F ? weighted_residual / accumulated_weight : invalid_match_cost;
-}
-
-struct DetectionEdge {
-    std::size_t first_view{};
-    std::size_t first_candidate{};
-    std::size_t second_view{};
-    std::size_t second_candidate{};
-    float cost{};
-};
-
-std::vector<std::vector<int>> associate_detections(
-    const TensorRtMultiviewResult& result, std::size_t view_count,
-    std::size_t max_persons,
-    const std::vector<PoseConfig::CameraCalibration>& cameras,
-    const std::vector<Eigen::Matrix3f>& fundamentals,
-    float gate, float minimum_score) {
-    const auto node_count = view_count * candidate_capacity;
-    std::vector<float> pair_costs(node_count * node_count, invalid_match_cost);
-    const auto pair_cost = [&](std::size_t view_a, std::size_t candidate_a,
-                               std::size_t view_b, std::size_t candidate_b) {
-        return pair_costs[(view_a * candidate_capacity + candidate_a) * node_count +
-                          view_b * candidate_capacity + candidate_b];
-    };
-    std::vector<DetectionEdge> edges;
-    for (std::size_t first_view = 0; first_view < view_count; ++first_view) {
-        for (std::size_t second_view = first_view + 1; second_view < view_count; ++second_view) {
-            const auto& fundamental = fundamentals[first_view * view_count + second_view];
-            for (std::size_t first = 0; first < candidate_capacity; ++first) {
-                if (!result.candidate_valid[first_view * candidate_capacity + first]) continue;
-                for (std::size_t second = 0; second < candidate_capacity; ++second) {
-                    if (!result.candidate_valid[second_view * candidate_capacity + second]) continue;
-                    const float cost = detection_pair_cost(result, first_view,
-                        static_cast<int>(first), second_view, static_cast<int>(second),
-                        fundamental, minimum_score);
-                    auto& forward = pair_costs[(first_view * candidate_capacity + first) * node_count +
-                                               second_view * candidate_capacity + second];
-                    auto& reverse = pair_costs[(second_view * candidate_capacity + second) * node_count +
-                                               first_view * candidate_capacity + first];
-                    forward = reverse = cost;
-                    if (std::isfinite(cost) && cost < gate)
-                        edges.push_back({first_view, first, second_view, second, cost});
-                }
-            }
-        }
-    }
-
-    const auto canonical_edge_key = [&](const DetectionEdge& edge) {
-        const auto first_id = cameras[edge.first_view].camera_id;
-        const auto second_id = cameras[edge.second_view].camera_id;
-        if (first_id < second_id)
-            return std::tuple{first_id, second_id, edge.first_candidate, edge.second_candidate};
-        return std::tuple{second_id, first_id, edge.second_candidate, edge.first_candidate};
-    };
-    std::ranges::sort(edges, [&](const DetectionEdge& lhs, const DetectionEdge& rhs) {
-        if (lhs.cost != rhs.cost) return lhs.cost < rhs.cost;
-        return canonical_edge_key(lhs) < canonical_edge_key(rhs);
-    });
-
-    std::vector<std::vector<int>> tracks;
-    std::vector<bool> active;
-    std::vector<int> node_track(node_count, -1);
-    const auto nodes_compatible = [&](const std::vector<int>& track,
-                                      std::size_t view, std::size_t candidate) {
-        if (track[view] >= 0) return false;
-        for (std::size_t other_view = 0; other_view < view_count; ++other_view) {
-            if (track[other_view] < 0) continue;
-            const auto cost = pair_cost(other_view, static_cast<std::size_t>(track[other_view]),
-                                        view, candidate);
-            if (!std::isfinite(cost) || cost >= gate) return false;
-        }
-        return true;
-    };
-    const auto tracks_compatible = [&](const std::vector<int>& first,
-                                       const std::vector<int>& second) {
-        for (std::size_t first_view = 0; first_view < view_count; ++first_view) {
-            if (first[first_view] < 0) continue;
-            if (second[first_view] >= 0) return false;
-            for (std::size_t second_view = 0; second_view < view_count; ++second_view) {
-                if (second[second_view] < 0) continue;
-                const auto cost = pair_cost(first_view, static_cast<std::size_t>(first[first_view]),
-                                            second_view, static_cast<std::size_t>(second[second_view]));
-                if (!std::isfinite(cost) || cost >= gate) return false;
-            }
-        }
-        return true;
-    };
-
-    for (const auto& edge : edges) {
-        const auto first_node = edge.first_view * candidate_capacity + edge.first_candidate;
-        const auto second_node = edge.second_view * candidate_capacity + edge.second_candidate;
-        const int first_track = node_track[first_node];
-        const int second_track = node_track[second_node];
-        if (first_track < 0 && second_track < 0) {
-            std::vector<int> track(view_count, -1);
-            track[edge.first_view] = static_cast<int>(edge.first_candidate);
-            track[edge.second_view] = static_cast<int>(edge.second_candidate);
-            const auto index = static_cast<int>(tracks.size());
-            tracks.push_back(std::move(track));
-            active.push_back(true);
-            node_track[first_node] = node_track[second_node] = index;
-            continue;
-        }
-        if (first_track >= 0 && second_track < 0) {
-            auto& track = tracks[static_cast<std::size_t>(first_track)];
-            if (nodes_compatible(track, edge.second_view, edge.second_candidate)) {
-                track[edge.second_view] = static_cast<int>(edge.second_candidate);
-                node_track[second_node] = first_track;
-            }
-            continue;
-        }
-        if (first_track < 0 && second_track >= 0) {
-            auto& track = tracks[static_cast<std::size_t>(second_track)];
-            if (nodes_compatible(track, edge.first_view, edge.first_candidate)) {
-                track[edge.first_view] = static_cast<int>(edge.first_candidate);
-                node_track[first_node] = second_track;
-            }
-            continue;
-        }
-        if (first_track == second_track) continue;
-        auto& first = tracks[static_cast<std::size_t>(first_track)];
-        auto& second = tracks[static_cast<std::size_t>(second_track)];
-        if (!active[static_cast<std::size_t>(first_track)] ||
-            !active[static_cast<std::size_t>(second_track)] ||
-            !tracks_compatible(first, second)) continue;
-        for (std::size_t view = 0; view < view_count; ++view) {
-            if (second[view] < 0) continue;
-            first[view] = second[view];
-            node_track[view * candidate_capacity + static_cast<std::size_t>(second[view])] = first_track;
-            second[view] = -1;
-        }
-        active[static_cast<std::size_t>(second_track)] = false;
-    }
-
-    struct RankedTrack {
-        std::vector<int> assignments;
-        std::size_t view_count{};
-        float mean_cost{};
-    };
-    std::vector<RankedTrack> ranked;
-    for (std::size_t index = 0; index < tracks.size(); ++index) {
-        if (!active[index]) continue;
-        std::size_t assigned_views = 0, pairs = 0;
-        float total_cost = 0.0F;
-        for (std::size_t first_view = 0; first_view < view_count; ++first_view) {
-            if (tracks[index][first_view] < 0) continue;
-            ++assigned_views;
-            for (std::size_t second_view = first_view + 1; second_view < view_count; ++second_view) {
-                if (tracks[index][second_view] < 0) continue;
-                total_cost += pair_cost(first_view, static_cast<std::size_t>(tracks[index][first_view]),
-                                        second_view, static_cast<std::size_t>(tracks[index][second_view]));
-                ++pairs;
-            }
-        }
-        if (assigned_views >= 2)
-            ranked.push_back({tracks[index], assigned_views, pairs ? total_cost / static_cast<float>(pairs) : gate});
-    }
-    std::vector<std::size_t> canonical_views(view_count);
-    std::iota(canonical_views.begin(), canonical_views.end(), 0);
-    std::ranges::sort(canonical_views, [&](std::size_t lhs, std::size_t rhs) {
-        return cameras[lhs].camera_id < cameras[rhs].camera_id;
-    });
-    std::ranges::sort(ranked, [&](const RankedTrack& lhs, const RankedTrack& rhs) {
-        if (lhs.view_count != rhs.view_count) return lhs.view_count > rhs.view_count;
-        if (lhs.mean_cost != rhs.mean_cost) return lhs.mean_cost < rhs.mean_cost;
-        for (const auto view : canonical_views) {
-            const auto lhs_value = lhs.assignments[view] < 0 ? candidate_capacity :
-                static_cast<std::size_t>(lhs.assignments[view]);
-            const auto rhs_value = rhs.assignments[view] < 0 ? candidate_capacity :
-                static_cast<std::size_t>(rhs.assignments[view]);
-            if (lhs_value != rhs_value) return lhs_value < rhs_value;
-        }
-        return false;
-    });
-    std::vector<std::vector<int>> output;
-    output.reserve(std::min(max_persons, ranked.size()));
-    for (std::size_t i = 0; i < ranked.size() && i < max_persons; ++i)
-        output.push_back(std::move(ranked[i].assignments));
-    return output;
 }
 
 std::optional<Eigen::Vector3f> triangulate_joint(
@@ -442,39 +202,57 @@ class MultiviewPoseStage::Impl {
             widths[i] = frame->extent.width;
             heights[i] = frame->extent.height;
         }
-        TensorRtMultiviewResult result;
-        const auto engine_start = std::chrono::steady_clock::now();
-        engine_->infer(buffers, strides, widths, heights, result);
-        cuda_graph_active_.set(result.timings.cuda_graph_active ? 1.0 : 0.0);
-        const auto postprocess_start = std::chrono::steady_clock::now();
-
         const auto geometry_start = std::chrono::steady_clock::now();
-        std::vector<Eigen::Matrix3f> intrinsics(view_count);
-        std::vector<Projection> projections(view_count);
-        for (std::size_t view = 0; view < view_count; ++view) {
-            intrinsics[view] = letterbox_intrinsics(config_.multiview_calibration[view],
-                                                    {widths[view], heights[view]});
-            projections[view] = projection_matrix(config_.multiview_calibration[view], intrinsics[view]);
+        if (!geometry_cache_valid_ || cached_widths_ != widths || cached_heights_ != heights) {
+            std::vector<Eigen::Matrix3f> intrinsics(view_count);
+            cached_projections_.resize(view_count);
+            for (std::size_t view = 0; view < view_count; ++view) {
+                intrinsics[view] = letterbox_intrinsics(config_.multiview_calibration[view],
+                                                        {widths[view], heights[view]});
+                cached_projections_[view] = projection_matrix(config_.multiview_calibration[view], intrinsics[view]);
+            }
+            cached_fundamentals_.assign(view_count * view_count, Eigen::Matrix3f::Zero());
+            for (std::size_t first = 0; first < view_count; ++first)
+                for (std::size_t second = first + 1; second < view_count; ++second)
+                    cached_fundamentals_[first * view_count + second] = fundamental_matrix(
+                        config_.multiview_calibration[first], intrinsics[first],
+                        config_.multiview_calibration[second], intrinsics[second]);
+            cached_widths_ = widths;
+            cached_heights_ = heights;
+            geometry_cache_valid_ = true;
         }
-        std::vector<Eigen::Matrix3f> fundamentals(view_count * view_count,
-                                                   Eigen::Matrix3f::Zero());
+        const auto& projections = cached_projections_;
+        const auto& fundamentals = cached_fundamentals_;
+        const double geometry_setup_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - geometry_start).count();
+        std::vector<float> fundamentals_flat(view_count * view_count * 9, 0.0F);
         for (std::size_t first = 0; first < view_count; ++first)
             for (std::size_t second = first + 1; second < view_count; ++second)
-                fundamentals[first * view_count + second] = fundamental_matrix(
-                    config_.multiview_calibration[first], intrinsics[first],
-                    config_.multiview_calibration[second], intrinsics[second]);
-        result.timings.geometry_setup_host_ms = std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - geometry_start).count();
+                for (int row = 0; row < 3; ++row)
+                    for (int column = 0; column < 3; ++column)
+                        fundamentals_flat[(first * view_count + second) * 9 + row * 3 + column] =
+                            fundamentals[first * view_count + second](row, column);
 
-        const auto association_start = std::chrono::steady_clock::now();
-        auto tracks = associate_detections(result, view_count, config_.max_persons,
-                                           config_.multiview_calibration,
-                                           fundamentals, config_.epipolar_gate_px,
-                                           config_.minimum_joint_confidence);
-        result.timings.association_host_ms = std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - association_start).count();
+        TensorRtMultiviewResult result;
+        result.timings.geometry_setup_host_ms = geometry_setup_ms;
+        const auto engine_start = std::chrono::steady_clock::now();
+        engine_->infer(buffers, strides, widths, heights, fundamentals_flat, result);
+        cuda_graph_active_.set(result.timings.cuda_graph_active ? 1.0 : 0.0);
+        const auto postprocess_start = std::chrono::steady_clock::now();
+        std::vector<std::vector<int>> tracks;
+        tracks.reserve(result.track_count);
+        for (std::size_t person = 0; person < result.track_count; ++person) {
+            auto& track = tracks.emplace_back(view_count, -1);
+            for (std::size_t view = 0; view < view_count; ++view) {
+                const auto candidate = result.assignments[person * view_count + view];
+                if (candidate != 255) track[view] = candidate;
+            }
+        }
 
         std::vector<ViewPose2d> view_poses_2d;
+        view_poses_2d.reserve(view_count * candidate_capacity);
+        std::array<int, maximum_view_capacity * candidate_capacity> observation_by_detection;
+        observation_by_detection.fill(-1);
         for (std::size_t view = 0; view < view_count; ++view) {
             const auto& source = *std::ranges::find(packet.frames,
                 config_.multiview_calibration[view].camera_id, &Frame::camera);
@@ -486,6 +264,8 @@ class MultiviewPoseStage::Impl {
             for (std::size_t candidate = 0; candidate < candidate_capacity; ++candidate) {
                 if (!result.candidate_valid[view * candidate_capacity + candidate]) continue;
                 auto& observation = view_poses_2d.emplace_back();
+                observation_by_detection[view * candidate_capacity + candidate] =
+                    static_cast<int>(view_poses_2d.size() - 1);
                 observation.camera_id = calibration.camera_id;
                 observation.person_id = candidate;
                 for (std::size_t joint = 0; joint < joint_capacity; ++joint) {
@@ -528,31 +308,12 @@ class MultiviewPoseStage::Impl {
                 pose.point_valid[view].fill(false);
                 if (track[view] < 0) continue;
                 const auto candidate = static_cast<std::size_t>(track[view]);
-                for (std::size_t joint = 0; joint < joint_capacity; ++joint) {
-                    const auto index = (view * candidate_capacity + candidate) * joint_capacity + joint;
-                    const float score = result.keypoint_scores[index];
-                    const float x = result.keypoints[index * 2];
-                    const float y = result.keypoints[index * 2 + 1];
-                    pose.joint_scores[view][joint] = score;
-                    if (!std::isfinite(score) || !std::isfinite(x) || !std::isfinite(y)) continue;
-                    const auto& calibration = config_.multiview_calibration[view];
-                    const auto& source = *std::ranges::find(packet.frames, calibration.camera_id, &Frame::camera);
-                    const float scale = std::min(640.0F / static_cast<float>(source.extent.width),
-                                                 640.0F / static_cast<float>(source.extent.height));
-                    const float resized_width = static_cast<float>(std::max(1, static_cast<int>(source.extent.width * scale + 0.5F)));
-                    const float resized_height = static_cast<float>(std::max(1, static_cast<int>(source.extent.height * scale + 0.5F)));
-                    const float model_x = (x - (640.0F - resized_width) * 0.5F) / scale;
-                    const float model_y = (y - (640.0F - resized_height) * 0.5F) / scale;
-                    const float fx = calibration.intrinsics[0], fy = calibration.intrinsics[4];
-                    const float cx = calibration.intrinsics[2], cy = calibration.intrinsics[5];
-                    const float xu = (model_x - cx) / fx, yu = (model_y - cy) / fy;
-                    const float r2 = xu * xu + yu * yu;
-                    const float radial = 1.0F + calibration.distortion[0] * r2 + calibration.distortion[1] * r2 * r2 + calibration.distortion[4] * r2 * r2 * r2;
-                    const float xd = xu * radial + 2.0F * calibration.distortion[2] * xu * yu + calibration.distortion[3] * (r2 + 2.0F * xu * xu);
-                    const float yd = yu * radial + calibration.distortion[2] * (r2 + 2.0F * yu * yu) + 2.0F * calibration.distortion[3] * xu * yu;
-                    pose.points_2d_px[view][joint] = {fx * xd + cx, fy * yd + cy};
-                    pose.point_valid[view][joint] = true;
-                }
+                const auto observation_index = observation_by_detection[view * candidate_capacity + candidate];
+                if (observation_index < 0) continue;
+                const auto& observation = (*packet.view_poses_2d)[static_cast<std::size_t>(observation_index)];
+                pose.joint_scores[view] = observation.scores;
+                pose.points_2d_px[view] = observation.points_px;
+                pose.point_valid[view] = observation.valid;
             }
             for (std::size_t joint = 0; joint < joint_capacity; ++joint) {
                 if (config_.two_d_only) break;
@@ -576,7 +337,8 @@ class MultiviewPoseStage::Impl {
             const std::array<double,18> values{ready_wait_ms, t.preprocess_host_ms, t.setup_host_ms,
                 t.enqueue_host_ms, t.download_host_ms, t.wait_host_ms, t.preprocess_stream_ms,
                 t.engine_stream_ms, t.download_stream_ms,
-                std::chrono::duration<double,std::milli>(finished-postprocess_start).count(),
+                t.geometry_setup_host_ms +
+                    std::chrono::duration<double,std::milli>(finished-postprocess_start).count(),
                 std::chrono::duration<double,std::milli>(postprocess_start-engine_start).count(),
                 t.geometry_setup_host_ms, t.association_stream_ms, t.gather_stream_ms,
                 t.triangulation_stream_ms, t.output_copy_stream_ms,
@@ -622,6 +384,7 @@ class MultiviewPoseStage::Impl {
             target.image_rotation_degrees = 0;
             target.calibrated = true;
         }
+        geometry_cache_valid_ = false;
         calibration_revision_=rig->revision;
 #ifdef IRIS_HAS_TENSORRT
         if(started_) engine_=std::make_unique<TensorRtMultiviewEngine>(config_);
@@ -632,6 +395,10 @@ class MultiviewPoseStage::Impl {
     bool started_{};
     std::uint64_t calibration_revision_{};
     bool metrics_enabled_{};
+    bool geometry_cache_valid_{};
+    std::vector<std::uint32_t> cached_widths_, cached_heights_;
+    std::vector<Projection> cached_projections_;
+    std::vector<Eigen::Matrix3f> cached_fundamentals_;
     infrastructure::metrics::Histogram process_ms_, capture_to_result_ms_;
     infrastructure::metrics::Gauge last_capture_to_result_ms_;
     infrastructure::metrics::Gauge last_process_ms_;

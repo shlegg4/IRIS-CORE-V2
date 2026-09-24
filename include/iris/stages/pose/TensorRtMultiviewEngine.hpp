@@ -3,6 +3,7 @@
 #include "iris/stages/pose/PoseConfig.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -25,6 +26,8 @@ struct TensorRtMultiviewResult {
     std::vector<float> keypoints;
     std::vector<float> keypoint_scores;
     std::vector<unsigned char> candidate_valid;
+    std::vector<unsigned char> assignments;
+    std::uint32_t track_count{};
 };
 
 class TensorRtMultiviewEngine {
@@ -38,6 +41,7 @@ class TensorRtMultiviewEngine {
                const std::vector<std::size_t>& strides,
                const std::vector<std::uint32_t>& widths,
                const std::vector<std::uint32_t>& heights,
+               const std::vector<float>& fundamentals,
                TensorRtMultiviewResult& result);
 
   private:

@@ -1,4 +1,5 @@
 #include "iris/stages/pose/TensorRtMultiviewEngine.hpp"
+#include "iris/stages/pose/MultiviewCudaPostprocess.hpp"
 
 #include <algorithm>
 #include <array>
@@ -116,6 +117,17 @@ class TensorRtMultiviewEngine::Impl {
         check_cuda(cudaMalloc(&target_k_, sizeof(float) * max_views * 9), "cudaMalloc target intrinsics");
         check_cuda(cudaMalloc(&distortion_, sizeof(float) * max_views * 5), "cudaMalloc distortion");
 
+        max_persons_ = config.max_persons;
+        epipolar_gate_px_ = config.epipolar_gate_px;
+        minimum_joint_confidence_ = config.minimum_joint_confidence;
+        std::vector<std::uint32_t> camera_ids;
+        camera_ids.reserve(config.multiview_calibration.size());
+        for (const auto& camera : config.multiview_calibration)
+            camera_ids.push_back(static_cast<std::uint32_t>(camera.camera_id));
+        check_cuda(create_multiview_association_workspace(
+            camera_ids.size(), max_persons_, camera_ids.data(),
+            &association_workspace_, stream_), "create CUDA association workspace");
+
         bind_io(config.multiview_calibration.size());
         initialize_cuda_graph();
 
@@ -137,6 +149,7 @@ class TensorRtMultiviewEngine::Impl {
         if (stream_) cudaStreamSynchronize(stream_);
         if (graph_exec_) cudaGraphExecDestroy(graph_exec_);
         if (graph_) cudaGraphDestroy(graph_);
+        destroy_multiview_association_workspace(association_workspace_);
         cudaFree(images_);
         cudaFree(keypoints_); cudaFree(keypoint_scores_); cudaFree(instance_scores_); cudaFree(boxes_); cudaFree(candidate_valid_);
         cudaFree(source_ptrs_); cudaFree(strides_); cudaFree(widths_); cudaFree(heights_);
@@ -149,15 +162,17 @@ class TensorRtMultiviewEngine::Impl {
                const std::vector<std::size_t>& strides,
                const std::vector<std::uint32_t>& widths,
                const std::vector<std::uint32_t>& heights,
+               const std::vector<float>& fundamentals,
                TensorRtMultiviewResult& result) {
 #ifndef IRIS_HAS_TENSORRT
-        (void)sources; (void)strides; (void)widths; (void)heights; (void)result;
+        (void)sources; (void)strides; (void)widths; (void)heights; (void)fundamentals; (void)result;
         throw std::runtime_error("TensorRT support was not compiled into IRIS");
 #else
         const auto view_count = sources.size();
         if (view_count == 0 || view_count > max_views || strides.size() != view_count ||
             widths.size() != view_count || heights.size() != view_count ||
-            calibration_k_.size() != view_count * 9 || calibration_distortion_.size() != view_count * 5)
+            calibration_k_.size() != view_count * 9 || calibration_distortion_.size() != view_count * 5 ||
+            fundamentals.size() != view_count * view_count * 9)
             throw std::invalid_argument("RTMO inference input arrays must contain the same 1..10 views");
 
         result.timings.setup_host_ms = 0.0;
@@ -201,6 +216,18 @@ class TensorRtMultiviewEngine::Impl {
         result.timings.enqueue_host_ms = elapsed_ms(enqueue_start);
         check_cuda(cudaEventRecord(timing_events_[3].value, stream_), "time engine end");
 
+        result.assignments.resize(max_persons_ * view_count);
+        result.track_count = 0;
+        check_cuda(cudaEventRecord(timing_events_[6].value, stream_), "time association begin");
+        check_cuda(launch_multiview_current_association(
+            association_workspace_, static_cast<const float*>(keypoints_),
+            static_cast<const float*>(keypoint_scores_),
+            static_cast<const unsigned char*>(candidate_valid_), fundamentals.data(),
+            epipolar_gate_px_, minimum_joint_confidence_, stream_,
+            &result.timings.association_host_ms),
+            "launch current CUDA association");
+        check_cuda(cudaEventRecord(timing_events_[7].value, stream_), "time association end");
+
         const auto candidate_count = view_count * candidates_per_view;
         const auto keypoint_count = candidate_count * joints_per_person;
         result.keypoints.resize(keypoint_count * 2);
@@ -217,6 +244,8 @@ class TensorRtMultiviewEngine::Impl {
         const auto wait_start = TimingClock::now();
         check_cuda(cudaStreamSynchronize(stream_), "synchronize TensorRT inference");
         result.timings.wait_host_ms = elapsed_ms(wait_start);
+        copy_multiview_association_result(association_workspace_,
+            result.assignments.data(), &result.track_count);
         const auto interval = [&](int first, int last) {
             float value{};
             check_cuda(cudaEventElapsedTime(&value, timing_events_[first].value, timing_events_[last].value), "read pose timing");
@@ -224,6 +253,7 @@ class TensorRtMultiviewEngine::Impl {
         };
         result.timings.preprocess_stream_ms = interval(0, 1);
         result.timings.engine_stream_ms = interval(2, 3);
+        result.timings.association_stream_ms = interval(6, 7);
         result.timings.output_copy_stream_ms = interval(4, 5);
         result.timings.download_stream_ms = interval(3, 5);
 #endif
@@ -297,9 +327,13 @@ class TensorRtMultiviewEngine::Impl {
     TrtPtr<nvinfer1::ICudaEngine> engine_;
     TrtPtr<nvinfer1::IExecutionContext> context_;
     cudaStream_t stream_{};
-    std::array<TimingEvent, 6> timing_events_;
+    std::array<TimingEvent, 8> timing_events_;
     cudaGraph_t graph_{};
     cudaGraphExec_t graph_exec_{};
+    MultiviewAssociationWorkspace* association_workspace_{};
+    std::size_t max_persons_{};
+    float epipolar_gate_px_{12.0F};
+    float minimum_joint_confidence_{0.1F};
     void *images_{}, *keypoints_{}, *keypoint_scores_{}, *instance_scores_{}, *boxes_{}, *candidate_valid_{};
     void *source_ptrs_{}, *strides_{}, *widths_{}, *heights_{}, *source_k_{}, *target_k_{}, *distortion_{};
     std::vector<float> calibration_k_;
@@ -312,10 +346,11 @@ TensorRtMultiviewEngine::TensorRtMultiviewEngine(const PoseConfig& config)
 TensorRtMultiviewEngine::~TensorRtMultiviewEngine() = default;
 
 void TensorRtMultiviewEngine::infer(const std::vector<const void*>& bgr_device,
-                                    const std::vector<std::size_t>& strides,
-                                    const std::vector<std::uint32_t>& widths,
-                                    const std::vector<std::uint32_t>& heights,
-                                    TensorRtMultiviewResult& result) {
-    impl_->infer(bgr_device, strides, widths, heights, result);
+    const std::vector<std::size_t>& strides,
+    const std::vector<std::uint32_t>& widths,
+    const std::vector<std::uint32_t>& heights,
+    const std::vector<float>& fundamentals,
+    TensorRtMultiviewResult& result) {
+    impl_->infer(bgr_device, strides, widths, heights, fundamentals, result);
 }
 } // namespace iris
