@@ -76,11 +76,24 @@ json camera(const CameraCaptureConfig& c, const infrastructure::metrics::Metrics
     const auto gauge = [&metrics_snapshot, &prefix](const std::string& suffix) { const auto it = metrics_snapshot.gauges.find(prefix + suffix); return it == metrics_snapshot.gauges.end() ? 0.0 : it->second; };
     return {{"camera_id", c.camera_id}, {"device_symbolic_link", x.device_symbolic_link}, {"device_index", x.device_index ? json(*x.device_index) : json(nullptr)}, {"width", x.extent.width}, {"height", x.extent.height}, {"frame_rate", { {"numerator", x.frame_rate.numerator}, {"denominator", x.frame_rate.denominator}, {"value", x.frame_rate.value()} }}, {"format", pixel_format(x.format)}, {"cuda_device", x.cuda_device}, {"sample_queue_capacity", x.sample_queue_capacity}, {"frame_pool_capacity", x.frame_pool_capacity}, {"overflow", overflow(x.overflow)}, {"rotation", rotation(x.rotation)}, {"allow_format_fallback", x.allow_format_fallback}, {"reconnect", x.reconnect}, {"connected", gauge("_up") > 0.0}, {"frames_received", counter("_samples_received_total")}, {"frames_dropped", counter("_pool_exhaustions_total")}, {"source_errors", counter("_source_errors_total")}, {"last_frame_age_ms", gauge("_last_frame_age_ms")}, {"reconnect_count", counter("_reconnects_total")}, {"last_error", nullptr}};
 }
+json calibration_json(const std::optional<RuntimeSnapshot::Calibration>& value) {
+    if (!value) return nullptr;
+    json cameras = json::array();
+    for (const auto& camera : value->cameras) {
+        cameras.push_back({{"camera_id", camera.camera_id}, {"R_w2c", camera.R_w2c},
+                           {"t_w2c", camera.t_w2c}});
+    }
+    return {{"revision", value->revision}, {"source", value->source}, {"cameras", cameras}};
+}
+json calibration_tool_json(const RuntimeSnapshot::CalibrationToolStatus& value) {
+    return {{"state", value.state}, {"message", value.message},
+            {"source_sequence", value.source_sequence}};
+}
 json snapshot(const RuntimeSnapshot& s) {
     json cameras = json::array(); for (const auto& c : s.cameras) cameras.push_back(camera(c, s.metrics));
     json video_inputs = json::array(); for (const auto& v : s.video_inputs) video_inputs.push_back({{"camera_id", v.camera_id}, {"path", v.path.string()}, {"rotation", rotation(v.rotation)}});
     json decode_status = json::array(); for (const auto& status : s.video_decode_status) decode_status.push_back({{"camera_id", status.camera_id}, {"codec", status.codec}, {"backend", status.backend}, {"detail", status.detail}});
-    return {{"state", to_string(s.state)}, {"input_mode", s.input_mode}, {"video_inputs", video_inputs}, {"video_decode_status", decode_status}, {"video_cuda_device", s.video_cuda_device}, {"video_frame_pool_capacity", s.video_frame_pool_capacity}, {"video_realtime", s.video_realtime}, {"video_loop", s.video_loop}, {"recording", s.recording}, {"recording_path", s.recording_path.string()}, {"shared_memory_destination", s.shared_memory_destination}, {"shared_memory_enabled", s.shared_memory_enabled}, {"processed_packets", s.processed_packets}, {"cameras", cameras}, {"sync_tolerance_ms", s.sync_tolerance.count()}, {"sync_queue_capacity", s.sync_queue_capacity}, {"incomplete_batch_policy", s.incomplete_batch_policy == IncompleteBatchPolicy::DropBatch ? "drop" : "partial"}, {"pose_backend", s.pose_backend}, {"pose_model_path", s.pose_model_path.string()}, {"pose_engine_path", s.pose_engine_path.string()}, {"preview", {{"enabled", s.preview.enabled}, {"bind_address", s.preview.bind_address}, {"port", s.preview.port}, {"published_packets", s.preview.published_packets}, {"dropped_packets", s.preview.dropped_packets}, {"connected_clients", s.preview.connected_clients}, {"event_clients", s.preview.event_clients}, {"h264_clients", s.preview.h264_clients}, {"mjpeg_clients", s.preview.mjpeg_clients}, {"last_error", s.preview.last_error}}}, {"last_error", s.last_error}, {"metrics", metrics(s.metrics)}};
+    return {{"state", to_string(s.state)}, {"input_mode", s.input_mode}, {"video_inputs", video_inputs}, {"video_decode_status", decode_status}, {"video_cuda_device", s.video_cuda_device}, {"video_frame_pool_capacity", s.video_frame_pool_capacity}, {"video_realtime", s.video_realtime}, {"video_loop", s.video_loop}, {"recording", s.recording}, {"recording_path", s.recording_path.string()}, {"shared_memory_destination", s.shared_memory_destination}, {"shared_memory_enabled", s.shared_memory_enabled}, {"processed_packets", s.processed_packets}, {"cameras", cameras}, {"sync_tolerance_ms", s.sync_tolerance.count()}, {"sync_queue_capacity", s.sync_queue_capacity}, {"incomplete_batch_policy", s.incomplete_batch_policy == IncompleteBatchPolicy::DropBatch ? "drop" : "partial"}, {"pose_backend", s.pose_backend}, {"pose_model_path", s.pose_model_path.string()}, {"pose_engine_path", s.pose_engine_path.string()}, {"calibration", calibration_json(s.calibration)}, {"calibration_tool", calibration_tool_json(s.calibration_tool)}, {"preview", {{"enabled", s.preview.enabled}, {"bind_address", s.preview.bind_address}, {"port", s.preview.port}, {"published_packets", s.preview.published_packets}, {"dropped_packets", s.preview.dropped_packets}, {"connected_clients", s.preview.connected_clients}, {"event_clients", s.preview.event_clients}, {"h264_clients", s.preview.h264_clients}, {"mjpeg_clients", s.preview.mjpeg_clients}, {"last_error", s.preview.last_error}}}, {"last_error", s.last_error}, {"metrics", metrics(s.metrics)}};
 }
 json response(const RuntimeCommandResponse& r) { json out{{"status", command_status(r.status)}, {"message", r.message}}; if (r.snapshot) out["snapshot"] = snapshot(*r.snapshot); return out; }
 void write_bmp(const std::filesystem::path& path, const Frame& frame) {
@@ -176,6 +189,21 @@ class RestApiServer::Impl {
                 return {http::status::ok,{{"schema_version",1},{"session_id",session_id},{"batch_id",batch_id},{"orientation_degrees",angle},{"packet_sequence",packet->sequence},{"captured_at",std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count()},{"synchronization_skew_ms",skew_ms},{"pose_path",(destination/"pose.json").string()},{"pose",pose},{"frames",frames}}};
             } catch(const std::exception& cause){std::filesystem::remove_all(pending,ec);return error(http::status::internal_server_error,cause.what());}
         }
+        if (path == "/api/v1/calibration" && req.method() == http::verb::get) {
+            const auto result = runtime_.execute(GetRigCalibrationStatusCommand{});
+            const auto code = result.status == RuntimeCommandStatus::Applied
+                                  ? http::status::ok
+                                  : (result.status == RuntimeCommandStatus::Rejected
+                                         ? http::status::unprocessable_entity
+                                         : http::status::internal_server_error);
+            json out{{"status", command_status(result.status)}, {"message", result.message}};
+            if (result.snapshot) {
+                out["calibration"] = calibration_json(result.snapshot->calibration);
+                out["calibration_tool"] = calibration_tool_json(result.snapshot->calibration_tool);
+            }
+            return {code, std::move(out)};
+        }
+
         RuntimeCommand command;
         if (path == "/api/v1/pipeline/start" && req.method() == http::verb::post) command=StartPipelineCommand{};
         else if (path == "/api/v1/pipeline/stop" && req.method() == http::verb::post) command=StopPipelineCommand{};
@@ -210,7 +238,6 @@ class RestApiServer::Impl {
         else if (path == "/api/v1/calibration/start" && req.method() == http::verb::post) { auto b=json::parse(req.body(),nullptr,false); command=StartRigCalibrationCommand{b.is_object()?b.value("output_path", "rig-calibration.json"):"rig-calibration.json"}; }
         else if (path == "/api/v1/calibration/cancel" && req.method() == http::verb::post) command=CancelRigCalibrationCommand{};
         else if (path == "/api/v1/calibration/clear" && req.method() == http::verb::post) command=ClearRigCalibrationCommand{};
-        else if (path == "/api/v1/calibration" && req.method() == http::verb::get) command=GetRigCalibrationStatusCommand{};
         else if (path == "/api/v1/outputs/shared-memory" && req.method() == http::verb::patch) { auto b=json::parse(req.body(),nullptr,false); if(b.is_discarded())return error(http::status::bad_request,"invalid shared-memory body"); SharedMemoryOutputConfig c; c.enabled=b.value("enabled",false); c.destination=b.value("destination",c.destination); c.capacity_bytes=b.value("capacity_bytes",c.capacity_bytes); c.legacy_v1=b.value("legacy_v1",true); command=ConfigureSharedMemoryCommand{c}; }
         else if (path == "/api/v1/synchronizer" && req.method() == http::verb::patch) { auto b=json::parse(req.body(),nullptr,false); if(b.is_discarded())return error(http::status::bad_request,"invalid synchronizer body"); ConfigureSynchronizerCommand c; c.tolerance=std::chrono::milliseconds(b.value("tolerance_ms",20)); c.queue_capacity=b.value("queue_capacity",4U); c.incomplete_batch_policy=b.value("incomplete_batch_policy", "drop")=="partial" ? IncompleteBatchPolicy::EmitPartial : IncompleteBatchPolicy::DropBatch; command= c; }
         else if (path == "/api/v1/outputs/preview" && req.method() == http::verb::patch) { auto b=json::parse(req.body(),nullptr,false); if(b.is_discarded())return error(http::status::bad_request,"invalid preview body"); PreviewConfig c; c.http.enabled=b.value("http_enabled",true); c.mjpeg.enabled=b.value("mjpeg_enabled",true); c.h264.enabled=b.value("h264_enabled",true); c.http.bind_address=b.value("bind_address",c.http.bind_address); c.http.port=b.value("port",c.http.port); c.h264.max_fps=b.value("max_fps",c.h264.max_fps); c.h264.max_width=b.value("max_width",c.h264.max_width); c.mjpeg.jpeg_quality=b.value("jpeg_quality",c.mjpeg.jpeg_quality); c.h264.bitrate=b.value("bitrate",c.h264.bitrate); c.http.queue_capacity=b.value("queue_capacity",c.http.queue_capacity); command=ConfigurePreviewCommand{c}; }

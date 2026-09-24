@@ -80,12 +80,6 @@ void load_multiview_calibration(PoseConfig& config, const std::filesystem::path&
     std::sort(ids.begin(), ids.end());
     if (std::adjacent_find(ids.begin(), ids.end()) != ids.end()) throw std::runtime_error("calibration camera IDs must be unique");
 }
-std::string json_quote(const std::string& value) {
-    std::string result{"\""};
-    for (const char c : value) { if (c == '\\' || c == '\"') result += '\\'; if (c == '\n') result += "\\n"; else result += c; }
-    return result + '"';
-}
-
 struct CommandRequest {
     RuntimeCommand command;
     std::promise<RuntimeCommandResponse> completion;
@@ -332,57 +326,6 @@ class Runtime::Impl {
         if (!preview_result) {
             return from_output_result(std::move(preview_result));
         }
-        pipeline_->set_preview_status_provider([this] {
-            const auto current = snapshot();
-            std::string result = std::string{"{\"pipeline\":"} + json_quote(to_string(current.state)) +
-                   ",\"recording\":" + (current.recording ? "true" : "false") +
-                   ",\"processedPackets\":" + std::to_string(current.processed_packets) +
-                   ",\"previewDropped\":" + std::to_string(current.preview.dropped_packets) +
-                   ",\"previewPublished\":" + std::to_string(current.preview.published_packets) +
-                   ",\"lastError\":" + json_quote(current.last_error);
-            result += ",\"cameras\":[";
-            for (std::size_t i = 0; i < current.cameras.size(); ++i) {
-                if (i) result += ',';
-                const auto& camera = current.cameras[i];
-                const auto width = swaps_axes(camera.capture.rotation) ? camera.capture.extent.height : camera.capture.extent.width;
-                const auto height = swaps_axes(camera.capture.rotation) ? camera.capture.extent.width : camera.capture.extent.height;
-                result += "{\"camera_id\":" + std::to_string(camera.camera_id) +
-                          ",\"width\":" + std::to_string(width) +
-                          ",\"height\":" + std::to_string(height) +
-                          ",\"fps\":" + std::to_string(camera.capture.frame_rate.value()) +
-                          ",\"reconnect\":" + (camera.capture.reconnect ? "true" : "false") + "}";
-            }
-            result += "]";
-            result += std::string{",\"preview\":{\"enabled\":"} +
-                      (current.preview.enabled ? "true" : "false") +
-                      ",\"port\":" + std::to_string(current.preview.port) +
-                      ",\"last_error\":" + json_quote(current.preview.last_error) +
-                      ",\"h264\":{\"enabled\":" + (preview_config_.h264.enabled ? "true" : "false") +
-                      ",\"connected_clients\":" + std::to_string(current.preview.connected_clients) +
-                      ",\"event_clients\":" + std::to_string(current.preview.event_clients) +
-                      ",\"h264_clients\":" + std::to_string(current.preview.h264_clients) +
-                      ",\"mjpeg_clients\":" + std::to_string(current.preview.mjpeg_clients) +
-                      ",\"published_packets\":" + std::to_string(current.preview.published_packets) +
-                      ",\"dropped_packets\":" + std::to_string(current.preview.dropped_packets) +
-                      ",\"last_error\":" + json_quote(current.preview.last_error) +
-                      ",\"codec\":\"H264/NVENC\"" +
-                      ",\"bitrate\":" + std::to_string(preview_config_.h264.bitrate) +
-                      ",\"max_fps\":" + std::to_string(preview_config_.h264.max_fps) +
-                      ",\"max_width\":" + std::to_string(preview_config_.h264.max_width) + "}}";
-            if (const auto rig = calibration_store_->snapshot()) {
-                result += ",\"calibration\":{\"revision\":" + std::to_string(rig->revision) + ",\"cameras\":[";
-                for (std::size_t i = 0; i < rig->cameras.size(); ++i) {
-                    if (i) result += ',';
-                    const auto& c = rig->cameras[i]; result += "{\"camera_id\":" + std::to_string(c.camera_id) + ",\"R_w2c\":[";
-                    for (std::size_t j=0;j<c.R_w2c.size();++j) { if(j) result += ','; result += std::to_string(c.R_w2c[j]); }
-                    result += "],\"t_w2c\":[";
-                    for (std::size_t j=0;j<c.t_w2c.size();++j) { if(j) result += ','; result += std::to_string(c.t_w2c[j]); }
-                    result += "]}";
-                }
-                result += "]}";
-            }
-            return result + "}";
-        });
         {
             std::scoped_lock lock(state_mutex_);
             state_ = RuntimeState::Starting;
@@ -887,6 +830,29 @@ class Runtime::Impl {
         result.pose_backend = pose_backend_name(pose_config_);
         result.pose_model_path = pose_config_.model_path;
         result.pose_engine_path = pose_config_.multiview_engine_path;
+        const auto calibration_tool = rig_tool_->status();
+        result.calibration_tool = {calibration_tool.state, calibration_tool.message,
+                                   calibration_tool.source_sequence};
+        if (const auto rig = calibration_store_->snapshot()) {
+            RuntimeSnapshot::Calibration current;
+            current.revision = rig->revision;
+            current.source = "rig-calibration";
+            current.cameras.reserve(rig->cameras.size());
+            for (const auto& camera : rig->cameras) {
+                current.cameras.push_back({camera.camera_id, camera.R_w2c, camera.t_w2c});
+            }
+            result.calibration = std::move(current);
+        } else {
+            RuntimeSnapshot::Calibration current;
+            current.source = pose_config_.multiview_calibration_path.empty()
+                                 ? "pose-config"
+                                 : pose_config_.multiview_calibration_path.string();
+            for (const auto& camera : pose_config_.multiview_calibration) {
+                if (!camera.calibrated) continue;
+                current.cameras.push_back({camera.camera_id, camera.R_w2c, camera.t_w2c});
+            }
+            if (!current.cameras.empty()) result.calibration = std::move(current);
+        }
         result.metrics = metrics_.snapshot();
         if (const auto active = result.metrics.gauges.find("iris_output_recording_active");
             active != result.metrics.gauges.end()) {

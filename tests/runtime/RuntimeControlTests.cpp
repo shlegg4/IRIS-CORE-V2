@@ -3,6 +3,8 @@
 
 #include <cassert>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 
 int main() {
     std::string error;
@@ -77,6 +79,34 @@ int main() {
     assert(response.snapshot->state == iris::RuntimeState::Stopped);
     assert(response.snapshot->cameras.size() == 1);
 
+    const auto calibration_path = std::filesystem::temp_directory_path() /
+        ("iris-runtime-calibration-" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()) + ".json");
+    {
+        std::ofstream calibration_file(calibration_path);
+        assert(calibration_file);
+        calibration_file << R"({"cameras":[
+          {"camera_id":0,"R_w2c":[1,0,0,0,1,0,0,0,1],"t_w2c":[1,2,3],"intrinsics":[1,0,0,0,1,0,0,0,1]},
+          {"camera_id":7,"R_w2c":[0,-1,0,1,0,0,0,0,1],"t_w2c":[4,5,6],"intrinsics":[1,0,0,0,1,0,0,0,1]}
+        ]})";
+    }
+    iris::ConfigurePoseCommand configure_pose;
+    configure_pose.backend = iris::ConfigurePoseCommand::Backend::Multiview;
+    configure_pose.engine_path = "unused.engine";
+    configure_pose.calibration_path = calibration_path;
+    response = runtime.execute(configure_pose);
+    assert(response);
+    auto runtime_status = runtime.snapshot();
+    assert(runtime_status.calibration);
+    assert(runtime_status.calibration->source == calibration_path.string());
+    assert(runtime_status.calibration->cameras.size() == 2);
+    assert(runtime_status.calibration->cameras[1].camera_id == 7);
+    assert(runtime_status.calibration->cameras[1].R_w2c[1] == -1.0F);
+    assert(runtime_status.calibration->cameras[1].t_w2c[2] == 6.0F);
+    response = runtime.execute(iris::GetRigCalibrationStatusCommand{});
+    assert(response && response.snapshot && response.snapshot->calibration);
+    assert(response.snapshot->calibration->cameras.size() == 2);
+
     iris::SharedMemoryOutputConfig shared_memory;
     shared_memory.enabled = false;
     response = runtime.execute(iris::ConfigureSharedMemoryCommand{shared_memory});
@@ -124,4 +154,6 @@ int main() {
     assert(response.snapshot);
     assert(response.snapshot->state == iris::RuntimeState::Shutdown);
     runtime.stop();
+    std::error_code remove_error;
+    std::filesystem::remove(calibration_path, remove_error);
 }

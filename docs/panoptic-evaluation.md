@@ -51,7 +51,9 @@ in the output directory.
 - `run_config.json`: dataset, camera selection, engine, and exact command used by the launcher.
 - `calibration.iris.json`: selected calibration entries translated from the CMU camera file.
 - `evaluation.json`: 3-D joint error, PCK, 2-D reprojection error, and cross-view selected-detection
-  assignment accuracy when the ground-truth archive is present.
+  assignment accuracy when the ground-truth archive is present. It also reports direct per-camera
+  detection precision/recall at several reprojection thresholds and within-frame multi-view identity
+  consistency.
 
 ## Metrics and interpretation
 
@@ -69,6 +71,28 @@ error identifies the same ground-truth person as the 3-D match. These scores are
 when the selected videos are synchronized, calibration and image dimensions match, and video batch
 indices correspond to `body3DScene_<index>.json`. The report includes the number of overlapping
 frames; zero overlap is an error rather than a successful empty evaluation.
+
+`direct_detection_matching` labels each camera's detections independently by one-to-one assignment
+to projected ground-truth people. It includes ground-truth people with at least five COCO joints
+projecting inside the camera image, compares detections using at least three joints with score >=0.35,
+and reports precision/recall/F1 at configurable pixel thresholds (50, 100, 150, and 200 by default).
+These per-camera scores evaluate detector localization and coverage, not cross-camera association.
+`multi_view_identity_consistency` then checks the selected detections from each 3-D pose against
+those per-camera ground-truth labels; it counts only poses with at least two selected detections
+whose reprojection error is <=150 px. This is a within-frame association metric, not a tracker metric.
+
+The current epipolar matcher compares all cross-camera candidate pairs, uses a confidence-weighted
+trimmed mean of joint residuals (trimming the highest 20% of residual weight), requires at least five
+shared joints above 0.35 confidence, and gates pairs at 8 px in the 640 x 640 inference canvas.
+Compatible detections are joined through a cost-sorted pair graph; a track is retained only when it
+contains at least two cameras. The graph ordering uses camera IDs as deterministic tie-breakers, so
+the selected groups do not depend on the camera list order.
+
+`epipolar_pair_diagnostics` samples every twentieth overlapping frame. It labels candidate pairs
+using independent per-camera ground-truth assignments (accepted at <=150 px), reports same-person
+and different-person robust epipolar cost distributions, and sweeps gates from 8 to 48 px. The
+current 8 px gate was selected because it gave the best pair-classification F1 in the sampled
+Panoptic data; the full-sequence result is still the acceptance check for coverage and 3-D accuracy.
 
 For before/after comparisons, keep the sequence, camera selection, engine, CUDA device, realtime
 setting, and hardware constant. Compare `evaluation.json` for accuracy and

@@ -212,11 +212,11 @@ function sequenceZeroY(id: number): number {
   const { low, high } = sequenceRange(id)
   return 48 - ((0 - low) / (high - low || 1)) * 44
 }
-function connectEvents(): void {
+function connectPoseEvents(): void {
   if (!mounted || !playing.value) return
   eventsSocket?.close()
   const current = ++eventsGeneration
-  const ws = new WebSocket(`ws://127.0.0.1:${port.value}/api/events`)
+  const ws = new WebSocket(`ws://127.0.0.1:${port.value}/api/preview/pose-events`)
   eventsSocket = ws
   ws.onmessage = (event) => {
     if (current !== eventsGeneration) return
@@ -258,7 +258,7 @@ function connectEvents(): void {
     if (mounted && playing.value && current === eventsGeneration && !eventsTimer)
       eventsTimer = window.setTimeout(() => {
         eventsTimer = undefined
-        connectEvents()
+        connectPoseEvents()
       }, 1000)
   }
 }
@@ -447,7 +447,7 @@ function toggle(): void {
   if (playing.value) {
     transportState = 'stopped'
     connect()
-    connectEvents()
+    connectPoseEvents()
   } else {
     generation++
     eventsGeneration++
@@ -465,7 +465,7 @@ function toggle(): void {
 onMounted(() => {
   mounted = true
   connect()
-  connectEvents()
+  connectPoseEvents()
   fpsTimer = window.setInterval(() => {
     const now = performance.now(),
       next = new Map<number, number>()

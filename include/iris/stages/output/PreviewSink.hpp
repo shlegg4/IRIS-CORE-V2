@@ -7,7 +7,6 @@
 
 #include <cstddef>
 #include <memory>
-#include <functional>
 #include <string>
 
 namespace iris {
@@ -49,7 +48,6 @@ class PreviewSink final {
     void publish(PreviewPacket packet) noexcept;
     void stop() noexcept;
     OutputCommandResult configure(PreviewConfig config);
-    void set_status_provider(std::function<std::string()> provider);
     OutputCommandResult configure_shared_memory(SharedMemoryOutputConfig config);
     [[nodiscard]] PreviewTransportHealth shared_memory_health() const;
   private:

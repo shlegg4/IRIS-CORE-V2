@@ -6,9 +6,12 @@
 #include "iris/stages/output/OutputConfig.hpp"
 
 #include <filesystem>
+#include <array>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <variant>
+#include <vector>
 
 namespace iris {
 
@@ -91,7 +94,25 @@ using RuntimeCommand =
                  UseLiveCaptureCommand, ShutdownCommand>;
 
 struct RuntimeSnapshot {
+    struct CalibrationCamera {
+        CameraId camera_id{};
+        std::array<float, 9> R_w2c{};
+        std::array<float, 3> t_w2c{};
+    };
+    struct Calibration {
+        std::uint64_t revision{};
+        std::string source;
+        std::vector<CalibrationCamera> cameras;
+    };
+    struct CalibrationToolStatus {
+        std::string state{"idle"};
+        std::string message;
+        std::uint64_t source_sequence{};
+    };
+
     RuntimeState state{RuntimeState::Stopped};
+    std::optional<Calibration> calibration;
+    CalibrationToolStatus calibration_tool;
     bool recording{};
     std::filesystem::path recording_path;
     std::string shared_memory_destination;

@@ -20,6 +20,9 @@ __global__ void preprocess_kernel(const std::uint8_t* const* src, const std::siz
             for (int c = 0; c < 3; ++c) dst[(view * 3 + c) * plane + y * 640 + x] = 0.0f;
             return;
         }
+        // The TensorRT canvas is an undistorted pinhole image: use its ideal pixel
+        // ray to sample the corresponding distorted source pixel below. Keypoints
+        // returned by RTMO therefore already share target_k's pinhole coordinates.
         const float fx = target_k[view * 9], fy = target_k[view * 9 + 4];
         const float cx = target_k[view * 9 + 2], cy = target_k[view * 9 + 5];
         const float xu = (static_cast<float>(x) - cx) / fx;

@@ -10,7 +10,6 @@
 
 #include <cstddef>
 #include <memory>
-#include <functional>
 #include <string>
 
 namespace iris {
@@ -30,7 +29,6 @@ class OutputStage final {
 
     OutputCommandResult configure_shared_memory(SharedMemoryOutputConfig config);
     OutputCommandResult configure_preview(PreviewConfig config);
-    void set_preview_status_provider(std::function<std::string()> provider);
     OutputCommandResult configure_disk(DiskOutputConfig config);
     OutputCommandResult start_recording();
     OutputCommandResult stop_recording();

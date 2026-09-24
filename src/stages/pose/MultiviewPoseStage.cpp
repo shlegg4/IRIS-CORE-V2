@@ -12,6 +12,7 @@
 #include <numeric>
 #include <optional>
 #include <stdexcept>
+#include <tuple>
 #include <utility>
 #include <ranges>
 #include <vector>
@@ -29,6 +30,8 @@ constexpr std::size_t candidate_capacity = 10;
 constexpr std::size_t joint_capacity = coco_joint_count;
 constexpr std::size_t maximum_view_capacity = 10;
 constexpr float invalid_match_cost = std::numeric_limits<float>::infinity();
+constexpr std::size_t minimum_epipolar_joints = 5;
+constexpr float epipolar_trim_fraction = 0.2F;
 
 using Projection = Eigen::Matrix<float, 3, 4, Eigen::RowMajor>;
 
@@ -91,7 +94,7 @@ float detection_pair_cost(const TensorRtMultiviewResult& result,
                           std::size_t second_view, int second_candidate,
                           const Eigen::Matrix3f& fundamental, float minimum_score) {
     if (first_candidate < 0 || second_candidate < 0) return invalid_match_cost;
-    float sum = 0.0F;
+    std::array<std::pair<float, float>, joint_capacity> residuals{};
     std::size_t count = 0;
     const auto first_base = (first_view * candidate_capacity + static_cast<std::size_t>(first_candidate)) * joint_capacity;
     const auto second_base = (second_view * candidate_capacity + static_cast<std::size_t>(second_candidate)) * joint_capacity;
@@ -108,154 +111,206 @@ float detection_pair_cost(const TensorRtMultiviewResult& result,
             first_score < minimum_score || second_score < minimum_score ||
             !std::isfinite(x1) || !std::isfinite(y1) || !std::isfinite(x2) || !std::isfinite(y2))
             continue;
-        sum += symmetric_epipolar_distance(fundamental, x1, y1, x2, y2);
-        ++count;
+        const float residual = symmetric_epipolar_distance(fundamental, x1, y1, x2, y2);
+        if (!std::isfinite(residual)) continue;
+        const float confidence = std::sqrt(std::clamp(first_score, 0.0F, 1.0F) *
+                                           std::clamp(second_score, 0.0F, 1.0F));
+        if (!(confidence > 0.0F)) continue;
+        residuals[count++] = {residual, confidence};
     }
-    return count >= 3 ? sum / static_cast<float>(count) : invalid_match_cost;
+    if (count < minimum_epipolar_joints) return invalid_match_cost;
+
+    std::sort(residuals.begin(), residuals.begin() + static_cast<std::ptrdiff_t>(count),
+              [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
+    float total_weight = 0.0F;
+    for (std::size_t i = 0; i < count; ++i) total_weight += residuals[i].second;
+    const float retained_weight = total_weight * (1.0F - epipolar_trim_fraction);
+    float accumulated_weight = 0.0F;
+    float weighted_residual = 0.0F;
+    for (std::size_t i = 0; i < count && accumulated_weight < retained_weight; ++i) {
+        const float weight = std::min(residuals[i].second, retained_weight - accumulated_weight);
+        weighted_residual += residuals[i].first * weight;
+        accumulated_weight += weight;
+    }
+    return accumulated_weight > 0.0F ? weighted_residual / accumulated_weight : invalid_match_cost;
 }
 
-std::vector<int> minimum_cost_assignment(const std::vector<std::array<float, candidate_capacity>>& costs,
-                                         float gate) {
-    constexpr std::size_t state_count = 1U << candidate_capacity;
-    const auto row_count = costs.size();
-    std::vector<int> result(row_count, -1);
-    if (row_count == 0) return result;
-    const float unmatched_cost = gate;
-    std::vector<float> current(state_count, invalid_match_cost);
-    current[0] = 0.0F;
-    std::vector<std::vector<int>> parents(row_count, std::vector<int>(state_count, -1));
-    std::vector<std::vector<int>> selected(row_count, std::vector<int>(state_count, -2));
-    for (std::size_t row = 0; row < row_count; ++row) {
-        std::vector<float> next(state_count, invalid_match_cost);
-        for (std::size_t mask = 0; mask < state_count; ++mask) {
-            if (!std::isfinite(current[mask])) continue;
-            const float leave_unmatched = current[mask] + unmatched_cost;
-            if (leave_unmatched < next[mask]) {
-                next[mask] = leave_unmatched;
-                parents[row][mask] = static_cast<int>(mask);
-                selected[row][mask] = -1;
-            }
-            for (std::size_t candidate = 0; candidate < candidate_capacity; ++candidate) {
-                if (mask & (std::size_t{1} << candidate)) continue;
-                const float edge = costs[row][candidate];
-                if (!std::isfinite(edge) || edge >= gate) continue;
-                const auto next_mask = mask | (std::size_t{1} << candidate);
-                const float matched = current[mask] + edge;
-                if (matched < next[next_mask]) {
-                    next[next_mask] = matched;
-                    parents[row][next_mask] = static_cast<int>(mask);
-                    selected[row][next_mask] = static_cast<int>(candidate);
+struct DetectionEdge {
+    std::size_t first_view{};
+    std::size_t first_candidate{};
+    std::size_t second_view{};
+    std::size_t second_candidate{};
+    float cost{};
+};
+
+std::vector<std::vector<int>> associate_detections(
+    const TensorRtMultiviewResult& result, std::size_t view_count,
+    std::size_t max_persons,
+    const std::vector<PoseConfig::CameraCalibration>& cameras,
+    const std::vector<Eigen::Matrix3f>& fundamentals,
+    float gate, float minimum_score) {
+    const auto node_count = view_count * candidate_capacity;
+    std::vector<float> pair_costs(node_count * node_count, invalid_match_cost);
+    const auto pair_cost = [&](std::size_t view_a, std::size_t candidate_a,
+                               std::size_t view_b, std::size_t candidate_b) {
+        return pair_costs[(view_a * candidate_capacity + candidate_a) * node_count +
+                          view_b * candidate_capacity + candidate_b];
+    };
+    std::vector<DetectionEdge> edges;
+    for (std::size_t first_view = 0; first_view < view_count; ++first_view) {
+        for (std::size_t second_view = first_view + 1; second_view < view_count; ++second_view) {
+            const auto& fundamental = fundamentals[first_view * view_count + second_view];
+            for (std::size_t first = 0; first < candidate_capacity; ++first) {
+                if (!result.candidate_valid[first_view * candidate_capacity + first]) continue;
+                for (std::size_t second = 0; second < candidate_capacity; ++second) {
+                    if (!result.candidate_valid[second_view * candidate_capacity + second]) continue;
+                    const float cost = detection_pair_cost(result, first_view,
+                        static_cast<int>(first), second_view, static_cast<int>(second),
+                        fundamental, minimum_score);
+                    auto& forward = pair_costs[(first_view * candidate_capacity + first) * node_count +
+                                               second_view * candidate_capacity + second];
+                    auto& reverse = pair_costs[(second_view * candidate_capacity + second) * node_count +
+                                               first_view * candidate_capacity + first];
+                    forward = reverse = cost;
+                    if (std::isfinite(cost) && cost < gate)
+                        edges.push_back({first_view, first, second_view, second, cost});
                 }
             }
         }
-        current = std::move(next);
     }
-    std::size_t mask = static_cast<std::size_t>(std::min_element(current.begin(), current.end()) - current.begin());
-    for (std::size_t row = row_count; row-- > 0;) {
-        result[row] = selected[row][mask] >= 0 ? selected[row][mask] : -1;
-        const int parent = parents[row][mask];
-        if (parent < 0) break;
-        mask = static_cast<std::size_t>(parent);
-    }
-    return result;
-}
 
-float track_candidate_cost(const TensorRtMultiviewResult& result,
-                           const std::vector<int>& track, std::size_t candidate_view,
-                           int candidate, const std::vector<Eigen::Matrix3f>& fundamentals,
-                           std::size_t view_count, float minimum_score) {
-    std::vector<float> costs;
-    for (std::size_t view = 0; view < view_count; ++view) {
-        if (view == candidate_view || track[view] < 0) continue;
-        Eigen::Matrix3f f;
-        if (view < candidate_view) f = fundamentals[view * view_count + candidate_view];
-        else f = fundamentals[candidate_view * view_count + view].transpose();
-        const auto distance = detection_pair_cost(result, view, track[view], candidate_view,
-                                                  candidate, f, minimum_score);
-        if (std::isfinite(distance)) costs.push_back(distance);
-    }
-    if (costs.empty()) return invalid_match_cost;
-    std::ranges::sort(costs);
-    const auto middle = costs.size() / 2;
-    return costs.size() % 2 ? costs[middle] : 0.5F * (costs[middle - 1] + costs[middle]);
-}
-
-std::vector<std::vector<int>> associate_detections(const TensorRtMultiviewResult& result,
-                                                   std::size_t view_count,
-                                                   std::size_t max_persons,
-                                                   const std::vector<Eigen::Matrix3f>& fundamentals,
-                                                   float gate, float minimum_score) {
-    std::vector<std::size_t> detection_counts(view_count, 0);
-    for (std::size_t view = 0; view < view_count; ++view)
-        for (std::size_t candidate = 0; candidate < candidate_capacity; ++candidate)
-            detection_counts[view] += result.candidate_valid[view * candidate_capacity + candidate] != 0;
-    std::vector<std::size_t> view_order(view_count);
-    std::iota(view_order.begin(), view_order.end(), 0);
-    std::ranges::sort(view_order, [&](std::size_t lhs, std::size_t rhs) {
-        return detection_counts[lhs] > detection_counts[rhs];
+    const auto canonical_edge_key = [&](const DetectionEdge& edge) {
+        const auto first_id = cameras[edge.first_view].camera_id;
+        const auto second_id = cameras[edge.second_view].camera_id;
+        if (first_id < second_id)
+            return std::tuple{first_id, second_id, edge.first_candidate, edge.second_candidate};
+        return std::tuple{second_id, first_id, edge.second_candidate, edge.first_candidate};
+    };
+    std::ranges::sort(edges, [&](const DetectionEdge& lhs, const DetectionEdge& rhs) {
+        if (lhs.cost != rhs.cost) return lhs.cost < rhs.cost;
+        return canonical_edge_key(lhs) < canonical_edge_key(rhs);
     });
 
     std::vector<std::vector<int>> tracks;
-    std::vector<std::array<bool, candidate_capacity>> used(view_count);
-    for (auto& per_view : used) per_view.fill(false);
-    if (view_order.empty()) return tracks;
-    const auto anchor = view_order.front();
-    for (std::size_t candidate = 0; candidate < candidate_capacity && tracks.size() < max_persons; ++candidate) {
-        if (!result.candidate_valid[anchor * candidate_capacity + candidate]) continue;
-        std::vector<int> track(view_count, -1);
-        track[anchor] = static_cast<int>(candidate);
-        used[anchor][candidate] = true;
-        tracks.push_back(std::move(track));
-    }
-
-    for (std::size_t order_index = 1; order_index < view_order.size(); ++order_index) {
-        const auto view = view_order[order_index];
-        std::vector<std::array<float, candidate_capacity>> costs(tracks.size());
-        for (std::size_t track_index = 0; track_index < tracks.size(); ++track_index) {
-            costs[track_index].fill(invalid_match_cost);
-            for (std::size_t candidate = 0; candidate < candidate_capacity; ++candidate) {
-                if (used[view][candidate] || !result.candidate_valid[view * candidate_capacity + candidate]) continue;
-                costs[track_index][candidate] = track_candidate_cost(result, tracks[track_index], view,
-                    static_cast<int>(candidate), fundamentals, view_count, minimum_score);
+    std::vector<bool> active;
+    std::vector<int> node_track(node_count, -1);
+    const auto nodes_compatible = [&](const std::vector<int>& track,
+                                      std::size_t view, std::size_t candidate) {
+        if (track[view] >= 0) return false;
+        for (std::size_t other_view = 0; other_view < view_count; ++other_view) {
+            if (track[other_view] < 0) continue;
+            const auto cost = pair_cost(other_view, static_cast<std::size_t>(track[other_view]),
+                                        view, candidate);
+            if (!std::isfinite(cost) || cost >= gate) return false;
+        }
+        return true;
+    };
+    const auto tracks_compatible = [&](const std::vector<int>& first,
+                                       const std::vector<int>& second) {
+        for (std::size_t first_view = 0; first_view < view_count; ++first_view) {
+            if (first[first_view] < 0) continue;
+            if (second[first_view] >= 0) return false;
+            for (std::size_t second_view = 0; second_view < view_count; ++second_view) {
+                if (second[second_view] < 0) continue;
+                const auto cost = pair_cost(first_view, static_cast<std::size_t>(first[first_view]),
+                                            second_view, static_cast<std::size_t>(second[second_view]));
+                if (!std::isfinite(cost) || cost >= gate) return false;
             }
         }
-        const auto assignments = minimum_cost_assignment(costs, gate);
-        for (std::size_t track_index = 0; track_index < assignments.size(); ++track_index) {
-            const int candidate = assignments[track_index];
-            if (candidate < 0) continue;
-            tracks[track_index][view] = candidate;
-            used[view][static_cast<std::size_t>(candidate)] = true;
-        }
+        return true;
+    };
 
-        // Start additional hypotheses from detections missed by the anchor
-        // camera, then greedily attach still-unused detections from other views.
-        for (std::size_t seed = 0; seed < candidate_capacity && tracks.size() < max_persons; ++seed) {
-            if (used[view][seed] || !result.candidate_valid[view * candidate_capacity + seed]) continue;
+    for (const auto& edge : edges) {
+        const auto first_node = edge.first_view * candidate_capacity + edge.first_candidate;
+        const auto second_node = edge.second_view * candidate_capacity + edge.second_candidate;
+        const int first_track = node_track[first_node];
+        const int second_track = node_track[second_node];
+        if (first_track < 0 && second_track < 0) {
             std::vector<int> track(view_count, -1);
-            track[view] = static_cast<int>(seed);
-            used[view][seed] = true;
-            for (const auto other_view : view_order) {
-                if (other_view == view) continue;
-                int best_candidate = -1;
-                float best_cost = gate;
-                for (std::size_t candidate = 0; candidate < candidate_capacity; ++candidate) {
-                    if (used[other_view][candidate] || !result.candidate_valid[other_view * candidate_capacity + candidate]) continue;
-                    const float cost = track_candidate_cost(result, track, other_view,
-                        static_cast<int>(candidate), fundamentals, view_count, minimum_score);
-                    if (cost < best_cost) {
-                        best_cost = cost;
-                        best_candidate = static_cast<int>(candidate);
-                    }
-                }
-                if (best_candidate >= 0) {
-                    track[other_view] = best_candidate;
-                    used[other_view][static_cast<std::size_t>(best_candidate)] = true;
-                }
-            }
+            track[edge.first_view] = static_cast<int>(edge.first_candidate);
+            track[edge.second_view] = static_cast<int>(edge.second_candidate);
+            const auto index = static_cast<int>(tracks.size());
             tracks.push_back(std::move(track));
+            active.push_back(true);
+            node_track[first_node] = node_track[second_node] = index;
+            continue;
         }
+        if (first_track >= 0 && second_track < 0) {
+            auto& track = tracks[static_cast<std::size_t>(first_track)];
+            if (nodes_compatible(track, edge.second_view, edge.second_candidate)) {
+                track[edge.second_view] = static_cast<int>(edge.second_candidate);
+                node_track[second_node] = first_track;
+            }
+            continue;
+        }
+        if (first_track < 0 && second_track >= 0) {
+            auto& track = tracks[static_cast<std::size_t>(second_track)];
+            if (nodes_compatible(track, edge.first_view, edge.first_candidate)) {
+                track[edge.first_view] = static_cast<int>(edge.first_candidate);
+                node_track[first_node] = second_track;
+            }
+            continue;
+        }
+        if (first_track == second_track) continue;
+        auto& first = tracks[static_cast<std::size_t>(first_track)];
+        auto& second = tracks[static_cast<std::size_t>(second_track)];
+        if (!active[static_cast<std::size_t>(first_track)] ||
+            !active[static_cast<std::size_t>(second_track)] ||
+            !tracks_compatible(first, second)) continue;
+        for (std::size_t view = 0; view < view_count; ++view) {
+            if (second[view] < 0) continue;
+            first[view] = second[view];
+            node_track[view * candidate_capacity + static_cast<std::size_t>(second[view])] = first_track;
+            second[view] = -1;
+        }
+        active[static_cast<std::size_t>(second_track)] = false;
     }
-    return tracks;
+
+    struct RankedTrack {
+        std::vector<int> assignments;
+        std::size_t view_count{};
+        float mean_cost{};
+    };
+    std::vector<RankedTrack> ranked;
+    for (std::size_t index = 0; index < tracks.size(); ++index) {
+        if (!active[index]) continue;
+        std::size_t assigned_views = 0, pairs = 0;
+        float total_cost = 0.0F;
+        for (std::size_t first_view = 0; first_view < view_count; ++first_view) {
+            if (tracks[index][first_view] < 0) continue;
+            ++assigned_views;
+            for (std::size_t second_view = first_view + 1; second_view < view_count; ++second_view) {
+                if (tracks[index][second_view] < 0) continue;
+                total_cost += pair_cost(first_view, static_cast<std::size_t>(tracks[index][first_view]),
+                                        second_view, static_cast<std::size_t>(tracks[index][second_view]));
+                ++pairs;
+            }
+        }
+        if (assigned_views >= 2)
+            ranked.push_back({tracks[index], assigned_views, pairs ? total_cost / static_cast<float>(pairs) : gate});
+    }
+    std::vector<std::size_t> canonical_views(view_count);
+    std::iota(canonical_views.begin(), canonical_views.end(), 0);
+    std::ranges::sort(canonical_views, [&](std::size_t lhs, std::size_t rhs) {
+        return cameras[lhs].camera_id < cameras[rhs].camera_id;
+    });
+    std::ranges::sort(ranked, [&](const RankedTrack& lhs, const RankedTrack& rhs) {
+        if (lhs.view_count != rhs.view_count) return lhs.view_count > rhs.view_count;
+        if (lhs.mean_cost != rhs.mean_cost) return lhs.mean_cost < rhs.mean_cost;
+        for (const auto view : canonical_views) {
+            const auto lhs_value = lhs.assignments[view] < 0 ? candidate_capacity :
+                static_cast<std::size_t>(lhs.assignments[view]);
+            const auto rhs_value = rhs.assignments[view] < 0 ? candidate_capacity :
+                static_cast<std::size_t>(rhs.assignments[view]);
+            if (lhs_value != rhs_value) return lhs_value < rhs_value;
+        }
+        return false;
+    });
+    std::vector<std::vector<int>> output;
+    output.reserve(std::min(max_persons, ranked.size()));
+    for (std::size_t i = 0; i < ranked.size() && i < max_persons; ++i)
+        output.push_back(std::move(ranked[i].assignments));
+    return output;
 }
 
 std::optional<Eigen::Vector3f> triangulate_joint(
@@ -411,6 +466,7 @@ class MultiviewPoseStage::Impl {
 
         const auto association_start = std::chrono::steady_clock::now();
         auto tracks = associate_detections(result, view_count, config_.max_persons,
+                                           config_.multiview_calibration,
                                            fundamentals, config_.epipolar_gate_px,
                                            config_.minimum_joint_confidence);
         result.timings.association_host_ms = std::chrono::duration<double, std::milli>(

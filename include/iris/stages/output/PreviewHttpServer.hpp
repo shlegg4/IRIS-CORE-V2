@@ -4,7 +4,6 @@
 #include "iris/stages/output/H264PreviewProtocol.hpp"
 
 #include <cstdint>
-#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -13,8 +12,7 @@ namespace iris::output {
 
 class PreviewHttpServer final {
   public:
-    using StatusProvider = std::function<std::string()>;
-    PreviewHttpServer(std::string bind_address, std::uint16_t port, StatusProvider status);
+    PreviewHttpServer(std::string bind_address, std::uint16_t port);
     ~PreviewHttpServer();
     PreviewHttpServer(const PreviewHttpServer&) = delete;
     void start();

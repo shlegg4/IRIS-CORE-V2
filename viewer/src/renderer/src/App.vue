@@ -27,6 +27,9 @@ const posePointCount = computed(
 const runtimeState = computed(() => runtimeStatus.value.state || 'unknown')
 const runtimeLabel = computed(() => runtimeState.value === 'running' ? 'Running' : runtimeState.value === 'stopped' ? 'Ready' : runtimeState.value[0].toUpperCase() + runtimeState.value.slice(1))
 const hasPoseData = computed(() => posePointCount.value > 0 || !!poseFrame.value)
+function applyCalibrationSnapshot(value: CalibrationSnapshot | null): void {
+  calibration.value = value
+}
 async function startFromEmpty(): Promise<void> {
   emptyStateError.value = ''
   try {
@@ -69,7 +72,8 @@ onMounted(() => {
         cameras: value.cameras ?? runtimeStatus.value.cameras,
         preview: value.preview ? { ...runtimeStatus.value.preview, ...value.preview } : runtimeStatus.value.preview
       }
-      if (value.calibration) calibration.value = value.calibration
+      if (Object.prototype.hasOwnProperty.call(value, 'calibration'))
+        calibration.value = value.calibration ?? null
     })
   )
 })
@@ -78,7 +82,7 @@ onBeforeUnmount(() => subscriptions.forEach((unsubscribe) => unsubscribe()))
 <template>
   <main class="app-shell">
     <section class="workspace" :style="{ '--console-width': `${consoleWidth}px` }">
-      <aside class="console panel"><div class="panel-heading">IRIS CONTROL <span>{{ runtimeLabel }}</span></div><RuntimeControls :status="runtimeStatus" :metrics="metrics" :logs="logs" /><div class="console-footer">REST · 127.0.0.1:8090 <span>LOCAL</span></div></aside>
+      <aside class="console panel"><div class="panel-heading">IRIS CONTROL <span>{{ runtimeLabel }}</span></div><RuntimeControls :status="runtimeStatus" :metrics="metrics" :logs="logs" @calibration-refresh="applyCalibrationSnapshot" /><div class="console-footer">REST · 127.0.0.1:8090 <span>LOCAL</span></div></aside>
       <div
         class="console-resizer"
         role="separator"

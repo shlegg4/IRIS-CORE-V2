@@ -334,7 +334,6 @@ OutputCommandResult Pipeline::configure_shared_memory(SharedMemoryOutputConfig c
     return impl_->output_.configure_shared_memory(std::move(config));
 }
 OutputCommandResult Pipeline::configure_preview(PreviewConfig config) { return impl_->output_.configure_preview(std::move(config)); }
-void Pipeline::set_preview_status_provider(std::function<std::string()> provider) { impl_->output_.set_preview_status_provider(std::move(provider)); }
 OutputCommandResult Pipeline::configure_disk(DiskOutputConfig config) {
     return impl_->output_.configure_disk(std::move(config));
 }

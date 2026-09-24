@@ -350,7 +350,6 @@ class OutputStage::Impl {
         }
     }
     OutputCommandResult configure_preview(PreviewConfig config) { return preview_.configure(std::move(config)); }
-    void set_preview_status_provider(std::function<std::string()> provider) { preview_.set_status_provider(std::move(provider)); }
 
     OutputCommandResult configure_disk(DiskOutputConfig config) {
         if (config.queue_capacity != config_.disk.queue_capacity) {
@@ -583,7 +582,6 @@ OutputCommandResult OutputStage::configure_shared_memory(SharedMemoryOutputConfi
     return impl_->configure_shared_memory(std::move(config));
 }
 OutputCommandResult OutputStage::configure_preview(PreviewConfig config) { return impl_->configure_preview(std::move(config)); }
-void OutputStage::set_preview_status_provider(std::function<std::string()> provider) { impl_->set_preview_status_provider(std::move(provider)); }
 
 OutputCommandResult OutputStage::configure_disk(DiskOutputConfig config) {
     return impl_->configure_disk(std::move(config));

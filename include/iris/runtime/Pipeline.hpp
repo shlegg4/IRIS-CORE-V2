@@ -8,7 +8,6 @@
 #include "iris/stages/capture/SynchronizedVideoConfig.hpp"
 
 #include <memory>
-#include <functional>
 #include <string>
 
 namespace iris {
@@ -32,7 +31,6 @@ class Pipeline {
     void stop();
     OutputCommandResult configure_shared_memory(SharedMemoryOutputConfig);
     OutputCommandResult configure_preview(PreviewConfig);
-    void set_preview_status_provider(std::function<std::string()>);
     OutputCommandResult configure_disk(DiskOutputConfig);
     OutputCommandResult start_recording();
     OutputCommandResult stop_recording();

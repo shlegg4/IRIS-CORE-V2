@@ -9,7 +9,7 @@ import icon from '../../resources/icon.png?asset'
 
 let irisProcess: ChildProcessByStdio<null, Readable, Readable> | undefined
 let apiTimer: NodeJS.Timeout | undefined
-let previewSocket: WebSocket | undefined
+let poseEventsSocket: WebSocket | undefined
 let reconnectTimer: NodeJS.Timeout | undefined
 
 function send(window: BrowserWindow, channel: string, payload: unknown): void {
@@ -22,18 +22,7 @@ const API_BASE = 'http://127.0.0.1:8090/api/v1'
 type ApiResult = { status?: string; message?: string; snapshot?: unknown; [key: string]: unknown }
 function normalizeRuntimeStatus(payload: unknown): Record<string, unknown> {
   if (!payload || typeof payload !== 'object') return { state: 'unknown' }
-  const value = payload as Record<string, unknown>
-  if (typeof value.state === 'string') return value
-  if (typeof value.pipeline === 'string') {
-    return {
-      ...value,
-      state: value.pipeline,
-      processed_packets: value.processedPackets,
-      last_error: value.lastError,
-      preview: value.preview
-    }
-  }
-  return value
+  return payload as Record<string, unknown>
 }
 async function apiRequest(path: string, method = 'GET', body?: unknown): Promise<ApiResult> {
   const response = await fetch(`${API_BASE}${path}`, {
@@ -64,10 +53,10 @@ function startApiBridge(window: BrowserWindow): void {
   apiTimer = setInterval(() => void poll(), 500)
 }
 
-function connectPreviewEvents(window: BrowserWindow): void {
-  previewSocket?.close()
-  previewSocket = new WebSocket('ws://127.0.0.1:8080/api/events')
-  previewSocket.on('message', (data) => {
+function connectPoseEvents(window: BrowserWindow): void {
+  poseEventsSocket?.close()
+  poseEventsSocket = new WebSocket('ws://127.0.0.1:8080/api/preview/pose-events')
+  poseEventsSocket.on('message', (data) => {
     try {
       const envelope = JSON.parse(data.toString()) as { type?: string; data?: unknown }
       if (envelope.type === 'pose') send(window, 'iris:pose', envelope.data)
@@ -75,13 +64,13 @@ function connectPreviewEvents(window: BrowserWindow): void {
       send(window, 'iris:log', `preview event error: ${String(error)}`)
     }
   })
-  previewSocket.on('error', () => undefined)
-  previewSocket.on('close', () => {
-    previewSocket = undefined
+  poseEventsSocket.on('error', () => undefined)
+  poseEventsSocket.on('close', () => {
+    poseEventsSocket = undefined
     if (irisProcess && !reconnectTimer) {
       reconnectTimer = setTimeout(() => {
         reconnectTimer = undefined
-        connectPreviewEvents(window)
+        connectPoseEvents(window)
       }, 1000)
     }
   })
@@ -149,7 +138,7 @@ function startIrisRuntime(window: BrowserWindow): void {
     void waitForApi().then(() => {
       send(window, 'iris:status', { state: 'running', executable })
       startApiBridge(window)
-      connectPreviewEvents(window)
+      connectPoseEvents(window)
     }).catch((error) => send(window, 'iris:status', { state: 'error', message: String(error) }))
   } catch (error) {
     window.webContents.send('iris:status', { state: 'error', message: String(error) })
@@ -161,8 +150,8 @@ function stopIrisRuntime(): void {
   if (reconnectTimer) clearTimeout(reconnectTimer)
   apiTimer = undefined
   reconnectTimer = undefined
-  previewSocket?.close()
-  previewSocket = undefined
+  poseEventsSocket?.close()
+  poseEventsSocket = undefined
   if (!irisProcess) return
   const child = irisProcess
   irisProcess = undefined

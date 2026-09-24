@@ -146,7 +146,8 @@ For unattended inference runs, direct `--video` startup accepts `--engine`, `--c
 The CMU Panoptic runner converts the native calibration file and evaluates predictions against the
 sequence ground truth. See [docs/panoptic-evaluation.md](docs/panoptic-evaluation.md).
 
-Runtime metrics are periodically written to `iris_metrics.json`. Detailed design and validation notes are under `docs/`.
+Runtime metrics are periodically written to `iris_metrics.json`. See the [local HTTP API reference](docs/api.md)
+for REST endpoints and preview protocol links. Detailed design and validation notes are under `docs/`.
 They are also exposed in Prometheus format at `http://127.0.0.1:9464/metrics`. A provisioned
 Prometheus and Grafana developer stack is available under `tools/observability/`.
 

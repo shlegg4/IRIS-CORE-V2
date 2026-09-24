@@ -29,6 +29,7 @@ export interface CameraExtrinsic {
 }
 export interface CalibrationSnapshot {
   revision: number
+  source?: string
   cameras: CameraExtrinsic[]
 }
 export interface CameraStatus {
@@ -102,6 +103,11 @@ export interface RuntimeStatus {
   pose_model_path?: string
   pose_engine_path?: string
   last_error?: string
+  calibration_tool?: {
+    state: string
+    message: string
+    source_sequence: number
+  }
   preview?: {
     bind_address?: string
     port?: number
@@ -114,7 +120,7 @@ export interface RuntimeStatus {
     mjpeg_clients?: number
     last_error?: string
   }
-  calibration?: CalibrationSnapshot
+  calibration?: CalibrationSnapshot | null
 }
 export interface VideoDecodeStatus {
   camera_id: number
