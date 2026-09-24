@@ -42,9 +42,19 @@ void load_multiview_calibration(PoseConfig& config, const std::filesystem::path&
     std::ifstream input(path);
     if (!input) throw std::runtime_error("could not open multiview calibration file: " + path.string());
     const auto document = json::parse(input);
-    if (!document.contains("cameras") || !document["cameras"].is_array() || document["cameras"].size() != 3)
-        throw std::runtime_error("multiview calibration must contain exactly three cameras");
-    for (std::size_t index = 0; index < 3; ++index) {
+    if (!document.contains("cameras") || !document["cameras"].is_array())
+        throw std::runtime_error("multiview calibration must contain a cameras array");
+    const auto count = document["cameras"].size();
+    if (count == 0 || count > 10 || (!config.two_d_only && count < 2) ||
+        (config.two_d_only && count != 1))
+        throw std::runtime_error(config.two_d_only
+            ? "2-D pose calibration must contain exactly one camera"
+            : "multiview calibration must contain between two and ten cameras");
+    config.multiview_calibration.clear();
+    config.multiview_calibration.reserve(count);
+    std::vector<CameraId> ids;
+    ids.reserve(count);
+    for (std::size_t index = 0; index < count; ++index) {
         const auto& camera = document["cameras"][index];
         if (!camera.contains("camera_id")) throw std::runtime_error("calibration camera is missing camera_id");
         auto read = [&camera](const char* name, std::size_t count) {
@@ -58,7 +68,7 @@ void load_multiview_calibration(PoseConfig& config, const std::filesystem::path&
         const auto translation = read("t_w2c", 3);
         const auto intrinsics = read("intrinsics", 9);
         const auto distortion = camera.contains("distortion") ? read("distortion", 5) : std::vector<float>(5, 0.0F);
-        auto& target = config.multiview_calibration[index];
+        auto& target = config.multiview_calibration.emplace_back();
         target.camera_id = camera["camera_id"].get<CameraId>();
         std::copy(rotation.begin(), rotation.end(), target.R_w2c.begin());
         std::copy(translation.begin(), translation.end(), target.t_w2c.begin());
@@ -66,8 +76,7 @@ void load_multiview_calibration(PoseConfig& config, const std::filesystem::path&
         std::copy(distortion.begin(), distortion.end(), target.distortion.begin());
         target.calibrated = true;
     }
-    std::array<CameraId, 3> ids{};
-    for (std::size_t i = 0; i < 3; ++i) ids[i] = config.multiview_calibration[i].camera_id;
+    for (const auto& calibration : config.multiview_calibration) ids.push_back(calibration.camera_id);
     std::sort(ids.begin(), ids.end());
     if (std::adjacent_find(ids.begin(), ids.end()) != ids.end()) throw std::runtime_error("calibration camera IDs must be unique");
 }

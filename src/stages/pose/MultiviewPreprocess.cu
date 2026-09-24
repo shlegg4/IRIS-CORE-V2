@@ -1,6 +1,7 @@
 #include <cuda_runtime.h>
 #include <cstdint>
 #include <cstddef>
+#include <vector>
 
 __global__ void preprocess_kernel(const std::uint8_t* const* src, const std::size_t* pitch,
                                   const std::uint32_t* w, const std::uint32_t* h,
@@ -50,18 +51,21 @@ extern "C" cudaError_t iris_multiview_preprocess(const void* const* sources, con
                                             const std::uint32_t* widths, const std::uint32_t* heights,
                                             const float* source_k, const float* target_k, const float* distortion,
                                             float* destination, cudaStream_t stream,
+                                            std::size_t view_count,
                                             const std::uint8_t** source_device, std::size_t* stride_device,
                                             std::uint32_t* width_device, std::uint32_t* height_device,
                                             float* source_k_device, float* target_k_device, float* distortion_device) {
-    const std::uint8_t* device_sources[3] = {static_cast<const std::uint8_t*>(sources[0]), static_cast<const std::uint8_t*>(sources[1]), static_cast<const std::uint8_t*>(sources[2])};
-    const std::size_t device_strides[3] = {strides[0], strides[1], strides[2]};
-    if (auto e=cudaMemcpyAsync(source_device, device_sources, sizeof(device_sources), cudaMemcpyHostToDevice, stream); e!=cudaSuccess) return e;
-    if (auto e=cudaMemcpyAsync(stride_device, device_strides, sizeof(device_strides), cudaMemcpyHostToDevice, stream); e!=cudaSuccess) return e;
-    if (auto e=cudaMemcpyAsync(width_device, widths, 3*sizeof(std::uint32_t), cudaMemcpyHostToDevice, stream); e!=cudaSuccess) return e;
-    if (auto e=cudaMemcpyAsync(height_device, heights, 3*sizeof(std::uint32_t), cudaMemcpyHostToDevice, stream); e!=cudaSuccess) return e;
-    if (auto e=cudaMemcpyAsync(source_k_device, source_k, 27*sizeof(float), cudaMemcpyHostToDevice, stream); e!=cudaSuccess) return e;
-    if (auto e=cudaMemcpyAsync(target_k_device, target_k, 27*sizeof(float), cudaMemcpyHostToDevice, stream); e!=cudaSuccess) return e;
-    if (auto e=cudaMemcpyAsync(distortion_device, distortion, 15*sizeof(float), cudaMemcpyHostToDevice, stream); e!=cudaSuccess) return e;
-    preprocess_kernel<<<dim3(40, 40, 3), dim3(16, 16), 0, stream>>>(source_device, stride_device, width_device, height_device, source_k_device, target_k_device, distortion_device, destination);
+    if (view_count == 0 || view_count > 10) return cudaErrorInvalidValue;
+    std::vector<const std::uint8_t*> device_sources(view_count);
+    for (std::size_t view = 0; view < view_count; ++view)
+        device_sources[view] = static_cast<const std::uint8_t*>(sources[view]);
+    if (auto e=cudaMemcpyAsync(source_device, device_sources.data(), view_count*sizeof(device_sources[0]), cudaMemcpyHostToDevice, stream); e!=cudaSuccess) return e;
+    if (auto e=cudaMemcpyAsync(stride_device, strides, view_count*sizeof(std::size_t), cudaMemcpyHostToDevice, stream); e!=cudaSuccess) return e;
+    if (auto e=cudaMemcpyAsync(width_device, widths, view_count*sizeof(std::uint32_t), cudaMemcpyHostToDevice, stream); e!=cudaSuccess) return e;
+    if (auto e=cudaMemcpyAsync(height_device, heights, view_count*sizeof(std::uint32_t), cudaMemcpyHostToDevice, stream); e!=cudaSuccess) return e;
+    if (auto e=cudaMemcpyAsync(source_k_device, source_k, view_count*9*sizeof(float), cudaMemcpyHostToDevice, stream); e!=cudaSuccess) return e;
+    if (auto e=cudaMemcpyAsync(target_k_device, target_k, view_count*9*sizeof(float), cudaMemcpyHostToDevice, stream); e!=cudaSuccess) return e;
+    if (auto e=cudaMemcpyAsync(distortion_device, distortion, view_count*5*sizeof(float), cudaMemcpyHostToDevice, stream); e!=cudaSuccess) return e;
+    preprocess_kernel<<<dim3(40, 40, static_cast<unsigned>(view_count)), dim3(16, 16), 0, stream>>>(source_device, stride_device, width_device, height_device, source_k_device, target_k_device, distortion_device, destination);
     return cudaGetLastError();
 }

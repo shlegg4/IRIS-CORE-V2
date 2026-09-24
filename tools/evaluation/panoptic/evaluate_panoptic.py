@@ -177,13 +177,15 @@ def main():
                         help="hdPose3d_stage1_coco19.tar or extracted directory")
     parser.add_argument("--calibration", required=True, type=pathlib.Path)
     parser.add_argument("--camera-ids", required=True,
-                        help="three HD camera suffixes used for this run")
+                        help="two to ten HD camera suffixes used for this run")
     parser.add_argument("--output", type=pathlib.Path)
     parser.add_argument("--pck-threshold-cm", type=float, default=10.0)
     parser.add_argument("--max-person-match-error-cm", type=float, default=100.0,
                         help="larger 3-D person matches are counted as unmatched")
     args = parser.parse_args()
     camera_ids = [int(value) for value in args.camera_ids.split(",")]
+    if len(camera_ids) < 2 or len(camera_ids) > 10 or len(set(camera_ids)) != len(camera_ids):
+        parser.error("--camera-ids must contain between two and ten unique IDs")
     cameras = cmu_camera_map(args.calibration, camera_ids)
     if args.ground_truth.is_dir():
         gt = {}

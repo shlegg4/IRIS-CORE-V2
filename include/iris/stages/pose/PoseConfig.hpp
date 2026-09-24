@@ -8,6 +8,7 @@
 #include <array>
 #include <memory>
 #include <stdexcept>
+#include <vector>
 
 namespace iris {
 class CalibrationStore;
@@ -22,13 +23,12 @@ struct PoseConfig {
     // itself is compatible with the selected LibTorch CUDA runtime.
     std::string device{"cpu"};
 
-    // Optional RTMO-S detector + CPU triangulation backend. It is selected
-    // instead of the monocular backend and currently requires three cameras.
+    // Optional RTMO-S detector + multiview geometry backend. It is selected
+    // instead of the monocular backend and accepts 2..10 calibrated views.
     std::filesystem::path multiview_engine_path;
     std::filesystem::path multiview_calibration_path;
     // Run the RTMO engine on a single camera and emit only its 2-D keypoints.
-    // The fixed-batch engine is fed three copies internally; no rig calibration
-    // or triangulation is required.
+    // No rig calibration or triangulation is required.
     bool two_d_only{};
     std::size_t max_persons{10};
     float epipolar_gate_px{32.0F};
@@ -46,7 +46,7 @@ struct PoseConfig {
         int image_rotation_degrees{};
         bool calibrated{false};
     };
-    std::array<CameraCalibration, 3> multiview_calibration{};
+    std::vector<CameraCalibration> multiview_calibration;
     std::shared_ptr<CalibrationStore> calibration_store;
 };
 

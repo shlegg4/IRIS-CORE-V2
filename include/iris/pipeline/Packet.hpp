@@ -3,6 +3,7 @@
 #include <array>
 #include <optional>
 #include <vector>
+#include <vector>
 namespace iris {
 using FrameBatch = std::vector<Frame>;
 
@@ -11,14 +12,14 @@ inline constexpr std::size_t coco_joint_count = 17;
 
 struct MultiviewPose {
     bool active{};
-    std::array<CameraId, 3> view_camera_ids{};
+    std::vector<CameraId> view_camera_ids;
     // Candidate index selected by the cross-view association stage, or -1 if unmatched.
-    std::array<std::int32_t, 3> selected_detection_indices{-1, -1, -1};
+    std::vector<std::int32_t> selected_detection_indices;
     std::array<std::array<float, 3>, coco_joint_count> joints_3d{};
     std::array<bool, coco_joint_count> joint_valid{};
-    std::array<std::array<float, coco_joint_count>, 3> joint_scores{};
-    std::array<std::array<std::array<float, 2>, coco_joint_count>, 3> points_2d_px{};
-    std::array<std::array<bool, coco_joint_count>, 3> point_valid{};
+    std::vector<std::array<float, coco_joint_count>> joint_scores;
+    std::vector<std::array<std::array<float, 2>, coco_joint_count>> points_2d_px;
+    std::vector<std::array<bool, coco_joint_count>> point_valid;
 };
 
 struct ViewPose2d {

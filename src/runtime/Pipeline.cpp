@@ -89,24 +89,39 @@ class Pipeline::Impl {
         if (!pose_config.model_path.empty() && !pose_config.multiview_engine_path.empty())
             throw std::invalid_argument("configure either monocular model_path or multiview_engine_path, not both");
         if (!pose_config.multiview_engine_path.empty()) {
-            const auto required_cameras = pose_config.two_d_only ? 1U : 3U;
-            if (source_cameras.size() != required_cameras ||
-                (!pose_config.two_d_only && config.incomplete_batch_policy != IncompleteBatchPolicy::DropBatch))
+            const auto view_count = source_cameras.size();
+            if ((pose_config.two_d_only && view_count != 1) ||
+                (!pose_config.two_d_only && (view_count < 2 || view_count > 10 ||
+                    config.incomplete_batch_policy != IncompleteBatchPolicy::DropBatch)))
                 throw std::invalid_argument(pose_config.two_d_only
                     ? "2-D pose requires exactly one camera"
-                    : "multiview pose requires exactly three cameras and drop-partial synchronization");
+                    : "multiview pose requires 2..10 cameras and drop-partial synchronization");
             if (pose_config.two_d_only) {
+                pose_config.multiview_calibration.resize(1);
                 auto& calibration = pose_config.multiview_calibration[0];
                 calibration.camera_id = source_cameras.front().camera_id;
                 calibration.intrinsics = {1.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 1.0F};
                 calibration.distortion = {};
                 calibration.source_extent = source_cameras.front().capture.extent;
                 calibration.calibrated = true;
-            } else if (const auto rig=pose_config.calibration_store ? pose_config.calibration_store->snapshot() : nullptr) {
-                for (const auto& calibration : rig->cameras)
+            } else if (pose_config.multiview_calibration.empty() && pose_config.calibration_store) {
+                pose_config.multiview_calibration.resize(view_count);
+                for (std::size_t index = 0; index < view_count; ++index)
+                    pose_config.multiview_calibration[index].camera_id = source_cameras[index].camera_id;
+            }
+            if (!pose_config.two_d_only && !pose_config.multiview_calibration.empty() &&
+                pose_config.multiview_calibration.size() != view_count)
+                throw std::invalid_argument("multiview calibration count must match configured camera count");
+            if (!pose_config.two_d_only && pose_config.calibration_store) {
+                const auto rig = pose_config.calibration_store->snapshot();
+                if (rig && rig->cameras.size() != view_count)
+                    throw std::invalid_argument("runtime calibration camera count must match configured camera count");
+                if (rig) for (const auto& calibration : rig->cameras)
                     if (std::ranges::find(source_cameras, calibration.camera_id, &CameraCaptureConfig::camera_id) == source_cameras.end()) throw std::invalid_argument("runtime calibration camera ID is not configured for capture");
-            } else for (const auto& calibration : pose_config.multiview_calibration)
-                if (calibration.calibrated && std::ranges::find(source_cameras, calibration.camera_id, &CameraCaptureConfig::camera_id) == source_cameras.end()) throw std::invalid_argument("multiview calibration camera ID is not configured for capture");
+            } else if (!pose_config.two_d_only) {
+                for (const auto& calibration : pose_config.multiview_calibration)
+                    if (calibration.calibrated && std::ranges::find(source_cameras, calibration.camera_id, &CameraCaptureConfig::camera_id) == source_cameras.end()) throw std::invalid_argument("multiview calibration camera ID is not configured for capture");
+            }
             const int cuda_device = source_cameras.front().capture.cuda_device;
             for (std::size_t index = 0; index < source_cameras.size(); ++index) {
                 const auto& camera = source_cameras[index];
@@ -116,10 +131,8 @@ class Pipeline::Impl {
                 auto calibration = std::ranges::find(
                     pose_config.multiview_calibration, camera.camera_id,
                     &PoseConfig::CameraCalibration::camera_id);
-                // When using the live rig store, the local array is only a
-                // placeholder until MultiviewPoseStage refreshes it.  Give
-                // those placeholders capture IDs so rotation metadata can be
-                // carried through to that refresh.
+                // When using the live rig store, local entries may be
+                // placeholders until MultiviewPoseStage refreshes them.
                 if (calibration == pose_config.multiview_calibration.end() &&
                     index < pose_config.multiview_calibration.size() &&
                     !pose_config.multiview_calibration[index].calibrated) {

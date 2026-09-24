@@ -53,10 +53,11 @@ bundle; `pose monocular` is rejected by this build. It still requires a compatib
 IRIS can use engines compiled for the target GPU. Keep the TensorRT SDK available on the machine
 that prepares the deployment, then:
 
-1. Stage the source checkpoints and ONNX graphs under `models/source/` as documented in
-   `models/source/README.md`. The DA3 graph must use the fixed four-view, 504x504 calibration
-   contract. The ONNX export step is performed externally; this repository consumes the staged
-   graph and its `.onnx.data` file.
+1. The engine builder requires the RTMO candidate ONNX and the DA3 four-view, 504x504 ONNX graph
+   plus its `.onnx.data` sidecar. If these files are missing, it downloads them from the private
+   `shlegg4/iris-models` Hub repository. Run `hf auth login` first. Source checkpoints and model
+   provenance are documented in `models/source/README.md`; exporting the DA3 graph remains an
+   external step.
 2. Build and cache both engines for the current GPU and TensorRT version by running the VS Code
    task `IRIS: build TensorRT engines`, or directly:
 
@@ -65,6 +66,10 @@ that prepares the deployment, then:
      -TensorRtRoot C:/TensorRT-10.10.0.31 `
      -CacheRoot models/cache
    ```
+
+The builder uses the Hub's `main` revision by default when downloading missing inputs. Pass
+`-ModelRevision <commit-hash>` or set `IRIS_MODEL_REVISION` in the VS Code task environment to pin
+a specific model upload for a reproducible engine build.
 
 The helper keys its cache by GPU, compute capability, TensorRT version, and both ONNX hashes. It
 smoke-runs each built engine under `models/cache/<GPU>_sm<capability>_TensorRT<version>/` and

@@ -41,8 +41,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sequence", required=True, type=pathlib.Path,
                         help="CMU sequence directory, e.g. 171204_pose1_sample")
-    parser.add_argument("--camera-ids", default="0,8,16",
-                        help="three HD camera suffixes (default: 0,8,16)")
+    parser.add_argument("--camera-ids", default="0,4,8,12,16",
+                        help="two to ten HD camera suffixes (default: 0,4,8,12,16)")
     parser.add_argument("--engine", required=True, type=pathlib.Path)
     parser.add_argument("--iris", required=True, type=pathlib.Path,
                         help="path to iris_app.exe")
@@ -55,8 +55,8 @@ def main():
 
     sequence = args.sequence.resolve()
     camera_ids = [int(value) for value in args.camera_ids.split(",") if value.strip()]
-    if len(camera_ids) != 3 or len(set(camera_ids)) != 3:
-        parser.error("--camera-ids must contain exactly three unique IDs")
+    if len(camera_ids) < 2 or len(camera_ids) > 10 or len(set(camera_ids)) != len(camera_ids):
+        parser.error("--camera-ids must contain between two and ten unique IDs")
     if any(value < 0 or value > 30 for value in camera_ids):
         parser.error("sample HD camera IDs must be from 0 through 30")
     args.output_dir = args.output_dir.resolve()
