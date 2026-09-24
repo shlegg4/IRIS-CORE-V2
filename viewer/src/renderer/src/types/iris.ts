@@ -9,6 +9,13 @@ export interface MetricsSnapshot {
   gauges: Record<string, number>
   histograms: Record<string, HistogramValue>
 }
+export interface RuntimeLogEntry {
+  id: number
+  timestamp: string
+  source: 'stdout' | 'stderr' | 'viewer'
+  level: 'info' | 'error'
+  message: string
+}
 export interface PosePerson {
   id?: number
   joints?: number[][]

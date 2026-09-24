@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
-import type { CreateCameraRequest, DiscoveredCamera, UpdateCameraRequest } from '../renderer/src/types/iris'
+import type { CreateCameraRequest, DiscoveredCamera, RuntimeLogEntry, UpdateCameraRequest } from '../renderer/src/types/iris'
 
 // Custom APIs for renderer
 const api = {
@@ -26,8 +26,9 @@ const api = {
   clearCalibration: () => ipcRenderer.invoke('iris:api', '/calibration/clear', 'POST'),
   shutdownRuntime: () => ipcRenderer.invoke('iris:api', '/shutdown', 'POST'),
   stop: () => ipcRenderer.invoke('iris:stop'),
-  onLog: (callback: (log: string) => void) => {
-    const listener = (_event: Electron.IpcRendererEvent, log: string): void => callback(log)
+  getRecentLogs: () => ipcRenderer.invoke('iris:recent-logs') as Promise<RuntimeLogEntry[]>,
+  onLog: (callback: (log: RuntimeLogEntry) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, log: RuntimeLogEntry): void => callback(log)
     ipcRenderer.on('iris:log', listener)
     return () => ipcRenderer.removeListener('iris:log', listener)
   },

@@ -1,11 +1,16 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
-import type { CalibrationSnapshot, CreateCameraRequest, MetricsSnapshot, RuntimeStatus } from '../types/iris'
+import { nextTick, ref, watch } from 'vue'
+import type { CalibrationSnapshot, CreateCameraRequest, MetricsSnapshot, RuntimeLogEntry, RuntimeStatus } from '../types/iris'
 import CameraManager from './CameraManager.vue'
-const props = defineProps<{ status: RuntimeStatus; metrics: MetricsSnapshot | null; logs: string[][] }>()
+const props = defineProps<{ status: RuntimeStatus; metrics: MetricsSnapshot | null; logs: RuntimeLogEntry[] }>()
 const emit = defineEmits<{ (event: 'calibration-refresh', value: CalibrationSnapshot | null): void }>()
 const api = window.api
 const busy = ref(''), message = ref('')
+const logContainer = ref<HTMLElement | null>(null)
+watch(() => props.logs.length, async () => {
+  await nextTick()
+  if (logContainer.value) logContainer.value.scrollTop = logContainer.value.scrollHeight
+})
 const selectedCamera = ref<number | null>(null)
 const metricPrefix = ref('')
 const camera = ref<CreateCameraRequest>({ camera_id: 1, device_index: 1, device_symbolic_link: '', width: 1920, height: 1080, frame_rate: 30, format: 'mjpeg', cuda_device: 0, sample_queue_capacity: 1, frame_pool_capacity: 4, overflow: 'drop-oldest', rotation: 'none', allow_format_fallback: false, reconnect: true })
@@ -44,7 +49,7 @@ async function refreshCalibration(): Promise<void> {
     <div class="control-group-title">ADVANCED</div>
     <details><summary>SYNCHRONIZER <span>{{ props.status.sync_tolerance_ms ?? 20 }} ms</span></summary><div class="control-fields"><input v-model.number="sync.tolerance_ms" type="number" aria-label="Synchronizer tolerance" placeholder="Tolerance ms"/><input v-model.number="sync.queue_capacity" type="number" aria-label="Queue capacity" placeholder="Queue capacity"/><select v-model="sync.incomplete_batch_policy" aria-label="Incomplete batch policy"><option value="drop">Drop incomplete batches</option><option value="partial">Emit partial batches</option></select><button :disabled="!!busy" @click="call('synchronizer', post('/synchronizer', { ...sync }))">APPLY SYNCHRONIZER</button></div></details>
     <details><summary>METRICS</summary><div class="control-fields"><input v-model="metricPrefix" aria-label="Metric prefix" placeholder="Metric prefix"/><button :disabled="!!busy" @click="call('metrics', () => api.getMetrics(metricPrefix))">REFRESH METRICS</button><small>{{ Object.keys(props.metrics?.counters || {}).length }} counters · {{ Object.keys(props.metrics?.gauges || {}).length }} gauges</small></div></details>
-    <details><summary>LOGS <span>{{ props.logs.length }}</span></summary><div class="control-log"><div v-for="(log, index) in props.logs" :key="index">{{ log.join(' · ') }}</div><small v-if="!props.logs.length">No runtime events yet.</small></div></details>
+    <details open><summary>TERMINAL <span>{{ props.logs.length }}</span></summary><div ref="logContainer" class="control-log" role="log"><div v-for="log in props.logs" :key="log.id" :class="{ 'control-log-error': log.level === 'error' }">{{ new Date(log.timestamp).toLocaleTimeString('en-GB') }} · {{ log.source }} · {{ log.message }}</div><small v-if="!props.logs.length">No runtime events yet.</small></div></details>
     <small v-if="message" class="control-message" role="status">{{ message }}</small>
   </div>
 </template>

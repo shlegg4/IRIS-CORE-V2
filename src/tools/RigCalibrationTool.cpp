@@ -7,6 +7,7 @@
 #include <opencv2/core.hpp>
 #include <cmath>
 #include <fstream>
+#include <sstream>
 #include <set>
 #include <stdexcept>
 #ifdef _WIN32
@@ -91,7 +92,25 @@ void RigCalibrationTool::run(std::stop_token stop, std::filesystem::path engine,
         auto batch = da3::PrepareInputBatch(images, labels, preprocess);
         da3::TensorRtEngine trt(engine, true);
         const auto result = trt.InferBase(static_cast<int>(images.size()), batch.images);
-        if (result.extrinsics.values.size() != images.size()*16 || result.intrinsics.values.size() != images.size()*9) throw std::runtime_error("DA3 returned unexpected camera tensor sizes");
+        if (result.extrinsics.values.size() != images.size()*16 || result.intrinsics.values.size() != images.size()*9) {
+            const auto format_dims = [](const std::vector<std::int64_t>& dims) {
+                std::ostringstream text;
+                text << '[';
+                for (std::size_t i = 0; i < dims.size(); ++i) {
+                    if (i != 0) text << ',';
+                    text << dims[i];
+                }
+                text << ']';
+                return text.str();
+            };
+            std::ostringstream message;
+            message << "DA3 camera tensor shape mismatch for " << images.size() << " views: expected extrinsics [1," << images.size()
+                    << ",4,4] (" << images.size() * 16 << " values) and intrinsics [1," << images.size() << ",3,3] ("
+                    << images.size() * 9 << " values), got extrinsics " << format_dims(result.extrinsics.dims) << " ("
+                    << result.extrinsics.values.size() << " values) and intrinsics " << format_dims(result.intrinsics.dims)
+                    << " (" << result.intrinsics.values.size() << " values). Check that the DA3 engine was built from the current dynamic-view ONNX export.";
+            throw std::runtime_error(message.str());
+        }
         auto calibration = std::make_shared<RigCalibration>();
         calibration->revision = store_->snapshot() ? store_->snapshot()->revision + 1 : 1;
         calibration->created_at = std::chrono::system_clock::now(); calibration->method="da3"; calibration->metric_scale=false;

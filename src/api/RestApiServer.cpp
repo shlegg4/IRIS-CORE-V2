@@ -19,10 +19,14 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -135,12 +139,79 @@ class RestApiServer::Impl {
         if (!output::is_loopback_address(bind_)) { running_ = false; throw std::invalid_argument("API server must bind to a loopback address"); }
         boost::system::error_code ec; auto address = asio::ip::make_address(bind_ == "localhost" ? "127.0.0.1" : bind_, ec); if (ec) throw std::runtime_error(ec.message());
         acceptor_.open(tcp::v4(), ec); if (!ec) acceptor_.set_option(asio::socket_base::reuse_address(true), ec); if (!ec) acceptor_.bind({address, port_}, ec); if (!ec) acceptor_.listen(asio::socket_base::max_listen_connections, ec); if (ec) { running_=false; throw std::runtime_error("API listen: "+ec.message()); }
-        thread_ = std::thread([this] { while (running_) { tcp::socket socket(context_); boost::system::error_code e; acceptor_.accept(socket, e); if (!e) std::thread(&Impl::session, this, std::move(socket)).detach(); } });
+        thread_ = std::thread([this] {
+            while (running_) {
+                tcp::socket socket(context_);
+                boost::system::error_code e;
+                acceptor_.accept(socket, e);
+                if (e) continue;
+                bool at_capacity = false;
+                {
+                    std::scoped_lock lock(sessions_mutex_);
+                    at_capacity = active_sessions_ >= 32;
+                    if (!at_capacity) ++active_sessions_;
+                }
+                if (at_capacity) {
+                    // Bound the number of threads and in-flight control commands.
+                    // A client can retry after its existing requests finish.
+                    boost::system::error_code ignored;
+                    socket.close(ignored);
+                    continue;
+                }
+                try {
+                    std::thread(&Impl::session_entry, this, std::move(socket)).detach();
+                } catch (...) {
+                    {
+                        std::scoped_lock lock(sessions_mutex_);
+                        --active_sessions_;
+                    }
+                    sessions_changed_.notify_all();
+                }
+            }
+        });
     }
-    void stop() noexcept { if (!running_.exchange(false)) return; boost::system::error_code ec; acceptor_.close(ec); if (thread_.joinable()) thread_.join(); }
+    void stop() noexcept {
+        if (!running_.exchange(false)) return;
+        boost::system::error_code ec;
+        acceptor_.close(ec);
+        if (thread_.joinable()) thread_.join();
+        std::unique_lock lock(sessions_mutex_);
+        sessions_changed_.wait(lock, [this] { return active_sessions_ == 0; });
+    }
   private:
+    void session_entry(tcp::socket socket) noexcept {
+        session(std::move(socket));
+        {
+            std::scoped_lock lock(sessions_mutex_);
+            --active_sessions_;
+        }
+        sessions_changed_.notify_all();
+    }
     void session(tcp::socket socket) noexcept {
-        try { beast::flat_buffer buffer; http::request<http::string_body> req; http::read(socket, buffer, req); auto [code, body] = handle(req); http::response<http::string_body> res{code, req.version()}; res.set(http::field::content_type, "application/json"); res.set(http::field::access_control_allow_origin, "*"); res.body() = body.dump(); res.prepare_payload(); res.keep_alive(false); http::write(socket, res); } catch (...) {}
+        try {
+            beast::tcp_stream stream(std::move(socket));
+            stream.expires_after(std::chrono::seconds(5));
+            beast::flat_buffer buffer;
+            http::request_parser<http::string_body> parser;
+            parser.body_limit(1024 * 1024);
+            boost::system::error_code ec;
+            http::read(stream, buffer, parser, ec);
+            if (ec) return;
+            auto req = parser.release();
+            auto [code, body] = handle(req);
+            http::response<http::string_body> res{code, req.version()};
+            res.set(http::field::content_type, "application/json");
+            res.set(http::field::access_control_allow_origin, "*");
+            res.body() = body.dump();
+            res.prepare_payload();
+            res.keep_alive(false);
+            stream.expires_after(std::chrono::seconds(5));
+            http::write(stream, res, ec);
+        } catch (const std::exception& error) {
+            std::cerr << "IRIS API request failed: " << error.what() << '\n';
+        } catch (...) {
+            std::cerr << "IRIS API request failed: unknown exception\n";
+        }
     }
     std::pair<http::status, json> handle(const http::request<http::string_body>& req) {
         const std::string target(req.target()); const auto query_start = target.find('?'); const std::string path = target.substr(0, query_start);
@@ -232,8 +303,8 @@ class RestApiServer::Impl {
         else if (path == "/api/v1/shutdown" && req.method() == http::verb::post) command=ShutdownCommand{};
         else if (path == "/api/v1/recording/start" && req.method() == http::verb::post) { auto b=json::parse(req.body(),nullptr,false); if (b.is_discarded() || !b.contains("destination") || !b["destination"].is_string()) return error(http::status::bad_request,"destination is required"); command=StartRecordingCommand{b["destination"].get<std::string>(),number(b,"bitrate"),number(b,"frame_rate")}; }
         else if (path == "/api/v1/cameras" && req.method() == http::verb::post) { auto b=json::parse(req.body(),nullptr,false); if(b.is_discarded()||!b.contains("camera_id"))return error(http::status::bad_request,"camera_id is required"); if(b.contains("rotation")&&!parse_rotation(b))return error(http::status::bad_request,"rotation must be none, cw90, 180, or ccw90"); CameraCaptureConfig c; c.camera_id=b.value("camera_id",0U); auto p=capture_patch(b); if(!p)return error(http::status::bad_request,"invalid camera body"); c.capture.device_symbolic_link=p->device_symbolic_link.value_or(""); c.capture.device_index=p->device_index.value_or(0); c.capture.extent.width=p->width.value_or(c.capture.extent.width); c.capture.extent.height=p->height.value_or(c.capture.extent.height); if(p->frame_rate)c.capture.frame_rate=*p->frame_rate; if(p->format)c.capture.format=*p->format; if(p->cuda_device)c.capture.cuda_device=*p->cuda_device; if(p->sample_queue_capacity)c.capture.sample_queue_capacity=*p->sample_queue_capacity; if(p->frame_pool_capacity)c.capture.frame_pool_capacity=*p->frame_pool_capacity; if(p->overflow)c.capture.overflow=*p->overflow; if(p->rotation)c.capture.rotation=*p->rotation; if(p->allow_format_fallback.has_value())c.capture.allow_format_fallback=*p->allow_format_fallback; if(p->reconnect.has_value())c.capture.reconnect=*p->reconnect; command=AddCameraCommand{c}; }
-        else if (auto id=path_camera(path); id && req.method()==http::verb::delete_) command=RemoveCameraCommand{*id};
-        else if (auto id=path_camera(path); id && req.method()==http::verb::patch) { auto b=json::parse(req.body(),nullptr,false); if(b.is_discarded())return error(http::status::bad_request,"invalid camera patch body"); if(b.contains("rotation")&&!parse_rotation(b))return error(http::status::bad_request,"rotation must be none, cw90, 180, or ccw90"); auto p=capture_patch(b); if(!p||p->empty())return error(http::status::bad_request,"camera patch is empty or invalid"); command=ConfigureCaptureCommand{*p,*id}; }
+        else if (auto delete_id=path_camera(path); delete_id && req.method()==http::verb::delete_) command=RemoveCameraCommand{*delete_id};
+        else if (auto patch_id=path_camera(path); patch_id && req.method()==http::verb::patch) { auto b=json::parse(req.body(),nullptr,false); if(b.is_discarded())return error(http::status::bad_request,"invalid camera patch body"); if(b.contains("rotation")&&!parse_rotation(b))return error(http::status::bad_request,"rotation must be none, cw90, 180, or ccw90"); auto p=capture_patch(b); if(!p||p->empty())return error(http::status::bad_request,"camera patch is empty or invalid"); command=ConfigureCaptureCommand{*p,*patch_id}; }
         else if (path == "/api/v1/pose" && req.method() == http::verb::patch) { auto b=json::parse(req.body(),nullptr,false); if(b.is_discarded()||!b.contains("backend"))return error(http::status::bad_request,"backend is required"); ConfigurePoseCommand p; const auto v=b.value("backend",""); if(v=="off")p.backend=ConfigurePoseCommand::Backend::Off; else if(v=="monocular")p.backend=ConfigurePoseCommand::Backend::Monocular; else if(v=="2d")p.backend=ConfigurePoseCommand::Backend::TwoDimensional; else if(v=="multiview")p.backend=ConfigurePoseCommand::Backend::Multiview; else return error(http::status::bad_request,"invalid pose backend"); p.model_path=b.value("model_path",""); p.engine_path=b.value("engine_path",""); p.calibration_path=b.value("calibration_path",""); command=std::move(p); }
         else if (path == "/api/v1/calibration/start" && req.method() == http::verb::post) { auto b=json::parse(req.body(),nullptr,false); command=StartRigCalibrationCommand{b.is_object()?b.value("output_path", "rig-calibration.json"):"rig-calibration.json"}; }
         else if (path == "/api/v1/calibration/cancel" && req.method() == http::verb::post) command=CancelRigCalibrationCommand{};
@@ -245,7 +316,7 @@ class RestApiServer::Impl {
         auto r=runtime_.execute(std::move(command)); auto code=r.status==RuntimeCommandStatus::Applied?http::status::ok:(r.status==RuntimeCommandStatus::Rejected?http::status::unprocessable_entity:http::status::internal_server_error); return {code,response(r)};
     }
     static std::pair<http::status,json> error(http::status s, std::string message) { return {s, {{"status","rejected"},{"message",std::move(message)}}}; }
-    Runtime& runtime_; std::string bind_; std::uint16_t port_; asio::io_context context_; tcp::acceptor acceptor_; std::atomic_bool running_{false}; std::thread thread_;
+    Runtime& runtime_; std::string bind_; std::uint16_t port_; asio::io_context context_; tcp::acceptor acceptor_; std::atomic_bool running_{false}; std::thread thread_; std::mutex sessions_mutex_; std::condition_variable sessions_changed_; std::size_t active_sessions_{};
 };
 
 RestApiServer::RestApiServer(Runtime& r, std::string bind, std::uint16_t port) : impl_(std::make_unique<Impl>(r,std::move(bind),port)) {}

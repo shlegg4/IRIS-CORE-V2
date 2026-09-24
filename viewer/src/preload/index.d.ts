@@ -1,5 +1,5 @@
 import { ElectronAPI } from '@electron-toolkit/preload'
-import type { CreateCameraRequest, DiscoveredCamera, UpdateCameraRequest } from '../renderer/src/types/iris'
+import type { CreateCameraRequest, DiscoveredCamera, RuntimeLogEntry, UpdateCameraRequest } from '../renderer/src/types/iris'
 
 declare global {
   interface Window {
@@ -27,7 +27,8 @@ declare global {
       clearCalibration(): Promise<unknown>
       shutdownRuntime(): Promise<unknown>
       stop(): Promise<void>
-      onLog(callback: (log: string) => void): () => void
+      getRecentLogs(): Promise<RuntimeLogEntry[]>
+      onLog(callback: (log: RuntimeLogEntry) => void): () => void
       onMetrics(callback: (metrics: unknown) => void): () => void
       onPoseFrame(callback: (frame: unknown) => void): () => void
       onStatus(callback: (status: unknown) => void): () => void

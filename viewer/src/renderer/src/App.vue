@@ -4,10 +4,10 @@ import ThreeGraph from './components/ThreeGraph.vue'
 import MetricsPage from './components/MetricsPage.vue'
 import CameraGridPage from './components/CameraGridPage.vue'
 import RuntimeControls from './components/RuntimeControls.vue'
-import type { CalibrationSnapshot, MetricsSnapshot, PoseFrame, RuntimeStatus } from './types/iris'
+import type { CalibrationSnapshot, MetricsSnapshot, PoseFrame, RuntimeLogEntry, RuntimeStatus } from './types/iris'
 const showGrid = ref(true),
   activeTab = ref<'output' | 'metrics' | 'cameras'>('output')
-const logs = ref<string[][]>([])
+const logs = ref<RuntimeLogEntry[]>([])
 const emptyStateError = ref('')
 const metrics = ref<MetricsSnapshot | null>(null)
 const poseFrame = ref<PoseFrame | null>(null)
@@ -53,11 +53,13 @@ function startResize(event: PointerEvent): void {
   window.addEventListener('pointerup', onEnd, { once: true })
 }
 const subscriptions: Array<() => void> = []
+function addLog(entry: RuntimeLogEntry): void {
+  if (logs.value.some((existing) => existing.id === entry.id)) return
+  logs.value = [...logs.value, entry].sort((a, b) => a.id - b.id).slice(-500)
+}
 onMounted(() => {
   subscriptions.push(
-    window.api.onLog((log) =>
-      logs.value.push([new Date().toLocaleTimeString('en-GB'), 'info', log])
-    ),
+    window.api.onLog(addLog),
     window.api.onMetrics((snapshot) => {
       metrics.value = snapshot as MetricsSnapshot
     }),
@@ -76,6 +78,7 @@ onMounted(() => {
         calibration.value = value.calibration ?? null
     })
   )
+  void window.api.getRecentLogs().then((entries) => entries.forEach(addLog))
 })
 onBeforeUnmount(() => subscriptions.forEach((unsubscribe) => unsubscribe()))
 </script>

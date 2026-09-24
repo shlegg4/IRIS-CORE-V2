@@ -414,6 +414,7 @@ body {
 .camera-row { display: flex; align-items: center; gap: 5px; }
 .camera-row span { flex: 1; }
 .control-log { max-height: 180px; overflow: auto; color: #9eb3b4; line-height: 1.5; margin-top: 8px; word-break: break-word; }
+.control-log-error { color: #ff9a8c; }
 .control-message { display: block; padding: 8px 0; color: #ffcf70; }
 .viewport-empty { position: absolute; z-index: 2; inset: 0; display: grid; place-content: center; justify-items: center; text-align: center; background: radial-gradient(circle at center, #10282caa, #071214ee 60%); color: #d5e0e2; }
 .viewport-empty h2 { margin: 8px 0; font-weight: 500; font-size: 22px; }

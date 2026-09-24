@@ -145,7 +145,7 @@ std::optional<iris::SynchronizedVideoConfig> video_config_from_args(int argc, ch
 }
 } // namespace
 
-int main(int argc, char** argv) {
+int run_main(int argc, char** argv) {
     iris::Runtime runtime;
     const bool api_mode = argc >= 2 && std::string_view(argv[1]) == "--api";
     const bool non_interactive = argc >= 2 && std::string_view(argv[1]) == "--non-interactive";
@@ -237,17 +237,29 @@ int main(int argc, char** argv) {
         preview.http.bind_address = "127.0.0.1";
         preview.http.port = 8080;
         auto preview_configured = runtime.execute(iris::ConfigurePreviewCommand{preview});
-        if (!preview_configured) { api.stop(); runtime.stop(); return 1; }
+        if (!preview_configured) {
+            std::cerr << "IRIS preview configuration failed: " << preview_configured.message << '\n';
+            api.stop(); runtime.stop(); return 1;
+        }
         const auto started = runtime.execute(iris::StartPipelineCommand{});
-        if (!started) { runtime.stop(); return 1; }
+        if (!started) {
+            std::cerr << "IRIS pipeline start failed: " << started.message << '\n';
+            api.stop(); runtime.stop(); return 1;
+        }
+        bool failed = false;
         while (true) {
-            const auto state = runtime.snapshot().state;
-            if (state == iris::RuntimeState::Failed || state == iris::RuntimeState::Shutdown) break;
+            const auto status = runtime.snapshot();
+            if (status.state == iris::RuntimeState::Failed) {
+                std::cerr << "IRIS runtime failed: " << status.last_error << '\n';
+                failed = true;
+                break;
+            }
+            if (status.state == iris::RuntimeState::Shutdown) break;
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
         api.stop();
         runtime.stop();
-        return 0;
+        return failed ? 1 : 0;
     }
     if (non_interactive) {
         return runtime.run();
@@ -260,4 +272,16 @@ int main(int argc, char** argv) {
     const int result = cli.run(std::cin, std::cout);
     runtime.stop();
     return result;
+}
+
+int main(int argc, char** argv) {
+    try {
+        return run_main(argc, argv);
+    } catch (const std::exception& error) {
+        std::cerr << "IRIS fatal error: " << error.what() << '\n';
+        return 1;
+    } catch (...) {
+        std::cerr << "IRIS fatal error: unknown exception\n";
+        return 1;
+    }
 }

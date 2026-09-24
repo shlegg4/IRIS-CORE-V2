@@ -1,5 +1,6 @@
 #include "da3/tensor_rt.hpp"
 
+#include <algorithm>
 #include <iostream>
 #include <numeric>
 #include <sstream>
@@ -103,6 +104,26 @@ TensorOutput ToTensorOutput(const Buffer& buffer) {
     output.dims = buffer.dims;
     output.values = buffer.host_values;
     return output;
+}
+
+void NormalizeExtrinsics(TensorOutput& extrinsics) {
+    if (extrinsics.dims.size() != 4 || extrinsics.dims[0] != 1 || extrinsics.dims[2] != 3 || extrinsics.dims[3] != 4) {
+        return;
+    }
+
+    const std::size_t view_count = static_cast<std::size_t>(extrinsics.dims[1]);
+    if (view_count == 0 || extrinsics.values.size() != view_count * 12) {
+        throw std::runtime_error("DA3 returned malformed [1, views, 3, 4] extrinsics.");
+    }
+
+    std::vector<float> homogeneous(view_count * 16, 0.0F);
+    for (std::size_t view = 0; view < view_count; ++view) {
+        std::copy_n(extrinsics.values.begin() + static_cast<std::ptrdiff_t>(view * 12), 12,
+                    homogeneous.begin() + static_cast<std::ptrdiff_t>(view * 16));
+        homogeneous[view * 16 + 15] = 1.0F;
+    }
+    extrinsics.values = std::move(homogeneous);
+    extrinsics.dims = {1, static_cast<std::int64_t>(view_count), 4, 4};
 }
 
 }  // namespace
@@ -298,6 +319,7 @@ Mv4Outputs TensorRtEngine::Infer(const std::vector<float>& images) {
     outputs.sky = ToTensorOutput(find_buffer("sky"));
     outputs.intrinsics = ToTensorOutput(find_buffer("intrinsics"));
     outputs.extrinsics = ToTensorOutput(find_buffer("extrinsics"));
+    NormalizeExtrinsics(outputs.extrinsics);
     return outputs;
 }
 
@@ -415,6 +437,7 @@ MvBaseOutputs TensorRtEngine::InferBase(const int num_views, const std::vector<f
     outputs.depth_conf = ToTensorOutput(find_buffer("depth_conf"));
     outputs.intrinsics = ToTensorOutput(find_buffer("intrinsics"));
     outputs.extrinsics = ToTensorOutput(find_buffer("extrinsics"));
+    NormalizeExtrinsics(outputs.extrinsics);
     return outputs;
 }
 

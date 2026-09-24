@@ -234,21 +234,32 @@ class Runtime::Impl {
     }
 
     RuntimeCommandResponse execute(RuntimeCommand command) {
-        if (!control_started_ || !control_accepting_) {
-            return {RuntimeCommandStatus::Rejected, "runtime control plane is not running",
-                    std::nullopt};
-        }
         auto request = std::make_shared<CommandRequest>();
+        const bool shutdown = std::holds_alternative<ShutdownCommand>(command);
         request->command = std::move(command);
         auto result = request->completion.get_future();
-        if (commands_.send(std::move(request)) == SendResult::Closed) {
-            return {RuntimeCommandStatus::Rejected, "runtime control plane is closed",
-                    std::nullopt};
+        {
+            std::scoped_lock lock(command_submission_mutex_);
+            if (!control_started_ || !control_accepting_) {
+                return {RuntimeCommandStatus::Rejected, "runtime control plane is not running",
+                        std::nullopt};
+            }
+            // A shutdown request is a barrier: prevent commands from being
+            // queued behind it, since the control thread exits after handling it.
+            if (shutdown) control_accepting_.store(false);
+            if (commands_.send(std::move(request)) == SendResult::Closed) {
+                return {RuntimeCommandStatus::Rejected, "runtime control plane is closed",
+                        std::nullopt};
+            }
         }
         return result.get();
     }
 
     RuntimeSnapshot snapshot() const {
+        // Control commands update config and may replace pipeline_. Take the
+        // same lock so polling cannot observe a partially applied update or a
+        // pipeline while it is being replaced.
+        std::scoped_lock operation_lock(command_execution_mutex_);
         std::scoped_lock lock(state_mutex_);
         return snapshot_unlocked();
     }
@@ -266,7 +277,10 @@ class Runtime::Impl {
         if (control_thread_.joinable()) {
             control_thread_.join();
         }
-        stop_pipeline();
+        {
+            std::scoped_lock operation_lock(command_execution_mutex_);
+            stop_pipeline();
+        }
         exporter_.stop();
         prometheus_.stop();
     }
@@ -277,10 +291,15 @@ class Runtime::Impl {
             const bool shutdown = std::holds_alternative<ShutdownCommand>((*request)->command);
             RuntimeCommandResponse response;
             try {
+                std::scoped_lock operation_lock(command_execution_mutex_);
                 response = std::visit([this](const auto& value) { return handle(value); },
                                       (*request)->command);
             } catch (const std::exception& error) {
+                std::cerr << "IRIS control command failed: " << error.what() << '\n';
                 response = {RuntimeCommandStatus::Failed, error.what(), std::nullopt};
+            } catch (...) {
+                std::cerr << "IRIS control command failed: unknown exception\n";
+                response = {RuntimeCommandStatus::Failed, "unknown control command error", std::nullopt};
             }
             (*request)->completion.set_value(std::move(response));
             if (shutdown) {
@@ -729,8 +748,18 @@ class Runtime::Impl {
                 }
                 recording_ = false;
             }
-        } catch (const std::exception& error) {
-            pipeline_->stop();
+        } catch (...) {
+            std::string failure = "unknown pipeline error";
+            try { throw; }
+            catch (const std::exception& error) { failure = error.what(); }
+            catch (...) {}
+            std::cerr << "IRIS pipeline failed: " << failure << '\n';
+            try { pipeline_->stop(); }
+            catch (const std::exception& error) {
+                std::cerr << "IRIS pipeline cleanup failed: " << error.what() << '\n';
+            } catch (...) {
+                std::cerr << "IRIS pipeline cleanup failed: unknown exception\n";
+            }
             {
                 std::scoped_lock lock(state_mutex_);
                 if (!pipeline_start_completed_) {
@@ -739,7 +768,7 @@ class Runtime::Impl {
                 }
                 state_ = RuntimeState::Failed;
                 recording_ = false;
-                last_error_ = error.what();
+                last_error_ = failure;
             }
         }
         state_changed_.notify_all();
@@ -867,6 +896,8 @@ class Runtime::Impl {
     SharedMemoryOutputConfig shm_config_;
     PreviewConfig preview_config_;
     mutable std::mutex state_mutex_;
+    mutable std::recursive_mutex command_execution_mutex_;
+    std::mutex command_submission_mutex_;
     std::condition_variable state_changed_;
     RuntimeState state_{RuntimeState::Stopped};
     bool pipeline_start_completed_{};
