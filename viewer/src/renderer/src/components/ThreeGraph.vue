@@ -73,9 +73,11 @@ onMounted(() => {
     if (calibrated.length > 1) {
       const bounds = new THREE.Box3().setFromPoints(calibrated.map(({ center }) => center))
       bounds.getCenter(rigCenter)
+      // Keep the world ground at Y=0; center only in the ground plane.
+      rigCenter.y = 0
       const size = bounds.getSize(new THREE.Vector3())
       const span = Math.max(size.x, size.y, size.z)
-      // The grid is four scene units wide; make the rig occupy roughly 70% of it.
+      // Fit the rig around the ground grid while preserving ground height.
       rigScale = span > 1e-6 ? 2.8 / span : 1
     } else {
       rigCenter.set(0, 0, 0)
