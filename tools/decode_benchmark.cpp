@@ -20,7 +20,28 @@
 using Clock = std::chrono::steady_clock;
 using Bytes = std::vector<unsigned char>;
 void ck(cudaError_t e) { if (e != cudaSuccess) throw std::runtime_error(cudaGetErrorString(e)); }
-void nj(nvjpegStatus_t e) { if (e != NVJPEG_STATUS_SUCCESS) throw std::runtime_error("nvJPEG status " + std::to_string(e)); }
+const char* nvjpeg_status_name(nvjpegStatus_t status) {
+    switch (status) {
+    case NVJPEG_STATUS_SUCCESS: return "SUCCESS";
+    case NVJPEG_STATUS_NOT_INITIALIZED: return "NOT_INITIALIZED";
+    case NVJPEG_STATUS_INVALID_PARAMETER: return "INVALID_PARAMETER";
+    case NVJPEG_STATUS_BAD_JPEG: return "BAD_JPEG";
+    case NVJPEG_STATUS_JPEG_NOT_SUPPORTED: return "JPEG_NOT_SUPPORTED";
+    case NVJPEG_STATUS_ALLOCATOR_FAILURE: return "ALLOCATOR_FAILURE";
+    case NVJPEG_STATUS_EXECUTION_FAILED: return "EXECUTION_FAILED";
+    case NVJPEG_STATUS_ARCH_MISMATCH: return "ARCH_MISMATCH";
+    case NVJPEG_STATUS_INTERNAL_ERROR: return "INTERNAL_ERROR";
+    case NVJPEG_STATUS_IMPLEMENTATION_NOT_SUPPORTED: return "IMPLEMENTATION_NOT_SUPPORTED";
+    case NVJPEG_STATUS_INCOMPLETE_BITSTREAM: return "INCOMPLETE_BITSTREAM";
+    default: return "UNKNOWN";
+    }
+}
+void nj(nvjpegStatus_t e, const char* operation = nullptr) {
+    if (e != NVJPEG_STATUS_SUCCESS) {
+        throw std::runtime_error(std::string(operation ? operation : "nvJPEG") + ": " +
+                                 nvjpeg_status_name(e) + " (" + std::to_string(e) + ")");
+    }
+}
 double ms(Clock::time_point begin) { return std::chrono::duration<double, std::milli>(Clock::now()-begin).count(); }
 
 void hr(HRESULT e) { if(FAILED(e)) throw std::runtime_error("WIC HRESULT " + std::to_string(e)); }
@@ -114,9 +135,11 @@ struct Decoder {
         ck(cudaMallocHost(reinterpret_cast<void**>(&cpu),size_t(w)*h*3));
         if (mode=="cpu-upload") return;
         if (mode=="hardware") {
-            nj(nvjpegCreateEx(NVJPEG_BACKEND_HARDWARE,nullptr,nullptr,0,&handle));
+            nj(nvjpegCreateEx(NVJPEG_BACKEND_HARDWARE,nullptr,nullptr,0,&handle),
+               "nvjpegCreateEx(NVJPEG_BACKEND_HARDWARE)");
             unsigned engines{},cores{};
-            nj(nvjpegGetHardwareDecoderInfo(handle,&engines,&cores));
+            nj(nvjpegGetHardwareDecoderInfo(handle,&engines,&cores),
+               "nvjpegGetHardwareDecoderInfo");
             if (!engines || !cores) throw std::runtime_error("no hardware JPEG engines");
             nj(nvjpegJpegStateCreate(handle,&state));
             nj(nvjpegDecodeBatchedInitialize(handle,state,1,1,NVJPEG_OUTPUT_BGRI));
@@ -165,6 +188,27 @@ struct Decoder {
         ck(cudaStreamSynchronize(stream));
     }
 };
+
+void report_hardware_decoder_info() {
+    nvjpegHandle_t handle{};
+    const auto create_status = nvjpegCreateSimple(&handle);
+    if (create_status != NVJPEG_STATUS_SUCCESS) {
+        std::cout << "nvJPEG hardware decoder query: could not create query handle: "
+                  << nvjpeg_status_name(create_status) << " (" << create_status << ")\n";
+        return;
+    }
+
+    unsigned engines{}, cores_per_engine{};
+    const auto query_status = nvjpegGetHardwareDecoderInfo(handle, &engines, &cores_per_engine);
+    if (query_status == NVJPEG_STATUS_SUCCESS) {
+        std::cout << "nvJPEG hardware decoder query: engines=" << engines
+                  << ", cores_per_engine=" << cores_per_engine << '\n';
+    } else {
+        std::cout << "nvJPEG hardware decoder query: " << nvjpeg_status_name(query_status)
+                  << " (" << query_status << ")\n";
+    }
+    nvjpegDestroy(handle);
+}
 
 int main(int argc,char** argv) try {
     Com com;
@@ -234,7 +278,14 @@ int main(int argc,char** argv) try {
     for(auto& path:paths) {
         std::ifstream in(path,std::ios::binary);
         Bytes b((std::istreambuf_iterator<char>(in)),{});
-        int w{},h{}; reference_decoder.decode(b,w,h);
+        int w{},h{};
+        try {
+            reference_decoder.decode(b,w,h);
+        } catch (const std::exception& e) {
+            std::cerr << "Skipping " << path.filename().string()
+                      << ": WIC could not decode this JPEG: " << e.what() << '\n';
+            continue;
+        }
         if(width && (width!=w || height!=h)) throw std::runtime_error("use a corpus with uniform dimensions");
         width=w; height=h; maximum=std::max(maximum,b.size()); corpus.push_back(std::move(b));
     }
@@ -242,6 +293,7 @@ int main(int argc,char** argv) try {
     ck(cudaSetDevice(device)); cudaDeviceProp prop{}; ck(cudaGetDeviceProperties(&prop,device));
     std::cout<<"GPU: "<<prop.name<<"; corpus="<<corpus.size()<<"; "<<width<<"x"<<height
              <<"; warmup="<<warmup<<"; iterations per lane="<<iterations<<"\n";
+    report_hardware_decoder_info();
     std::cout<<"mode,lanes,samples,median_ms,p95_ms,images_per_second\n";
     for(auto mode:{"simple","simple-pinned","gpu-hybrid","hardware","cpu-upload"}) {
         for(int count:std::vector<int>{1,lanes}) {
