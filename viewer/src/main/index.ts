@@ -68,11 +68,13 @@ function startApiBridge(window: BrowserWindow): void {
     try {
       const status = await apiRequest('/status')
       if (generation !== apiPollGeneration || !irisProcess) return
-      send(window, 'iris:status', normalizeRuntimeStatus(status))
+      send(window, 'iris:status', { ...normalizeRuntimeStatus(status), api_connected: true })
       if (status.metrics) send(window, 'iris:metrics', status.metrics)
     } catch (error) {
-      if (generation === apiPollGeneration && irisProcess)
+      if (generation === apiPollGeneration && irisProcess) {
+        send(window, 'iris:status', { api_connected: false })
         emitLog(window, 'viewer', `REST polling error: ${String(error)}`, 'error')
+      }
     } finally {
       if (generation === apiPollGeneration && irisProcess)
         apiTimer = setTimeout(() => void poll(), 500)
@@ -189,7 +191,7 @@ function startIrisRuntime(window: BrowserWindow): void {
     captureOutput(child.stderr, 'stderr')
     child.on('error', (error) => {
       emitLog(window, 'viewer', `IRIS runtime process error: ${error.message}`, 'error')
-      send(window, 'iris:status', { state: 'error', message: error.message })
+      send(window, 'iris:status', { api_connected: false, state: 'failed', message: error.message })
     })
     child.on('close', (code, signal) => {
       // A delayed close event from an older child must not clear a newer
@@ -205,17 +207,17 @@ function startIrisRuntime(window: BrowserWindow): void {
       const message = `IRIS runtime exited (code ${exitCode}, signal ${signal ?? 'none'}).`
       emitLog(window, 'viewer', message, failed ? 'error' : 'info')
       if (current || !irisProcess)
-        send(window, 'iris:status', { state: failed ? 'error' : 'stopped', message, code, signal })
+        send(window, 'iris:status', { api_connected: false, state: failed ? 'failed' : 'shutdown', message, code, signal })
     })
     void waitForApi().then(() => {
       if (irisProcess !== child) return
-      send(window, 'iris:status', { state: 'running', executable })
+      send(window, 'iris:status', { api_connected: true, executable })
       startApiBridge(window)
       connectPoseEvents(window)
     }).catch((error) => {
       if (irisProcess !== child) return
       emitLog(window, 'viewer', `IRIS API startup failed: ${String(error)}`, 'error')
-      send(window, 'iris:status', { state: 'error', message: String(error) })
+      send(window, 'iris:status', { api_connected: false, state: 'failed', message: String(error) })
     })
   } catch (error) {
     emitLog(window, 'viewer', `IRIS runtime startup failed: ${String(error)}`, 'error')
@@ -237,8 +239,10 @@ function stopIrisRuntime(): void {
 function createWindow(): BrowserWindow {
   // Create the browser window.
   const mainWindow = new BrowserWindow({
-    width: 900,
-    height: 670,
+    width: 1440,
+    height: 960,
+    minWidth: 1120,
+    minHeight: 700,
     show: false,
     autoHideMenuBar: true,
     ...(process.platform === 'linux' ? { icon } : {}),

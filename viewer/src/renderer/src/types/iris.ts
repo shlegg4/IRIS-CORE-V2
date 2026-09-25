@@ -90,6 +90,8 @@ export interface CreateCameraRequest extends CameraCaptureSettings {
 }
 export type UpdateCameraRequest = Partial<CameraCaptureSettings>
 export interface RuntimeStatus {
+  api_connected?: boolean
+  metrics?: MetricsSnapshot
   state?: string
   input_mode?: 'live' | 'video' | string
   video_inputs?: Array<{ camera_id: number; path: string; rotation?: CameraRotation }>

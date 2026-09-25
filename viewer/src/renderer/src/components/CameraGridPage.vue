@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { IconRotateClockwise } from '@tabler/icons-vue'
 import type { CameraStatus, RuntimeStatus } from '../types/iris'
-const props = defineProps<{ status: RuntimeStatus }>()
+const props = defineProps<{ status: RuntimeStatus; compact?: boolean; rotationBusy?: number | null }>()
+const emit = defineEmits<{ rotate: [cameraId: number] }>()
 const playing = ref(true),
   fatalError = ref(''),
   failed = ref(new Set<number>()),
@@ -537,7 +539,36 @@ onBeforeUnmount(() => {
 }
 </style>
 <template>
-  <div class="camera-page">
+  <aside v-if="props.compact" class="camera-rail" aria-label="Camera previews">
+    <h2>Camera Views</h2>
+    <div v-if="cameras.length" class="camera-rail-list">
+      <article v-for="camera in cameras" :key="camera.camera_id" class="camera-rail-item">
+        <div class="camera-rail-label">
+          <i class="camera-rail-dot" :class="{ offline: camera.connected === false && props.status.input_mode !== 'video' }"></i>
+          <span>Cam {{ camera.camera_id + 1 }}</span>
+        </div>
+        <div class="camera-rail-feed">
+          <canvas
+            :ref="(element) => setCanvas(camera.camera_id, element)"
+            :width="camera.width"
+            :height="camera.height"
+            :aria-label="`${sourceName(camera.camera_id)} preview`"
+          />
+          <button
+            class="rotate-feed-button"
+            :disabled="props.rotationBusy === camera.camera_id"
+            :aria-label="`Rotate camera ${camera.camera_id + 1} clockwise`"
+            :title="props.rotationBusy === camera.camera_id ? 'Applying rotation…' : 'Rotate camera clockwise'"
+            @click="emit('rotate', camera.camera_id)"
+          >
+            <IconRotateClockwise :size="16" :stroke-width="1.7" aria-hidden="true" />
+          </button>
+        </div>
+      </article>
+    </div>
+    <p v-else class="camera-rail-empty">No camera feeds</p>
+  </aside>
+  <div v-else class="camera-page">
     <header class="camera-page-head">
       <div>
         <span class="eyebrow">SOURCE MONITOR</span>
@@ -628,6 +659,98 @@ onBeforeUnmount(() => {
   </div>
 </template>
 <style scoped>
+.camera-rail {
+  min-width: 250px;
+  max-width: 310px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+  padding: 18px 16px;
+  background: #111b23;
+  color: #e5e9ec;
+}
+.camera-rail h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 500;
+}
+.camera-rail-list {
+  min-height: 0;
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  overflow-y: auto;
+}
+.camera-rail-item {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+.camera-rail-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #dce2e6;
+  font-size: 13px;
+}
+.camera-rail-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  border-radius: 50%;
+  background: #31df98;
+}
+.camera-rail-dot.offline {
+  background: #f0a254;
+}
+.camera-rail-feed {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border-radius: 4px;
+  background: #0a1117;
+}
+.camera-rail-feed canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.rotate-feed-button {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid rgb(231 239 243 / 24%);
+  border-radius: 7px;
+  background: rgb(6 13 18 / 76%);
+  color: #eef5f7;
+  cursor: pointer;
+}
+.rotate-feed-button:hover:not(:disabled) {
+  border-color: #56ded8;
+  color: #56ded8;
+}
+.rotate-feed-button:focus-visible {
+  outline: 2px solid #56ded8;
+  outline-offset: 2px;
+}
+.rotate-feed-button:disabled {
+  cursor: progress;
+  opacity: 0.55;
+}
+.camera-rail-empty {
+  margin: 0;
+  padding: 18px 0;
+  color: #99a8b0;
+  font-size: 13px;
+}
 .camera-page {
   width: 100%;
   min-width: 0;
