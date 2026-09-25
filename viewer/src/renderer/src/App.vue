@@ -167,7 +167,7 @@ onBeforeUnmount(() => subscriptions.forEach((unsubscribe) => unsubscribe()))
       </section>
     </section>
 
-    <section v-else-if="activePage === 'metrics'" class="single-page">
+    <section v-show="activePage === 'metrics'" class="single-page">
       <MetricsPage
         :snapshot="metrics"
         :input-mode="runtimeStatus.input_mode"
@@ -177,7 +177,7 @@ onBeforeUnmount(() => subscriptions.forEach((unsubscribe) => unsubscribe()))
       />
     </section>
 
-    <section v-else class="settings-page">
+    <section v-if="activePage === 'settings'" class="settings-page">
       <RuntimeControls :status="runtimeStatus" :metrics="metrics" :logs="logs" @calibration-refresh="applyCalibrationSnapshot" />
     </section>
 

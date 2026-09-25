@@ -610,10 +610,13 @@ Eigen::Matrix4f ComposeGroundAlignment(
     const Eigen::Matrix4f& provisional_alignment,
     const GroundPlaneEstimate& estimate
 ) {
+    // IRIS calibration coordinates are Y-down; ThreeGraph flips Y when displaying
+    // them in Three.js. Map the floor normal to -Y so cameras remain above the
+    // ground in the viewer and the ground lies on its Y=0 grid plane.
     const Eigen::Quaternionf rotation =
         Eigen::Quaternionf::FromTwoVectors(
             estimate.plane_provisional.normal,
-            Eigen::Vector3f::UnitY()
+            -Eigen::Vector3f::UnitY()
         );
 
     Eigen::Matrix4f rotate = Eigen::Matrix4f::Identity();

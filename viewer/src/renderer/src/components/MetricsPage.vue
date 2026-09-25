@@ -76,6 +76,9 @@ const droppedFrames = computed(() => {
 })
 type CaptureRateSample = { timestamp: number; value: number }
 const captureRateStorageKey = 'iris-viewer-capture-rate-v1'
+const captureRateWindowMs = 60_000
+const maxCaptureRateSamples = 3_600
+const captureRateSmoothingMs = 1_000
 function restoreCaptureRateHistory(): CaptureRateSample[] {
   try {
     const stored: unknown = JSON.parse(localStorage.getItem(captureRateStorageKey) ?? '[]')
@@ -85,9 +88,9 @@ function restoreCaptureRateHistory(): CaptureRateSample[] {
       .filter((sample): sample is CaptureRateSample => {
         if (!sample || typeof sample !== 'object') return false
         const { timestamp, value } = sample as CaptureRateSample
-        return Number.isFinite(timestamp) && Number.isFinite(value) && timestamp <= now && now - timestamp <= 60_000
+        return Number.isFinite(timestamp) && Number.isFinite(value) && timestamp <= now && now - timestamp <= captureRateWindowMs
       })
-      .slice(-120)
+      .slice(-maxCaptureRateSamples)
   } catch {
     return []
   }
@@ -95,6 +98,7 @@ function restoreCaptureRateHistory(): CaptureRateSample[] {
 const captureRateHistory = ref<CaptureRateSample[]>(restoreCaptureRateHistory())
 const chartTime = ref(Date.now())
 let historyTimer: number | undefined
+let persistenceTimer: number | undefined
 const initialCaptureHistogram = props.snapshot?.histograms?.iris_capture_interframe_interval_ms
 let previousCaptureHistogram: { count: number; sum: number } | null = initialCaptureHistogram
   ? { count: initialCaptureHistogram.count, sum: initialCaptureHistogram.sum }
@@ -115,38 +119,73 @@ watch(() => props.snapshot, (snapshot) => {
     }
   }
   const timestamp = Date.now()
-  captureRateHistory.value = captureRateHistory.value
-    .filter((sample) => timestamp - sample.timestamp <= 60_000)
-  if (value !== null && Number.isFinite(value))
-    captureRateHistory.value = [...captureRateHistory.value, { timestamp, value }].slice(-120)
-}, { deep: true })
-watch(captureRateHistory, (history) => {
-  try {
-    localStorage.setItem(captureRateStorageKey, JSON.stringify(history))
-  } catch {
-    // Keep the live chart usable when storage is unavailable.
+  const recentHistory = captureRateHistory.value
+    .filter((sample) => timestamp - sample.timestamp <= captureRateWindowMs)
+  if (value !== null && Number.isFinite(value)) {
+    const previous = recentHistory.at(-1)
+    const elapsed = previous ? timestamp - previous.timestamp : 0
+    const smoothedValue = previous && elapsed > 0 && elapsed <= 5_000
+      ? previous.value + (1 - Math.exp(-elapsed / captureRateSmoothingMs)) * (value - previous.value)
+      : value
+    recentHistory.push({ timestamp, value: smoothedValue })
   }
+  captureRateHistory.value = recentHistory.slice(-maxCaptureRateSamples)
+}, { deep: true })
+watch(captureRateHistory, () => {
+  if (persistenceTimer !== undefined) return
+  persistenceTimer = window.setTimeout(() => {
+    persistenceTimer = undefined
+    try {
+      localStorage.setItem(captureRateStorageKey, JSON.stringify(captureRateHistory.value))
+    } catch {
+      // Keep the live chart usable when storage is unavailable.
+    }
+  }, 1_000)
 }, { deep: true })
 onMounted(() => {
   historyTimer = window.setInterval(() => {
     chartTime.value = Date.now()
     const currentHistory = captureRateHistory.value
-    const recentHistory = currentHistory.filter((sample) => chartTime.value - sample.timestamp <= 60_000)
+    const recentHistory = currentHistory.filter((sample) => chartTime.value - sample.timestamp <= captureRateWindowMs)
     if (recentHistory.length !== currentHistory.length)
       captureRateHistory.value = recentHistory
   }, 500)
 })
 onBeforeUnmount(() => {
   if (historyTimer !== undefined) window.clearInterval(historyTimer)
+  if (persistenceTimer !== undefined) {
+    window.clearTimeout(persistenceTimer)
+    try {
+      localStorage.setItem(captureRateStorageKey, JSON.stringify(captureRateHistory.value))
+    } catch {
+      // Keep the live chart usable when storage is unavailable.
+    }
+  }
 })
-const captureRatePoints = computed(() => captureRateHistory.value
-  .filter((sample) => chartTime.value - sample.timestamp <= 60_000)
-  .map((sample) => {
-    const x = ((sample.timestamp - (chartTime.value - 60_000)) / 60_000) * 100
-    const y = 34 - Math.max(0, Math.min(30, sample.value / 3))
-    return `${x},${y}`
-  })
-  .join(' '))
+const captureRatePath = computed(() => {
+  const points = captureRateHistory.value
+    .filter((sample) => chartTime.value - sample.timestamp <= captureRateWindowMs)
+    .map((sample) => ({
+      x: ((sample.timestamp - (chartTime.value - captureRateWindowMs)) / captureRateWindowMs) * 100,
+      y: 34 - Math.max(0, Math.min(30, sample.value / 3))
+    }))
+  if (points.length < 2) return ''
+  let path = `M ${points[0].x},${points[0].y}`
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const previous = points[Math.max(0, index - 1)]
+    const current = points[index]
+    const next = points[index + 1]
+    const following = points[Math.min(points.length - 1, index + 2)]
+    const segmentMinY = Math.min(current.y, next.y)
+    const segmentMaxY = Math.max(current.y, next.y)
+    const controlY1 = Math.max(segmentMinY, Math.min(segmentMaxY, current.y + (next.y - previous.y) / 6))
+    const controlY2 = Math.max(segmentMinY, Math.min(segmentMaxY, next.y - (following.y - current.y) / 6))
+    path += ` C ${current.x + (next.x - previous.x) / 6},${controlY1}`
+    path += ` ${next.x - (following.x - current.x) / 6},${controlY2}`
+    path += ` ${next.x},${next.y}`
+  }
+  return path
+})
 const frameAgeSummary = computed(() => {
   const gauges = props.snapshot?.gauges ?? {}
   const ages = Object.entries(gauges)
@@ -285,7 +324,7 @@ const allMetrics = computed<MetricRow[]>(() => {
           <line x1="0" y1="14" x2="100" y2="14" />
           <line x1="0" y1="24" x2="100" y2="24" />
           <line x1="0" y1="34" x2="100" y2="34" />
-          <polyline v-if="captureRateHistory.length > 1" :points="captureRatePoints" />
+          <path v-if="captureRateHistory.length > 1" :d="captureRatePath" />
         </svg>
       </div>
       <div class="chart-x-labels" aria-hidden="true"><span>60s</span><span>45s</span><span>30s</span><span>15s</span><span>0s</span></div>
@@ -774,10 +813,12 @@ p {
   stroke-width: .5;
   vector-effect: non-scaling-stroke;
 }
-.chart-stage polyline {
+.chart-stage path {
   fill: none;
   stroke: #29d8d1;
   stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
   vector-effect: non-scaling-stroke;
 }
 .chart-x-labels {

@@ -24,8 +24,10 @@
 - Settings preserves the existing API-backed camera, pose, calibration, recording, preview, shared-memory, synchronizer, metrics, and runtime controls. Camera resolution and frame rate are grouped under Camera Source. The no-camera preview shows the 60 FPS default; capture controls remain disabled until a camera is configured.
 - The detached browser preview has no Electron preload bridge. Runtime subscriptions now skip initialization when that bridge is absent, so the standalone preview can render its disconnected state without an `onLog` error.
 - The Metrics document has no horizontal overflow at the captured viewport. The Settings section rail remains available while the form scrolls.
-- The capture-rate plot now keeps timestamped samples for the last 60 seconds, advances the time window as new metric snapshots arrive, and shows a marker when there is only one sample. The chart clips SVG overflow at the capture-rate panel boundary.
+- The capture-rate plot keeps timestamped samples for the last 60 seconds, advances the time window as new metric snapshots arrive, and clips SVG overflow at the panel boundary. Recent samples persist in local storage when the Metrics page is reopened; expired samples are discarded.
+- Capture-rate history now retains up to 3,600 points within that time window, avoiding the previous 120-point cap that showed only about 30 seconds at common update rates. A one-second time-aware exponential smoother reduces rate jitter, and a bounded cubic curve interpolates the samples without overshooting between them. Local storage writes are throttled to once per second.
 - Rechecked the chart after the fix at a 319 × 1582 CSS-pixel responsive viewport: the capture-rate panel and SVG both report `overflow: hidden`, and the empty-state message remains inside the panel.
+- The Metrics component stays mounted when switching to another top-level page. Verified Metrics → 3D View → Metrics retains the chart element and no endpoint circle is rendered.
 - No blocking layout or accessibility issue was visible at this viewport.
 
 ## Iteration history
@@ -33,12 +35,14 @@
 - Replaced the earlier metrics card grid with the selected compact KPI strip, rolling capture-rate panel, pipeline timing, and queue/frame-age summaries.
 - Reorganized Runtime Controls into the selected Settings rail and Camera Source form while keeping the existing runtime operations intact.
 - Corrected the no-camera frame-rate display to 60 FPS and verified the selected option in the rendered page.
-- Replaced the capture-rate chart's sample-count axis with a timestamped 60-second window, added the single-sample marker, and clipped graph overflow to the panel.
+- Replaced the capture-rate chart's sample-count axis with a timestamped 60-second window, persisted recent samples across page opens, removed the oversized endpoint marker, clipped graph overflow to the panel, and fixed the 120-sample cap that truncated the visible history to about 30 seconds.
+- Smoothed incoming capture-rate values over one second and interpolated the plotted samples with a bounded cubic SVG path. Throttled history persistence to avoid frequent storage writes as sample capacity increases.
+- Kept Metrics mounted across top-level navigation so its live history continues updating while another page is open.
 
 ## Verification
 
-- `npm run typecheck`: passed.
-- `npm run build`: passed.
+- `npm run typecheck`: passed after the interpolation and history changes.
+- `npm run build`: typecheck completed, but Electron Vite could not load its config because the sandbox denied access to `../../..` (`Access is denied`). A build result is not available for this change.
 - `git diff --check`: passed; only line-ending normalization warnings were reported.
 
 ## Follow-up when IRIS is connected
