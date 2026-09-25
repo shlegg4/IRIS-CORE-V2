@@ -17,9 +17,6 @@
 #include "da3/preprocess.hpp"
 #include "da3/reconstruct.hpp"
 #include "da3/tensor_rt.hpp"
-#include "iris/core/calibration/calibration_io.hpp"
-#include "iris/core/calibration/calibration_types.hpp"
-#include "iris/core/types.hpp"
 
 namespace da3 {
 
@@ -119,7 +116,7 @@ std::vector<int> ResolveCameraIds(const std::vector<int>& requested_camera_ids) 
     return requested_camera_ids;
 }
 
-iris::core::IntrinsicsMeta BuildIntrinsicsMeta(
+IntrinsicsExport BuildIntrinsicsMeta(
     const std::vector<float>& values,
     const int view_index,
     const ProcessedView& view
@@ -132,7 +129,7 @@ iris::core::IntrinsicsMeta BuildIntrinsicsMeta(
     }
 
     const std::size_t base = static_cast<std::size_t>(view_index * 9);
-    iris::core::IntrinsicsMeta intrinsics;
+    IntrinsicsExport intrinsics;
     intrinsics.K[0] = values[base + 0] / view.scale_x;
     intrinsics.K[1] = values[base + 1] / view.scale_x;
     intrinsics.K[2] =
@@ -144,12 +141,12 @@ iris::core::IntrinsicsMeta BuildIntrinsicsMeta(
     intrinsics.K[6] = values[base + 6];
     intrinsics.K[7] = values[base + 7];
     intrinsics.K[8] = values[base + 8];
-    intrinsics.w = view.source_width;
-    intrinsics.h = view.source_height;
+    intrinsics.width = view.source_width;
+    intrinsics.height = view.source_height;
     return intrinsics;
 }
 
-iris::core::ExtrinsicsMeta BuildExtrinsicsMeta(
+ExtrinsicsExport BuildExtrinsicsMeta(
     const std::vector<float>& values,
     const int view_index,
     const Eigen::Matrix4f& alignment,
@@ -165,8 +162,8 @@ iris::core::ExtrinsicsMeta BuildExtrinsicsMeta(
 
     const Eigen::Matrix4f c2w = alignment * w2c.inverse();
 
-    iris::core::ExtrinsicsMeta extrinsics;
-    extrinsics.cam_id = cam_id;
+    ExtrinsicsExport extrinsics;
+    extrinsics.camera_id = cam_id;
     for (int row = 0; row < 3; ++row) {
         for (int col = 0; col < 3; ++col) {
             extrinsics.R[row * 3 + col] = c2w(row, col);
@@ -176,6 +173,43 @@ iris::core::ExtrinsicsMeta BuildExtrinsicsMeta(
         extrinsics.t[row] = c2w(row, 3);
     }
     return extrinsics;
+}
+
+nlohmann::json IntrinsicsToJson(const IntrinsicsExport& intrinsics) {
+    return {
+        {"width", intrinsics.width},
+        {"height", intrinsics.height},
+        {"K", intrinsics.K},
+    };
+}
+
+nlohmann::json ExtrinsicsToJson(const ExtrinsicsExport& extrinsics) {
+    return {
+        {"camera_id", extrinsics.camera_id},
+        {"R_c2w", extrinsics.R},
+        {"t_c2w", extrinsics.t},
+    };
+}
+
+nlohmann::json MultiExtrinsicsToJson(
+    const std::vector<int>& camera_ids,
+    const std::vector<ExtrinsicsExport>& extrinsics
+) {
+    nlohmann::json cameras = nlohmann::json::array();
+    for (const ExtrinsicsExport& camera : extrinsics) {
+        cameras.push_back({
+            {"success", true},
+            {"reprojection_error", 0.0},
+            {"extrinsics", ExtrinsicsToJson(camera)},
+        });
+    }
+    return {
+        {"camera_ids", camera_ids},
+        {"frames_used", 1},
+        {"success", true},
+        {"mean_reprojection_error", 0.0},
+        {"camera_extrinsics", std::move(cameras)},
+    };
 }
 
 fs::path ResolvePlyPath(const fs::path& out_dir, const std::optional<fs::path>& save_ply) {
@@ -449,8 +483,6 @@ void StageCalibrationOutputs(
     InferenceResult& result,
     std::vector<StagedOutput>& staged_outputs
 ) {
-    namespace calibration = iris::core::calibration;
-
     result.intrinsics_dir = out_dir;
     result.extrinsics_path = out_dir / "extrinsics.json";
     result.camera_ids = camera_ids;
@@ -459,18 +491,11 @@ void StageCalibrationOutputs(
     result.intrinsics.reserve(camera_ids.size());
     result.extrinsics.reserve(camera_ids.size());
 
-    calibration::MultiCameraExtrinsicsResult extrinsics_result;
-    extrinsics_result.camera_ids = camera_ids;
-    extrinsics_result.frames_used = 1;
-    extrinsics_result.success = true;
-    extrinsics_result.mean_reprojection_error = 0.0;
-    extrinsics_result.camera_extrinsics.reserve(camera_ids.size());
-
     for (int view = 0; view < kNumViews; ++view) {
         const std::size_t index = static_cast<std::size_t>(view);
-        const iris::core::IntrinsicsMeta intrinsics =
+        const IntrinsicsExport intrinsics =
             BuildIntrinsicsMeta(outputs.intrinsics.values, view, batch.views[index]);
-        const iris::core::ExtrinsicsMeta extrinsics = BuildExtrinsicsMeta(
+        const ExtrinsicsExport extrinsics = BuildExtrinsicsMeta(
             outputs.extrinsics.values,
             view,
             reconstruction.alignment,
@@ -484,20 +509,14 @@ void StageCalibrationOutputs(
             out_dir / ("intrinsics_cam" + std::to_string(camera_ids[index]) + ".json");
         StageJsonOutput(
             intrinsics_path,
-            calibration::intrinsics_to_json(intrinsics),
+            IntrinsicsToJson(intrinsics),
             staged_outputs
         );
-
-        calibration::ExtrinsicCalibrationResult extrinsic_result;
-        extrinsic_result.success = true;
-        extrinsic_result.reprojection_error = 0.0;
-        extrinsic_result.extrinsics = extrinsics;
-        extrinsics_result.camera_extrinsics.push_back(std::move(extrinsic_result));
     }
 
     StageJsonOutput(
         result.extrinsics_path,
-        calibration::multi_camera_extrinsics_to_json(extrinsics_result),
+        MultiExtrinsicsToJson(camera_ids, result.extrinsics),
         staged_outputs
     );
 }
@@ -823,19 +842,11 @@ InferenceResult RunPreparedInferenceBase(
         result.intrinsics.reserve(static_cast<std::size_t>(num_views));
         result.extrinsics.reserve(static_cast<std::size_t>(num_views));
 
-        namespace calibration = iris::core::calibration;
-        calibration::MultiCameraExtrinsicsResult extrinsics_result;
-        extrinsics_result.camera_ids = camera_ids;
-        extrinsics_result.frames_used = 1;
-        extrinsics_result.success = true;
-        extrinsics_result.mean_reprojection_error = 0.0;
-        extrinsics_result.camera_extrinsics.reserve(static_cast<std::size_t>(num_views));
-
         for (int view = 0; view < num_views; ++view) {
             const std::size_t index = static_cast<std::size_t>(view);
-            const iris::core::IntrinsicsMeta intrinsics =
+            const IntrinsicsExport intrinsics =
                 BuildIntrinsicsMeta(outputs.intrinsics.values, view, config.batch.views[index]);
-            const iris::core::ExtrinsicsMeta extrinsics = BuildExtrinsicsMeta(
+            const ExtrinsicsExport extrinsics = BuildExtrinsicsMeta(
                 outputs.extrinsics.values, view, reconstruction.alignment, camera_ids[index]
             );
             result.intrinsics.push_back(intrinsics);
@@ -845,20 +856,14 @@ InferenceResult RunPreparedInferenceBase(
                 config.out_dir / ("intrinsics_cam" + std::to_string(camera_ids[index]) + ".json");
             StageJsonOutput(
                 intrinsics_path,
-                calibration::intrinsics_to_json(intrinsics),
+                IntrinsicsToJson(intrinsics),
                 staged_outputs
             );
-
-            calibration::ExtrinsicCalibrationResult extrinsic_result;
-            extrinsic_result.success = true;
-            extrinsic_result.reprojection_error = 0.0;
-            extrinsic_result.extrinsics = extrinsics;
-            extrinsics_result.camera_extrinsics.push_back(std::move(extrinsic_result));
         }
 
         StageJsonOutput(
             result.extrinsics_path,
-            calibration::multi_camera_extrinsics_to_json(extrinsics_result),
+            MultiExtrinsicsToJson(camera_ids, result.extrinsics),
             staged_outputs
         );
 

@@ -89,7 +89,12 @@ if(IRIS_ENABLE_H264_PREVIEW)
   target_compile_definitions(iris PRIVATE IRIS_HAS_H264_PREVIEW=1)
 endif()
 if(IRIS_HAS_TENSORRT)
-  target_sources(iris PRIVATE src/tools/da3/src/preprocess.cpp src/tools/da3/src/tensor_rt.cpp)
+  target_sources(iris PRIVATE
+    src/tools/da3/src/preprocess.cpp
+    src/tools/da3/src/tensor_rt.cpp
+    src/tools/da3/src/reconstruct.cpp
+    src/tools/da3/src/ply_writer.cpp
+    src/tools/da3/src/infer_pipeline.cpp)
   target_include_directories(iris PRIVATE "${IRIS_TENSORRT_INCLUDE}")
   target_include_directories(iris PRIVATE src/tools/da3/include ${OpenCV_INCLUDE_DIRS})
   target_link_libraries(iris PRIVATE "${IRIS_TENSORRT_LIBRARY}" "${IRIS_TENSORRT_PLUGIN_LIBRARY}" Eigen3::Eigen ${OpenCV_LIBS})

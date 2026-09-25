@@ -391,7 +391,7 @@ body {
 .video-loop-toggle small { color: var(--muted); font-size: 10px; }
 .video-feed-row { display: grid; grid-template-columns: 74px minmax(0, 1fr) 142px auto; align-items: end; gap: 8px; padding: 8px; border: 1px solid var(--line); background: #10181b; }
 .video-feed-row label, .video-options label { display: grid; gap: 4px; color: #c8d5d7; font-size: 10px; }
-.video-feed-row input, .video-options input[type="number"] { min-height: 30px; width: 100%; box-sizing: border-box; border: 1px solid #2d464b; background: #0d181b; color: var(--text); padding: 6px; font-size: 11px; }
+.video-feed-row input, .video-options input[type="number"], .video-options select { min-height: 30px; width: 100%; box-sizing: border-box; border: 1px solid #2d464b; background: #0d181b; color: var(--text); padding: 6px; font-size: 11px; }
 .video-feed-row select { min-height: 30px; width: 100%; box-sizing: border-box; border: 1px solid #2d464b; background: #0d181b; color: var(--text); padding: 6px; font-size: 11px; }
 .video-feed-path { min-width: 0; display: grid; gap: 4px; align-self: center; }
 .video-feed-path strong, .active-video-feeds > strong { color: var(--cyan); font-size: 9px; letter-spacing: .05em; }
@@ -927,4 +927,463 @@ body {
   .camera-rail { min-width: 170px; padding: 10px; }
   .statusbar { gap: 8px; padding-inline: 10px; font-size: 9px; }
   .statusbar > :nth-child(n + 4):nth-child(-n + 9) { display: none; }
+}
+
+/* Settings workspace */
+.settings-page > .runtime-controls.settings-layout {
+  width: 100%;
+  max-width: none;
+  height: 100%;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: 228px minmax(0, 1fr);
+  overflow: hidden;
+  color: #e6ebee;
+  font-size: 13px;
+}
+.settings-nav {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 24px 16px 16px;
+  border-right: 1px solid #293640;
+  background: #131d27;
+}
+.settings-nav-title {
+  margin: 0 10px 14px;
+  color: #9aa8b1;
+  font-size: 11px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.settings-nav nav {
+  display: grid;
+  gap: 3px;
+}
+.settings-nav nav button {
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 0;
+  border-left: 3px solid transparent;
+  background: transparent;
+  color: #c1cbd1;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.settings-nav nav button:hover,
+.settings-nav nav button:focus-visible {
+  background: #192631;
+  color: #e6ebee;
+}
+.settings-nav nav button.active {
+  border-left-color: #29d8d1;
+  background: #1a3038;
+  color: #29d8d1;
+}
+.settings-nav-runtime {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: auto;
+  padding: 14px 8px 2px;
+  border-top: 1px solid #293640;
+  color: #9aa8b1;
+  font-size: 11px;
+}
+.settings-state-dot,
+.calibration-indicator i {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  border-radius: 50%;
+  background: #eba45b;
+}
+.settings-state-dot.online,
+.calibration-indicator.ready i {
+  background: #36df98;
+}
+.settings-content {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 22px clamp(24px, 3vw, 44px) 40px;
+  scrollbar-color: #34434e transparent;
+}
+.settings-section {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 20px 0 22px;
+  border-bottom: 1px solid #293640;
+  scroll-margin-top: 18px;
+}
+.settings-section:first-of-type {
+  padding-top: 0;
+}
+.settings-section-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 16px;
+}
+.settings-section-header h2 {
+  margin: 0 0 4px;
+  color: #e6ebee;
+  font-size: 18px;
+  font-weight: 500;
+}
+.settings-section-header p {
+  margin: 0;
+  color: #9aa8b1;
+  font-size: 12px;
+}
+.settings-current-value {
+  padding-top: 5px;
+  color: #9aa8b1;
+  font-size: 12px;
+}
+.settings-feedback {
+  color: #36df98;
+  font-size: 12px;
+}
+.settings-feedback.error {
+  color: #ff9c8d;
+}
+.settings-form-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  max-width: 840px;
+}
+.camera-source-summary {
+  display: grid;
+  max-width: 840px;
+  margin: 0 0 8px;
+}
+.camera-source-summary > div {
+  display: grid;
+  grid-template-columns: minmax(170px, 220px) minmax(0, 1fr);
+  align-items: center;
+  gap: 16px;
+  min-height: 36px;
+  border-bottom: 1px solid #24313a;
+  font-size: 12px;
+}
+.camera-source-summary span {
+  color: #bdc7cd;
+}
+.camera-source-summary strong {
+  color: #e6ebee;
+  font-weight: 400;
+}
+.camera-source-note {
+  margin: 6px 0 0 min(236px, 28%);
+  color: #9aa8b1;
+  font-size: 11px;
+}
+.camera-management {
+  max-width: 840px;
+  margin-top: 12px !important;
+}
+.settings-field {
+  display: grid;
+  grid-template-columns: minmax(170px, 220px) minmax(0, 1fr);
+  align-items: center;
+  gap: 16px;
+  min-height: 40px;
+  color: #bdc7cd;
+  font-size: 12px;
+}
+.settings-field > span {
+  color: #bdc7cd;
+}
+.settings-field input,
+.settings-field select {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 6px 9px;
+  border: 1px solid #34434e;
+  border-radius: 3px;
+  background: #18242e;
+  color: #e6ebee;
+  font: inherit;
+}
+.settings-field input:focus-visible,
+.settings-field select:focus-visible,
+.settings-actions button:focus-visible,
+.runtime-action-row button:focus-visible {
+  outline: 2px solid #29d8d1;
+  outline-offset: 2px;
+}
+.settings-field input:disabled,
+.settings-field select:disabled {
+  opacity: .58;
+}
+.settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 14px 0 0 min(236px, 28%);
+}
+.settings-actions button,
+.runtime-action-row button {
+  min-height: 32px;
+  padding: 6px 12px;
+  border: 1px solid #34434e;
+  border-radius: 3px;
+  background: #18242e;
+  color: #dce3e7;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.settings-actions button:hover:not(:disabled),
+.runtime-action-row button:hover:not(:disabled) {
+  border-color: #536875;
+  background: #202f3a;
+}
+.settings-actions button:disabled,
+.runtime-action-row button:disabled {
+  cursor: not-allowed;
+  opacity: .58;
+}
+.settings-actions button.settings-primary,
+.runtime-action-row button.settings-primary {
+  border-color: #29d8d1;
+  background: #164044;
+  color: #e6ebee;
+}
+.settings-actions button.settings-danger,
+.runtime-action-row button.settings-danger {
+  color: #ff9c8d;
+  border-color: #70413d;
+}
+.calibration-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #eba45b;
+  font-size: 12px;
+}
+.calibration-indicator.ready {
+  color: #36df98;
+}
+.calibration-runtime-state {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  align-items: center;
+  gap: 16px;
+  min-height: 36px;
+  color: #bdc7cd;
+  font-size: 12px;
+}
+.calibration-runtime-state small {
+  color: #9aa8b1;
+}
+.settings-subsection {
+  margin-top: 8px;
+  border-top: 1px solid #293640;
+  border-bottom: 0 !important;
+  padding: 0 !important;
+}
+.settings-subsection > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 42px;
+  color: #dce3e7 !important;
+  font-size: 13px !important;
+  letter-spacing: 0 !important;
+}
+.settings-subsection > summary span {
+  color: #9aa8b1 !important;
+  font-size: 11px;
+}
+.settings-subsection[open] > summary {
+  margin-bottom: 8px;
+}
+.settings-subsection .settings-form-grid {
+  padding-bottom: 8px;
+}
+.settings-toggle-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+  margin: 8px 0 0 min(236px, 28%);
+  color: #bdc7cd;
+  font-size: 12px;
+}
+.settings-toggle-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.settings-toggle-row input {
+  accent-color: #29d8d1;
+}
+.runtime-action-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 4px 0 12px;
+}
+.runtime-action-row > span {
+  display: grid;
+  gap: 3px;
+  min-width: 180px;
+  margin-right: auto;
+  color: #9aa8b1;
+  font-size: 11px;
+}
+.runtime-action-row > span strong {
+  color: #e6ebee;
+  font-size: 13px;
+  font-weight: 500;
+}
+.runtime-action-row > span small {
+  color: #ff9c8d;
+}
+.settings-content .control-log {
+  max-height: 240px;
+  padding: 10px 0;
+  color: #9aa8b1;
+  font-size: 11px;
+}
+.settings-content .control-log-error {
+  color: #ff9c8d;
+}
+
+/* Camera manager aligned with the Settings form surface */
+.settings-content .camera-manager {
+  padding: 0;
+  border: 0;
+}
+.settings-content .camera-manager-head {
+  align-items: center;
+  padding: 0 0 12px;
+  border-bottom: 1px solid #293640;
+}
+.settings-content .camera-manager-head strong,
+.settings-content .camera-card strong,
+.settings-content .camera-editor strong {
+  color: #e6ebee;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+.settings-content .camera-manager-head small,
+.settings-content .camera-card small,
+.settings-content .camera-editor small {
+  color: #9aa8b1;
+  font-size: 11px;
+}
+.settings-content .source-tabs button,
+.settings-content .camera-secondary-action,
+.settings-content .camera-card-actions button,
+.settings-content .camera-editor header button {
+  min-height: 30px;
+  padding: 5px 9px;
+  border: 1px solid #34434e;
+  border-radius: 3px;
+  background: #18242e;
+  color: #bdc7cd;
+  font-size: 11px;
+}
+.settings-content .source-tabs button.active {
+  border-color: #29d8d1;
+  background: #1a3038;
+  color: #29d8d1;
+}
+.settings-content .camera-discovery {
+  margin: 12px 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+.settings-content .camera-discovery-head {
+  padding: 8px 0;
+}
+.settings-content .camera-discovery-head strong {
+  color: #bdc7cd;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: .02em;
+}
+.settings-content .camera-discovery-head small {
+  color: #9aa8b1;
+  font-size: 11px;
+}
+.settings-content .camera-device-card {
+  grid-template-columns: 8px minmax(0, 1fr) 116px 74px;
+  padding: 10px 0;
+  border-top-color: #293640;
+}
+.settings-content .camera-card {
+  align-items: center;
+  padding: 10px 0;
+  border-top-color: #293640;
+}
+.settings-content .camera-status-dot {
+  margin-top: 5px;
+}
+.settings-content .camera-empty {
+  padding: 12px 0;
+  color: #9aa8b1;
+  font-size: 12px;
+}
+.settings-content .camera-editor {
+  padding: 14px;
+  border-color: #34434e;
+  border-radius: 3px;
+  background: #131d27;
+}
+.settings-content .camera-editor fieldset {
+  border-color: #34434e;
+}
+.settings-content .camera-editor legend {
+  color: #9aa8b1;
+}
+.settings-content .camera-editor label {
+  color: #bdc7cd;
+  font-size: 11px;
+}
+.settings-content .camera-editor input,
+.settings-content .camera-editor select {
+  border-color: #34434e;
+  border-radius: 3px;
+  background: #18242e;
+  color: #e6ebee;
+  font-size: 12px;
+}
+.settings-content .camera-discovery-head button,
+.settings-content .camera-card-actions button:hover,
+.settings-content .camera-editor header button:hover {
+  color: #e6ebee;
+}
+
+@media (max-width: 860px) {
+  .settings-page > .runtime-controls.settings-layout {
+    grid-template-columns: 190px minmax(0, 1fr);
+  }
+  .settings-nav {
+    padding-inline: 12px;
+  }
+  .settings-content {
+    padding-inline: 20px;
+  }
+  .settings-field,
+  .camera-source-summary > div,
+  .calibration-runtime-state {
+    grid-template-columns: minmax(145px, 180px) minmax(0, 1fr);
+  }
+  .settings-actions,
+  .settings-toggle-row,
+  .camera-source-note {
+    margin-left: 196px;
+  }
 }

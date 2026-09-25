@@ -48,7 +48,7 @@ In multiview mode, CUDA retains each 3-D skeleton and joint velocity between fra
 predicted joints into each camera, solves one-to-one detection assignments per view, and updates joints
 with weighted DLT. A joint may be predicted for one frame after its last successful triangulation;
 the next failed update invalidates it. The `predicted` flag distinguishes that frame from a measured
-joint. The track itself can remain active for up to 30 missed frames. The cross-view epipolar matcher
-seeds tracks for detections unmatched by live 3-D tracks every ten frames. Multiview outputs include stable `track_id`
+joint. The track moves to a dormant state after two consecutive frames with fewer than two assigned views. Its 3D joint anchors and IDs are retained for up to 60 frames, and cross-view recovery seeds are projected against those anchors to reconnect returning people to the dormant IDs. Unmatched recovery seeds create new tracks. The cross-view epipolar matcher
+seeds tracks for detections unmatched by live 3-D tracks every ten frames. Multiview outputs include persistent `track_id`
 values; detection indices remain frame-local. GPU postprocessing duration is exposed as
 `iris_pose_last_postprocess_gpu_stream_ms` and excludes TensorRT and output copies.

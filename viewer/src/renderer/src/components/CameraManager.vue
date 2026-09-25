@@ -65,7 +65,7 @@ const sourcePanel = ref<'live' | 'video'>(props.status.input_mode === 'video' ? 
 const videoFeeds = ref<VideoFeed[]>([])
 const videoCudaDevice = ref(0)
 const videoFramePool = ref(8)
-const videoRealtime = ref(false)
+const videoRealtime = ref(true)
 const videoLoop = ref(false)
 const videoBusy = ref(false)
 const videoError = ref('')
@@ -407,7 +407,7 @@ watch(() => props.status.video_inputs, (feeds) => {
     videoFeeds.value = feeds.map((feed) => ({ ...feed, rotation: feed.rotation ?? 'none' }))
     videoCudaDevice.value = props.status.video_cuda_device ?? 0
     videoFramePool.value = props.status.video_frame_pool_capacity ?? 8
-    videoRealtime.value = props.status.video_realtime ?? false
+    videoRealtime.value = props.status.video_realtime ?? true
     videoLoop.value = props.status.video_loop ?? false
   }
 }, { immediate: true })
@@ -467,7 +467,7 @@ onMounted(scan)
           <label>CUDA device<input v-model.number="videoCudaDevice" type="number" min="0" :disabled="videoBusy" /></label>
           <label>Frame pool capacity<input v-model.number="videoFramePool" type="number" min="1" :disabled="videoBusy" /></label>
         </div>
-        <label><input v-model="videoRealtime" type="checkbox" :disabled="videoBusy" @change="videoDirty = true" /> Replay at source frame rate</label>
+        <label>Playback speed<select v-model="videoRealtime" :disabled="videoBusy" @change="videoDirty = true"><option :value="true">Match source frame rate</option><option :value="false">Run as fast as possible</option></select></label>
       </details>
       <p v-if="videoError" class="camera-form-error" role="alert">{{ videoError }}</p>
       <p v-if="videoNotice" class="camera-form-notice" role="status">{{ videoNotice }}</p>

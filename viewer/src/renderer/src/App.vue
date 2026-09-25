@@ -95,7 +95,7 @@ async function rotateCamera(cameraId: number): Promise<void> {
         })),
         cuda_device: runtimeStatus.value.video_cuda_device ?? 0,
         frame_pool_capacity: runtimeStatus.value.video_frame_pool_capacity ?? 8,
-        realtime: runtimeStatus.value.video_realtime ?? false,
+        realtime: runtimeStatus.value.video_realtime ?? true,
         loop: runtimeStatus.value.video_loop ?? false
       })
     } else {
@@ -109,6 +109,7 @@ async function rotateCamera(cameraId: number): Promise<void> {
 }
 
 onMounted(() => {
+  if (!api?.onLog) return
   subscriptions.push(
     api.onLog(addLog),
     api.onMetrics((snapshot) => { metrics.value = snapshot as MetricsSnapshot }),
@@ -167,7 +168,13 @@ onBeforeUnmount(() => subscriptions.forEach((unsubscribe) => unsubscribe()))
     </section>
 
     <section v-else-if="activePage === 'metrics'" class="single-page">
-      <MetricsPage :snapshot="metrics" :input-mode="runtimeStatus.input_mode" :video-decode-status="runtimeStatus.video_decode_status" />
+      <MetricsPage
+        :snapshot="metrics"
+        :input-mode="runtimeStatus.input_mode"
+        :video-decode-status="runtimeStatus.video_decode_status"
+        :active-camera-count="connectedCount"
+        :camera-count="cameras.length"
+      />
     </section>
 
     <section v-else class="settings-page">

@@ -1,55 +1,323 @@
 <script setup lang="ts">
-import { nextTick, ref, watch } from 'vue'
-import type { CalibrationSnapshot, CreateCameraRequest, MetricsSnapshot, RuntimeLogEntry, RuntimeStatus } from '../types/iris'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import type { CalibrationSnapshot, MetricsSnapshot, RuntimeLogEntry, RuntimeStatus } from '../types/iris'
 import CameraManager from './CameraManager.vue'
-const props = defineProps<{ status: RuntimeStatus; metrics: MetricsSnapshot | null; logs: RuntimeLogEntry[] }>()
-const emit = defineEmits<{ (event: 'calibration-refresh', value: CalibrationSnapshot | null): void }>()
+
+const props = defineProps<{
+  status: RuntimeStatus
+  metrics: MetricsSnapshot | null
+  logs: RuntimeLogEntry[]
+}>()
+const emit = defineEmits<{
+  (event: 'calibration-refresh', value: CalibrationSnapshot | null): void
+}>()
+
 const api = window.api
-const busy = ref(''), message = ref('')
-const logContainer = ref<HTMLElement | null>(null)
-watch(() => props.logs.length, async () => {
-  await nextTick()
-  if (logContainer.value) logContainer.value.scrollTop = logContainer.value.scrollHeight
-})
-const selectedCamera = ref<number | null>(null)
+const busy = ref('')
+const message = ref('')
 const metricPrefix = ref('')
-const camera = ref<CreateCameraRequest>({ camera_id: 1, device_index: 1, device_symbolic_link: '', width: 1920, height: 1080, frame_rate: 30, format: 'mjpeg', cuda_device: 0, sample_queue_capacity: 1, frame_pool_capacity: 4, overflow: 'drop-oldest', rotation: 'none', allow_format_fallback: false, reconnect: true })
-const pose = ref({ backend: 'off', model_path: '@assets/pear_ehm_libtorch.pt', engine_path: '@assets/rtmo_s.engine', calibration_path: '' })
+const logContainer = ref<HTMLElement | null>(null)
+const settingsContent = ref<HTMLElement | null>(null)
+const activeSection = ref('camera-source')
+let sectionObserver: IntersectionObserver | undefined
+const selectedCameraId = ref<number | null>(null)
+const cameraResolution = ref('1920x1080')
+const cameraFrameRate = ref(60)
+const cameraFormat = ref('mjpeg')
+const configuredCameras = computed(() => props.status.cameras ?? [])
+const selectedCamera = computed(() => configuredCameras.value.find((camera) => camera.camera_id === selectedCameraId.value) ?? null)
+const displayedFrameRate = computed(() => selectedCamera.value ? cameraFrameRate.value : 60)
+const inputLabel = computed(() => props.status.input_mode === 'video' ? 'Video files' : 'Live cameras')
+
+const settingsSections = [
+  { id: 'camera-source', label: 'Camera Source' },
+  { id: 'pose-estimation', label: 'Pose Estimation' },
+  { id: 'calibration', label: 'Calibration' },
+  { id: 'recording', label: 'Recording' },
+  { id: 'outputs', label: 'Outputs' },
+  { id: 'advanced', label: 'Advanced' }
+]
+
+const pose = ref({
+  backend: 'off',
+  model_path: '@assets/pear_ehm_libtorch.pt',
+  engine_path: '@assets/rtmo_s.engine',
+  calibration_path: ''
+})
 const recording = ref({ destination: 'recordings/iris-recording.mp4', bitrate: 8000000, frame_rate: 30 })
 const calibration = ref({ output_path: 'rig-calibration.json' })
 const sync = ref({ tolerance_ms: 20, queue_capacity: 4, incomplete_batch_policy: 'drop' })
 const shm = ref({ enabled: false, destination: 'Local\\IRIS_V2_Output', capacity_bytes: 67108864, legacy_v1: true })
 const preview = ref({ http_enabled: true, mjpeg_enabled: true, h264_enabled: true, bind_address: '127.0.0.1', port: 8080, max_fps: 30, max_width: 1280, jpeg_quality: 75, bitrate: 4000000, queue_capacity: 16 })
-async function call(name: string, action: () => Promise<unknown>) { busy.value = name; message.value = ''; try { await action(); message.value = 'Applied' } catch (error) { message.value = String(error) } finally { busy.value = '' } }
-function post(path: string, body?: unknown) { return () => api.request(path, 'PATCH', body) }
-watch(selectedCamera, (id) => { const item = props.status.cameras?.find((entry) => entry.camera_id === id); if (item) Object.assign(camera.value, { camera_id: item.camera_id, device_index: item.device_index ?? camera.value.device_index, device_symbolic_link: item.device_symbolic_link ?? '', width: item.width, height: item.height, frame_rate: typeof item.frame_rate === 'number' ? item.frame_rate : item.frame_rate?.value ?? item.fps, format: item.format ?? camera.value.format, cuda_device: item.cuda_device ?? camera.value.cuda_device, sample_queue_capacity: item.sample_queue_capacity ?? camera.value.sample_queue_capacity, frame_pool_capacity: item.frame_pool_capacity ?? camera.value.frame_pool_capacity, overflow: item.overflow ?? camera.value.overflow, rotation: item.rotation ?? camera.value.rotation, allow_format_fallback: item.allow_format_fallback ?? camera.value.allow_format_fallback, reconnect: item.reconnect ?? camera.value.reconnect }) })
-async function updateCamera(): Promise<void> { if (selectedCamera.value === null) return; await call('camera', () => api.configureCamera(selectedCamera.value as number, { device_index: camera.value.device_index, device_symbolic_link: camera.value.device_symbolic_link, width: camera.value.width, height: camera.value.height, frame_rate: camera.value.frame_rate, format: camera.value.format, cuda_device: camera.value.cuda_device, sample_queue_capacity: camera.value.sample_queue_capacity, frame_pool_capacity: camera.value.frame_pool_capacity, overflow: camera.value.overflow, rotation: camera.value.rotation, allow_format_fallback: camera.value.allow_format_fallback, reconnect: camera.value.reconnect })) }
-async function shutdown(): Promise<void> { if (window.confirm('Shutdown the IRIS runtime?')) await call('runtime', api.shutdownRuntime) }
-async function clearCalibration(): Promise<void> { if (window.confirm('Clear the current rig calibration?')) await call('calibration', api.clearCalibration) }
+
+function loadCameraSettings(): void {
+  if (!selectedCamera.value) {
+    cameraResolution.value = '1920x1080'
+    cameraFrameRate.value = 60
+    cameraFormat.value = 'mjpeg'
+    return
+  }
+  cameraResolution.value = `${selectedCamera.value.width}x${selectedCamera.value.height}`
+  cameraFrameRate.value = selectedCamera.value.frame_rate?.value ?? selectedCamera.value.fps ?? 60
+  cameraFormat.value = selectedCamera.value.format ?? 'mjpeg'
+}
+
+watch(() => props.status.cameras?.map((camera) => `${camera.camera_id}:${camera.width}x${camera.height}:${camera.frame_rate?.value ?? camera.fps}:${camera.format}`).join('|'), () => {
+  if (!configuredCameras.value.some((camera) => camera.camera_id === selectedCameraId.value))
+    selectedCameraId.value = configuredCameras.value[0]?.camera_id ?? null
+  loadCameraSettings()
+}, { immediate: true })
+watch(selectedCameraId, loadCameraSettings)
+
+const runtimeState = () => props.status.state || 'Unknown'
+const calibrationState = () => props.status.calibration ? 'Ready' : 'Required'
+
+async function call(name: string, action: () => Promise<unknown>): Promise<void> {
+  busy.value = name
+  message.value = ''
+  try {
+    await action()
+    message.value = 'Applied'
+  } catch (error) {
+    message.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    busy.value = ''
+  }
+}
+
+function patch(path: string, body: unknown): () => Promise<unknown> {
+  return () => api.request(path, 'PATCH', body)
+}
+
+async function applyCameraSettings(): Promise<void> {
+  if (selectedCameraId.value === null) return
+  const [width, height] = cameraResolution.value.split('x').map(Number)
+  await call('camera-settings', () => api.configureCamera(selectedCameraId.value as number, {
+    width,
+    height,
+    frame_rate: cameraFrameRate.value,
+    format: cameraFormat.value
+  }))
+}
+
+function setCameraFrameRate(event: Event): void {
+  cameraFrameRate.value = Number((event.target as HTMLSelectElement).value)
+}
+
 async function refreshCalibration(): Promise<void> {
   await call('calibration', async () => {
     const response = await api.getCalibration() as { calibration?: CalibrationSnapshot | null }
     emit('calibration-refresh', response.calibration ?? null)
   })
 }
+
+async function clearCalibration(): Promise<void> {
+  if (window.confirm('Clear the current rig calibration?'))
+    await call('calibration', api.clearCalibration)
+}
+
+async function shutdown(): Promise<void> {
+  if (window.confirm('Shutdown the IRIS runtime?'))
+    await call('runtime', api.shutdownRuntime)
+}
+
+function navigateTo(id: string): void {
+  activeSection.value = id
+  document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+
+function updateActiveSection(): void {
+  const root = settingsContent.value
+  if (!root) return
+  if (root.scrollTop + root.clientHeight >= root.scrollHeight - 2) {
+    activeSection.value = settingsSections[settingsSections.length - 1].id
+    return
+  }
+  const marker = root.getBoundingClientRect().top + Math.min(120, root.clientHeight * 0.18)
+  const current = settingsSections
+    .map(({ id }) => document.getElementById(id))
+    .filter((section): section is HTMLElement => section instanceof HTMLElement && section.getBoundingClientRect().top <= marker)
+    .at(-1)
+  activeSection.value = current?.id ?? settingsSections[0].id
+}
+
+watch(() => props.logs.length, async () => {
+  await nextTick()
+  if (logContainer.value)
+    logContainer.value.scrollTop = logContainer.value.scrollHeight
+})
+
+onMounted(() => {
+  if (!settingsContent.value) return
+  settingsContent.value.addEventListener('scroll', updateActiveSection, { passive: true })
+  if (typeof IntersectionObserver === 'undefined') {
+    updateActiveSection()
+    return
+  }
+  sectionObserver = new IntersectionObserver(updateActiveSection, { root: settingsContent.value, threshold: [0, 0.15, 0.4] })
+  settingsSections.forEach(({ id }) => {
+    const element = document.getElementById(id)
+    if (element) sectionObserver?.observe(element)
+  })
+  updateActiveSection()
+})
+
+onBeforeUnmount(() => {
+  sectionObserver?.disconnect()
+  settingsContent.value?.removeEventListener('scroll', updateActiveSection)
+})
 </script>
+
 <template>
-  <div class="runtime-controls">
-    <CameraManager :status="props.status" />
-    <details open><summary>RUNTIME <span>{{ props.status.state || 'Unknown' }}</span></summary><div class="control-fields"><small>STATUS: {{ props.status.state || 'Unknown' }}<span v-if="props.status.last_error"> · {{ props.status.last_error }}</span></small><button class="primary-action" :disabled="!!busy" @click="call('runtime', api.startPipeline)">START PIPELINE</button><button :disabled="!!busy" @click="call('runtime', api.stopPipeline)">STOP PIPELINE</button><button :disabled="!!busy" @click="call('runtime', api.getStatus)">REFRESH STATUS</button><button class="danger-action" :disabled="!!busy" @click="shutdown">SHUTDOWN</button></div></details>
-    <div class="control-group-title">SETUP</div>
-    <details><summary>CAMERAS <span>{{ props.status.cameras?.length || 0 }} configured</span></summary><div class="control-fields"><select v-model="selectedCamera" aria-label="Camera to update"><option :value="null">New camera</option><option v-for="item in props.status.cameras || []" :key="item.camera_id" :value="item.camera_id">Camera {{ item.camera_id }}</option></select><input v-model.number="camera.camera_id" type="number" aria-label="Camera ID" placeholder="Camera ID"/><input v-model.number="camera.device_index" type="number" aria-label="Device index" placeholder="Device index"/><input v-model="camera.device_symbolic_link" aria-label="Device symbolic link" placeholder="Device symbolic link"/><input v-model.number="camera.width" type="number" aria-label="Width" placeholder="Width"/><input v-model.number="camera.height" type="number" aria-label="Height" placeholder="Height"/><input v-model.number="camera.frame_rate" type="number" aria-label="Frame rate" placeholder="FPS"/><select v-model="camera.format" aria-label="Pixel format"><option>mjpeg</option><option>yuy2</option><option>bgra8</option></select><input v-model.number="camera.cuda_device" type="number" aria-label="CUDA device" placeholder="CUDA device"/><input v-model.number="camera.sample_queue_capacity" type="number" aria-label="Sample queue capacity" placeholder="Sample queue"/><input v-model.number="camera.frame_pool_capacity" type="number" aria-label="Frame pool capacity" placeholder="Frame pool"/><select v-model="camera.overflow" aria-label="Overflow policy"><option>block</option><option>drop-oldest</option><option>drop-newest</option></select><select v-model="camera.rotation" aria-label="Camera rotation"><option>none</option><option>cw90</option><option>180</option><option>ccw90</option></select><label><input v-model="camera.allow_format_fallback" type="checkbox"/> Allow format fallback</label><label><input v-model="camera.reconnect" type="checkbox"/> Reconnect automatically</label><button :disabled="!!busy || selectedCamera !== null" @click="call('camera', () => api.addCamera({ ...camera }))">ADD CAMERA</button><button :disabled="!!busy || selectedCamera === null" @click="updateCamera">UPDATE CAMERA</button><div v-for="item in props.status.cameras || []" :key="item.camera_id" class="camera-row"><span>CAM {{ item.camera_id }}</span><button :disabled="!!busy" @click="call('camera', () => api.removeCamera(item.camera_id))">REMOVE</button></div></div></details>
-    <details><summary>POSE <span>{{ props.status.pose_backend || 'Off' }}</span></summary><div class="control-fields"><select v-model="pose.backend" aria-label="Pose backend"><option value="off">Off</option><option value="monocular">Monocular</option><option value="2d">2D</option><option value="multiview">Multiview</option></select><input v-model="pose.model_path" aria-label="Model path" placeholder="Model path"/><input v-model="pose.engine_path" aria-label="Engine path" placeholder="Engine path"/><input v-model="pose.calibration_path" aria-label="Calibration path" placeholder="Calibration path"/><button :disabled="!!busy" @click="call('pose', () => api.configurePose({ ...pose }))">APPLY POSE</button></div></details>
-    <details><summary>RIG CALIBRATION <span>{{ props.status.calibration ? 'Ready' : 'Required' }}</span></summary><div class="control-fields"><small v-if="props.status.calibration_tool">{{ props.status.calibration_tool.state }}<span v-if="props.status.calibration_tool.message"> · {{ props.status.calibration_tool.message }}</span></small><input v-model="calibration.output_path" aria-label="Calibration output path" placeholder="Output path"/><button :disabled="!!busy" @click="call('calibration', () => api.startCalibration({ ...calibration }))">START CALIBRATION</button><button :disabled="!!busy" @click="call('calibration', api.cancelCalibration)">CANCEL</button><button class="danger-action" :disabled="!!busy" @click="clearCalibration">CLEAR</button><button :disabled="!!busy" @click="refreshCalibration">REFRESH CALIBRATION</button></div></details>
-    <div class="control-group-title">RUN</div>
-    <details><summary>RECORDING <span>{{ props.status.recording ? 'Active' : 'Inactive' }}</span></summary><div class="control-fields"><input v-model="recording.destination" aria-label="Recording destination" placeholder="Destination"/><input v-model.number="recording.bitrate" type="number" aria-label="Recording bitrate" placeholder="Bitrate"/><input v-model.number="recording.frame_rate" type="number" aria-label="Recording frame rate" placeholder="FPS"/><button :disabled="!!busy" @click="call('recording', () => api.startRecording({ ...recording }))">START RECORDING</button><button :disabled="!!busy" @click="call('recording', api.stopRecording)">STOP RECORDING</button></div></details>
-    <div class="control-group-title">OUTPUTS</div>
-    <details><summary>PREVIEW <span>{{ props.status.preview?.connected_clients || 0 }} clients</span></summary><div class="control-fields"><label><input v-model="preview.http_enabled" type="checkbox"/> HTTP</label><label><input v-model="preview.mjpeg_enabled" type="checkbox"/> MJPEG</label><label><input v-model="preview.h264_enabled" type="checkbox"/> H.264</label><input v-model="preview.bind_address" aria-label="Preview bind address" placeholder="Bind address"/><input v-model.number="preview.port" type="number" aria-label="Preview port" placeholder="Port"/><input v-model.number="preview.max_fps" type="number" aria-label="Preview maximum FPS" placeholder="Max FPS"/><input v-model.number="preview.max_width" type="number" aria-label="Preview maximum width" placeholder="Max width"/><input v-model.number="preview.jpeg_quality" type="number" aria-label="JPEG quality" placeholder="JPEG quality"/><input v-model.number="preview.bitrate" type="number" aria-label="H264 bitrate" placeholder="H.264 bitrate"/><input v-model.number="preview.queue_capacity" type="number" aria-label="Preview queue capacity" placeholder="Queue capacity"/><button :disabled="!!busy" @click="call('preview', post('/outputs/preview', { ...preview }))">APPLY PREVIEW</button></div></details>
-    <details><summary>SHARED MEMORY <span>{{ props.status.shared_memory_enabled ? 'Enabled' : 'Disabled' }}</span></summary><div class="control-fields"><label><input v-model="shm.enabled" type="checkbox"/> Enabled</label><input v-model="shm.destination" aria-label="Shared memory destination" placeholder="Destination"/><input v-model.number="shm.capacity_bytes" type="number" aria-label="Shared memory capacity" placeholder="Capacity bytes"/><label><input v-model="shm.legacy_v1" type="checkbox"/> Publish legacy v1</label><button :disabled="!!busy" @click="call('shared-memory', post('/outputs/shared-memory', { ...shm }))">APPLY SHARED MEMORY</button></div></details>
-    <div class="control-group-title">ADVANCED</div>
-    <details><summary>SYNCHRONIZER <span>{{ props.status.sync_tolerance_ms ?? 20 }} ms</span></summary><div class="control-fields"><input v-model.number="sync.tolerance_ms" type="number" aria-label="Synchronizer tolerance" placeholder="Tolerance ms"/><input v-model.number="sync.queue_capacity" type="number" aria-label="Queue capacity" placeholder="Queue capacity"/><select v-model="sync.incomplete_batch_policy" aria-label="Incomplete batch policy"><option value="drop">Drop incomplete batches</option><option value="partial">Emit partial batches</option></select><button :disabled="!!busy" @click="call('synchronizer', post('/synchronizer', { ...sync }))">APPLY SYNCHRONIZER</button></div></details>
-    <details><summary>METRICS</summary><div class="control-fields"><input v-model="metricPrefix" aria-label="Metric prefix" placeholder="Metric prefix"/><button :disabled="!!busy" @click="call('metrics', () => api.getMetrics(metricPrefix))">REFRESH METRICS</button><small>{{ Object.keys(props.metrics?.counters || {}).length }} counters · {{ Object.keys(props.metrics?.gauges || {}).length }} gauges</small></div></details>
-    <details open><summary>TERMINAL <span>{{ props.logs.length }}</span></summary><div ref="logContainer" class="control-log" role="log"><div v-for="log in props.logs" :key="log.id" :class="{ 'control-log-error': log.level === 'error' }">{{ new Date(log.timestamp).toLocaleTimeString('en-GB') }} · {{ log.source }} · {{ log.message }}</div><small v-if="!props.logs.length">No runtime events yet.</small></div></details>
-    <small v-if="message" class="control-message" role="status">{{ message }}</small>
+  <div class="runtime-controls settings-layout">
+    <aside class="settings-nav" aria-label="Settings sections">
+      <nav>
+        <button
+          v-for="section in settingsSections"
+          :key="section.id"
+          :class="{ active: activeSection === section.id }"
+          :aria-current="activeSection === section.id ? 'location' : undefined"
+          @click="navigateTo(section.id)"
+        >{{ section.label }}</button>
+      </nav>
+      <div class="settings-nav-runtime">
+        <span class="settings-state-dot" :class="{ online: props.status.api_connected }"></span>
+        <span>{{ props.status.api_connected ? 'Runtime connected' : 'Runtime disconnected' }}</span>
+      </div>
+    </aside>
+
+    <main ref="settingsContent" class="settings-content">
+      <p v-if="message" class="settings-feedback" :class="{ error: message !== 'Applied' }" role="status">{{ message }}</p>
+
+      <section id="camera-source" class="settings-section">
+        <header class="settings-section-header">
+          <div><h2>Camera Source</h2><p>Choose live cameras or synchronized video files.</p></div>
+        </header>
+        <div class="camera-source-summary">
+          <div><span>Number of Cameras</span><strong>{{ props.status.input_mode === 'video' ? props.status.video_inputs?.length ?? 0 : configuredCameras.length }}</strong></div>
+          <div><span>Camera Source</span><strong>{{ inputLabel }}</strong></div>
+        </div>
+        <div class="settings-form-grid camera-capture-form">
+          <label class="settings-field"><span>Camera</span><select v-model.number="selectedCameraId" :disabled="!configuredCameras.length || props.status.input_mode === 'video' || !!busy"><option v-for="camera in configuredCameras" :key="camera.camera_id" :value="camera.camera_id">Camera {{ camera.camera_id + 1 }}</option></select></label>
+          <label class="settings-field"><span>Resolution</span><select v-model="cameraResolution" :disabled="!selectedCamera || props.status.input_mode === 'video' || !!busy"><option v-if="![ '1920x1080', '1280x720', '640x480' ].includes(cameraResolution)" :value="cameraResolution">{{ cameraResolution.replace('x', ' × ') }}</option><option value="1920x1080">1920 × 1080</option><option value="1280x720">1280 × 720</option><option value="640x480">640 × 480</option></select></label>
+          <label class="settings-field"><span>Frame Rate</span><select :value="displayedFrameRate" :disabled="!selectedCamera || props.status.input_mode === 'video' || !!busy" @change="setCameraFrameRate"><option v-if="![15, 24, 30, 60].includes(displayedFrameRate)" :value="displayedFrameRate">{{ displayedFrameRate }} FPS</option><option :value="15">15 FPS</option><option :value="24">24 FPS</option><option :value="30">30 FPS</option><option :value="60">60 FPS</option></select></label>
+          <label class="settings-field"><span>Color Format</span><select v-model="cameraFormat" :disabled="!selectedCamera || props.status.input_mode === 'video' || !!busy"><option value="mjpeg">MJPEG</option><option value="yuy2">YUY2</option><option value="bgra8">BGRA8</option></select></label>
+        </div>
+        <p v-if="props.status.input_mode === 'video'" class="camera-source-note">Resolution and frame rate come from the selected video files.</p>
+        <div class="settings-actions"><button class="settings-primary" :disabled="!selectedCamera || props.status.input_mode === 'video' || !!busy" @click="applyCameraSettings">{{ busy === 'camera-settings' ? 'Applying…' : 'Apply Capture Settings' }}</button></div>
+        <details class="settings-subsection camera-management">
+          <summary>Manage Cameras and Video Files <span>{{ configuredCameras.length }} configured</span></summary>
+          <CameraManager :status="props.status" />
+        </details>
+      </section>
+
+      <section id="pose-estimation" class="settings-section">
+        <header class="settings-section-header">
+          <div><h2>Pose Estimation</h2><p>Configure the inference backend and model files.</p></div>
+          <span class="settings-current-value">{{ props.status.pose_backend || 'Off' }}</span>
+        </header>
+        <div class="settings-form-grid">
+          <label class="settings-field"><span>Pose backend</span><select v-model="pose.backend" :disabled="!!busy"><option value="off">Off</option><option value="monocular">Monocular</option><option value="2d">2D</option><option value="multiview">Multiview</option></select></label>
+          <label class="settings-field"><span>Model path</span><input v-model="pose.model_path" :disabled="!!busy" /></label>
+          <label class="settings-field"><span>Engine path</span><input v-model="pose.engine_path" :disabled="!!busy" /></label>
+          <label class="settings-field"><span>Calibration file</span><input v-model="pose.calibration_path" :disabled="!!busy" placeholder="Use the active rig calibration" /></label>
+        </div>
+        <div class="settings-actions"><button class="settings-primary" :disabled="!!busy" @click="call('pose', () => api.configurePose({ ...pose }))">{{ busy === 'pose' ? 'Applying…' : 'Apply Pose Settings' }}</button></div>
+      </section>
+
+      <section id="calibration" class="settings-section">
+        <header class="settings-section-header">
+          <div><h2>Calibration</h2><p>Set up the camera rig for accurate 3D reconstruction.</p></div>
+          <span class="calibration-indicator" :class="{ ready: props.status.calibration }"><i></i>{{ calibrationState() }}</span>
+        </header>
+        <div class="settings-form-grid calibration-form">
+          <label class="settings-field"><span>Calibration output file</span><input v-model="calibration.output_path" :disabled="!!busy" /></label>
+          <div v-if="props.status.calibration_tool" class="calibration-runtime-state"><span>{{ props.status.calibration_tool.state }}</span><small v-if="props.status.calibration_tool.message">{{ props.status.calibration_tool.message }}</small></div>
+        </div>
+        <div class="settings-actions">
+          <button class="settings-primary" :disabled="!!busy || props.status.state !== 'running'" @click="call('calibration', () => api.startCalibration({ ...calibration }))">{{ busy === 'calibration' ? 'Calibrating…' : 'Recalibrate' }}</button>
+          <button :disabled="!!busy" @click="call('calibration', api.cancelCalibration)">Cancel</button>
+          <button :disabled="!!busy" @click="refreshCalibration">Refresh</button>
+          <button class="settings-danger" :disabled="!!busy" @click="clearCalibration">Clear Calibration</button>
+        </div>
+      </section>
+
+      <section id="recording" class="settings-section">
+        <header class="settings-section-header"><div><h2>Recording</h2><p>Capture and save a session.</p></div><span class="settings-current-value">{{ props.status.recording ? 'Active' : 'Inactive' }}</span></header>
+        <div class="settings-form-grid">
+          <label class="settings-field"><span>Destination</span><input v-model="recording.destination" :disabled="!!busy" /></label>
+          <label class="settings-field"><span>Bitrate (bps)</span><input v-model.number="recording.bitrate" type="number" min="1" :disabled="!!busy" /></label>
+          <label class="settings-field"><span>Frame rate (FPS)</span><input v-model.number="recording.frame_rate" type="number" min="1" :disabled="!!busy" /></label>
+        </div>
+        <div class="settings-actions">
+          <button class="settings-primary" :disabled="!!busy || !!props.status.recording" @click="call('recording', () => api.startRecording({ ...recording }))">Start Recording</button>
+          <button :disabled="!!busy || !props.status.recording" @click="call('recording', api.stopRecording)">Stop Recording</button>
+        </div>
+      </section>
+
+      <section id="outputs" class="settings-section">
+        <header class="settings-section-header"><div><h2>Outputs</h2><p>Configure preview streams and shared memory.</p></div></header>
+        <details class="settings-subsection" open>
+          <summary>Preview Stream <span>{{ props.status.preview?.connected_clients || 0 }} clients</span></summary>
+          <div class="settings-form-grid">
+            <label class="settings-field"><span>Bind address</span><input v-model="preview.bind_address" :disabled="!!busy" /></label>
+            <label class="settings-field"><span>Port</span><input v-model.number="preview.port" type="number" min="1" max="65535" :disabled="!!busy" /></label>
+            <label class="settings-field"><span>Maximum FPS</span><input v-model.number="preview.max_fps" type="number" min="1" :disabled="!!busy" /></label>
+            <label class="settings-field"><span>Maximum width</span><input v-model.number="preview.max_width" type="number" min="1" :disabled="!!busy" /></label>
+            <label class="settings-field"><span>JPEG quality</span><input v-model.number="preview.jpeg_quality" type="number" min="1" max="100" :disabled="!!busy" /></label>
+            <label class="settings-field"><span>H.264 bitrate</span><input v-model.number="preview.bitrate" type="number" min="1" :disabled="!!busy" /></label>
+            <label class="settings-field"><span>Queue capacity</span><input v-model.number="preview.queue_capacity" type="number" min="1" :disabled="!!busy" /></label>
+          </div>
+          <div class="settings-toggle-row"><label><input v-model="preview.http_enabled" type="checkbox" :disabled="!!busy" /> HTTP</label><label><input v-model="preview.mjpeg_enabled" type="checkbox" :disabled="!!busy" /> MJPEG</label><label><input v-model="preview.h264_enabled" type="checkbox" :disabled="!!busy" /> H.264</label></div>
+          <div class="settings-actions"><button class="settings-primary" :disabled="!!busy" @click="call('preview', patch('/outputs/preview', { ...preview }))">Apply Preview Settings</button></div>
+        </details>
+        <details class="settings-subsection">
+          <summary>Shared Memory <span>{{ props.status.shared_memory_enabled ? 'Enabled' : 'Disabled' }}</span></summary>
+          <div class="settings-form-grid">
+            <label class="settings-field"><span>Destination</span><input v-model="shm.destination" :disabled="!!busy" /></label>
+            <label class="settings-field"><span>Capacity (bytes)</span><input v-model.number="shm.capacity_bytes" type="number" min="1" :disabled="!!busy" /></label>
+          </div>
+          <div class="settings-toggle-row"><label><input v-model="shm.enabled" type="checkbox" :disabled="!!busy" /> Enabled</label><label><input v-model="shm.legacy_v1" type="checkbox" :disabled="!!busy" /> Publish legacy v1</label></div>
+          <div class="settings-actions"><button class="settings-primary" :disabled="!!busy" @click="call('shared-memory', patch('/outputs/shared-memory', { ...shm }))">Apply Shared Memory</button></div>
+        </details>
+      </section>
+
+      <section id="advanced" class="settings-section">
+        <header class="settings-section-header"><div><h2>Advanced</h2><p>Runtime, synchronization and diagnostic controls.</p></div></header>
+        <details class="settings-subsection" open>
+          <summary>Synchronizer <span>{{ props.status.sync_tolerance_ms ?? sync.tolerance_ms }} ms tolerance</span></summary>
+          <div class="settings-form-grid">
+            <label class="settings-field"><span>Tolerance (ms)</span><input v-model.number="sync.tolerance_ms" type="number" min="0" :disabled="!!busy" /></label>
+            <label class="settings-field"><span>Queue capacity</span><input v-model.number="sync.queue_capacity" type="number" min="1" :disabled="!!busy" /></label>
+            <label class="settings-field"><span>Incomplete batch policy</span><select v-model="sync.incomplete_batch_policy" :disabled="!!busy"><option value="drop">Drop incomplete batches</option><option value="partial">Emit partial batches</option></select></label>
+          </div>
+          <div class="settings-actions"><button class="settings-primary" :disabled="!!busy" @click="call('synchronizer', patch('/synchronizer', { ...sync }))">Apply Synchronizer</button></div>
+        </details>
+        <details class="settings-subsection">
+          <summary>Metrics Export <span>{{ Object.keys(props.metrics?.counters || {}).length }} counters · {{ Object.keys(props.metrics?.gauges || {}).length }} gauges</span></summary>
+          <div class="settings-form-grid settings-metrics-form">
+            <label class="settings-field"><span>Metric prefix</span><input v-model="metricPrefix" aria-label="Metric prefix" placeholder="All metrics" :disabled="!!busy" /></label>
+          </div>
+          <div class="settings-actions"><button :disabled="!!busy" @click="call('metrics', () => api.getMetrics(metricPrefix))">Refresh Metrics</button></div>
+        </details>
+        <details class="settings-subsection">
+          <summary>Runtime <span>{{ runtimeState() }}</span></summary>
+          <div class="runtime-action-row">
+            <span>Status <strong>{{ runtimeState() }}</strong><small v-if="props.status.last_error">{{ props.status.last_error }}</small></span>
+            <button class="settings-primary" :disabled="!!busy" @click="call('runtime', api.startPipeline)">Start Pipeline</button>
+            <button :disabled="!!busy" @click="call('runtime', api.stopPipeline)">Stop Pipeline</button>
+            <button :disabled="!!busy" @click="call('runtime', api.getStatus)">Refresh Status</button>
+            <button class="settings-danger" :disabled="!!busy" @click="shutdown">Shutdown</button>
+          </div>
+        </details>
+        <details class="settings-subsection">
+          <summary>Terminal <span>{{ props.logs.length }} events</span></summary>
+          <div ref="logContainer" class="control-log" role="log">
+            <div v-for="log in props.logs" :key="log.id" :class="{ 'control-log-error': log.level === 'error' }">{{ new Date(log.timestamp).toLocaleTimeString('en-GB') }} · {{ log.source }} · {{ log.message }}</div>
+            <small v-if="!props.logs.length">No runtime events yet.</small>
+          </div>
+        </details>
+      </section>
+    </main>
   </div>
 </template>

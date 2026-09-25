@@ -84,7 +84,7 @@ whose reprojection error is <=150 px. This is a within-frame association metric,
 The temporal matcher projects each persistent 3-D track into every camera and solves a one-to-one
 track/detection assignment per view on CUDA using robust joint reprojection costs. It predicts
 each joint through one missed update, invalidates it on the next miss, updates measured 3-D joints
-by weighted DLT, and exposes stable track IDs. A track can persist for up to 30 missed frames.
+by weighted DLT, and exposes stable track IDs. A track enters dormancy after two consecutive frames with fewer than two assigned views. Its 3D anchors remain available for re-identification for up to 60 frames; recovery seeds are matched to dormant tracks using projected 2D residuals before new IDs are allocated.
 The cross-view epipolar matcher seeds tracks for detections unmatched by live 3-D tracks every tenth frame. It uses a
 confidence-weighted trimmed mean of joint residuals (trimming the highest 20% of residual weight),
 requires at least five shared joints above 0.35 confidence, and gates pairs at 8 px in the 640 x 640

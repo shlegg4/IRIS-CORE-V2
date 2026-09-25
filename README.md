@@ -140,11 +140,12 @@ one file per camera by adding `-camera-<id>` before the `.mp4` extension.
 For offline reprocessing, `capture video 0 "cam 0.mp4" 1 "cam 1.mp4"` reads one presentation
 frame from each file per batch and bypasses the live synchronizer. The files must contain the same
 number of frames in matching order; IRIS reports an error if one reaches EOF before the others.
-Video ingestion processes as fast as downstream stages allow by default. Pass `--realtime true` to
-pace batches by the first file's presentation timestamps, or `capture live` to return to webcam
-ingestion. Paths with spaces should be quoted. To start directly in video mode when no webcam is
-available, launch `iris_app.exe --video 0 "cam 0.mp4" 1 "cam 1.mp4"`; `--api --video` and
-`--non-interactive --video` accept the same camera/file pairs.
+Video ingestion matches the source frame rate by default, pacing batches by the first file's
+presentation timestamps. Pass `--realtime false` to process as fast as downstream stages allow,
+or `capture live` to return to webcam ingestion. Paths with spaces should be quoted. To start
+directly in video mode when no webcam is available, launch
+`iris_app.exe --video 0 "cam 0.mp4" 1 "cam 1.mp4"`; `--api --video` and `--non-interactive --video`
+accept the same camera/file pairs.
 Add `--rotation <camera-id> <none|cw90|180|ccw90>` to either video CLI form to rotate a specific
 feed; the viewer also provides a rotation selector for each video feed.
 Use `--loop true` to restart all files together after they reach EOF. The viewer exposes the same

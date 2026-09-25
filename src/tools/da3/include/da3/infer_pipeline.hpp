@@ -3,7 +3,6 @@
 #include <optional>
 
 #include "da3/types.hpp"
-#include "iris/core/types.hpp"
 
 namespace da3 {
 
@@ -37,6 +36,18 @@ struct PreparedInferenceConfig {
     std::optional<FrameDiagnostics> frame_diagnostics;
 };
 
+struct IntrinsicsExport {
+    std::array<float, 9> K{};
+    int width = 0;
+    int height = 0;
+};
+
+struct ExtrinsicsExport {
+    int camera_id = 0;
+    std::array<float, 9> R{};
+    std::array<float, 3> t{};
+};
+
 struct InferenceResult {
     fs::path cameras_path;
     fs::path intrinsics_dir;
@@ -44,8 +55,8 @@ struct InferenceResult {
     fs::path timings_path;
     fs::path ply_path;
     std::vector<int> camera_ids;
-    std::vector<iris::core::IntrinsicsMeta> intrinsics;
-    std::vector<iris::core::ExtrinsicsMeta> extrinsics;
+    std::vector<IntrinsicsExport> intrinsics;
+    std::vector<ExtrinsicsExport> extrinsics;
     std::size_t point_count = 0;
     float confidence_threshold = 0.0f;
 };

@@ -26,7 +26,7 @@ struct SynchronizedVideoConfig {
     std::vector<VideoCameraInput> cameras;
     int cuda_device{};
     std::size_t frame_pool_capacity{8};
-    bool realtime{};
+    bool realtime{true};
     bool loop{};
     // Optional lossless pose export used by unattended offline runs.
     std::filesystem::path pose_output_path;

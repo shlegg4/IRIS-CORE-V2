@@ -620,7 +620,9 @@ constexpr int temporal_max_views = 10;
 constexpr int temporal_max_tracks = 10;
 constexpr int temporal_candidates = 10;
 constexpr int temporal_joints = 17;
-constexpr int temporal_missed_limit = 30;
+constexpr int temporal_dormant_after_missed = 2;
+constexpr int temporal_dormant_lifetime_frames = 60;
+constexpr float temporal_reidentification_gate_px = 32.0F;
 
 __global__ void temporal_cost_kernel(
     const float* points, const float* scores, const unsigned char* candidates,
@@ -780,52 +782,254 @@ __global__ void temporal_assignment_kernel(
     }
 }
 
-__global__ void temporal_lifecycle_kernel(
+__device__ float temporal_reidentification_cost(
+    int seed, int track, const float* points, const float* scores,
     const unsigned char* candidates, const unsigned char* seeds,
-    unsigned char* assignments, unsigned char* active, unsigned char* missed,
-    unsigned char* joint_valid, unsigned char* joint_missed, float* velocity, std::uint64_t* ids,
-    std::uint64_t* next_id, int views, int tracks) {
+    const bool* used, const float* projections, const float* anchor_xyz,
+    const float* anchor_velocity, const float* anchor_age,
+    const unsigned char* anchor_valid, float minimum_score, int views) {
+    float total = 0.0F;
+    int shared_joints = 0;
+    for (int joint = 0; joint < temporal_joints; ++joint) {
+        const int state = track * temporal_joints + joint;
+        if (!anchor_valid[state]) continue;
+        float joint_sum = 0.0F;
+        float joint_weight = 0.0F;
+        for (int view = 0; view < views; ++view) {
+            const int candidate = seeds[seed * views + view];
+            if (candidate >= temporal_candidates || used[view * temporal_candidates + candidate] ||
+                !candidates[view * temporal_candidates + candidate]) continue;
+            const int detection = (view * temporal_candidates + candidate) * temporal_joints + joint;
+            const float confidence = scores[detection];
+            if (!isfinite(confidence) || confidence < minimum_score) continue;
+            const float* p = projections + view * 12;
+            const float age = fminf(anchor_age[state], 1.0F);
+            const float x = anchor_xyz[state * 3] + anchor_velocity[state * 3] * age;
+            const float y = anchor_xyz[state * 3 + 1] + anchor_velocity[state * 3 + 1] * age;
+            const float z = anchor_xyz[state * 3 + 2] + anchor_velocity[state * 3 + 2] * age;
+            const float w = p[8] * x + p[9] * y + p[10] * z + p[11];
+            if (!(w > 1e-5F)) continue;
+            const float projected_x = (p[0] * x + p[1] * y + p[2] * z + p[3]) / w;
+            const float projected_y = (p[4] * x + p[5] * y + p[6] * z + p[7]) / w;
+            const float px = points[detection * 2], py = points[detection * 2 + 1];
+            if (!isfinite(projected_x) || !isfinite(projected_y) || !isfinite(px) || !isfinite(py)) continue;
+            const float residual = hypotf(projected_x - px, projected_y - py);
+            if (!isfinite(residual)) continue;
+            const float weight = fminf(1.0F, confidence);
+            joint_sum += fminf(residual, 64.0F) * weight;
+            joint_weight += weight;
+        }
+        if (joint_weight > 0.0F) {
+            total += joint_sum / joint_weight;
+            ++shared_joints;
+        }
+    }
+    return shared_joints >= 5 ? total / static_cast<float>(shared_joints) : CUDART_INF_F;
+}
+
+__global__ void temporal_lifecycle_kernel(
+    const float* points, const float* scores, const unsigned char* candidates,
+    const unsigned char* seeds, const float* projections,
+    unsigned char* assignments, unsigned char* active, unsigned char* dormant,
+    unsigned char* missed, unsigned char* dormant_age,
+    unsigned char* joint_valid, unsigned char* joint_missed, float* velocity,
+    float* anchor_xyz, float* anchor_velocity, float* anchor_age,
+    unsigned char* anchor_valid, std::uint64_t* ids, std::uint64_t* next_id,
+    float minimum_score, int views, int tracks) {
     if (blockIdx.x || threadIdx.x) return;
-    bool used[temporal_max_views][temporal_candidates]{};
+    bool used[temporal_max_views * temporal_candidates]{};
     for (int view = 0; view < views; ++view)
         for (int track = 0; track < tracks; ++track) {
             const int candidate = assignments[track * views + view];
-            if (candidate < temporal_candidates) used[view][candidate] = true;
+            if (candidate < temporal_candidates) used[view * temporal_candidates + candidate] = true;
         }
+
+    // Move tracks with two consecutive unsupported frames into dormancy.
     for (int track = 0; track < tracks; ++track) {
-        int observed_views = 0;
-        for (int view = 0; view < views; ++view)
-            observed_views += assignments[track * views + view] != 255;
-        if (active[track] && observed_views < 2) {
-            if (++missed[track] > temporal_missed_limit) active[track] = 0;
-            for (int joint = 0; joint < temporal_joints; ++joint)
-                for (int axis = 0; axis < 3; ++axis)
-                    velocity[(track * temporal_joints + joint) * 3 + axis] *= 0.8F;
-        } else if (observed_views >= 2) missed[track] = 0;
+        if (active[track]) {
+            int observed_views = 0;
+            for (int view = 0; view < views; ++view)
+                observed_views += assignments[track * views + view] != 255;
+            if (observed_views >= 2) {
+                missed[track] = 0;
+            } else if (++missed[track] >= temporal_dormant_after_missed) {
+                active[track] = 0;
+                dormant[track] = 1;
+                missed[track] = 0;
+                dormant_age[track] = 0;
+                for (int joint = 0; joint < temporal_joints; ++joint) {
+                    const int state = track * temporal_joints + joint;
+                    joint_valid[state] = 0;
+                    joint_missed[state] = 0;
+                    for (int axis = 0; axis < 3; ++axis) velocity[state * 3 + axis] = 0.0F;
+                }
+            }
+        } else if (dormant[track]) {
+            if (++dormant_age[track] > temporal_dormant_lifetime_frames) {
+                dormant[track] = 0;
+                ids[track] = 0;
+                dormant_age[track] = 0;
+                for (int joint = 0; joint < temporal_joints; ++joint) {
+                    const int state = track * temporal_joints + joint;
+                    anchor_valid[state] = 0;
+                    anchor_age[state] = 0.0F;
+                    for (int axis = 0; axis < 3; ++axis) {
+                        anchor_xyz[state * 3 + axis] = 0.0F;
+                        anchor_velocity[state * 3 + axis] = 0.0F;
+                    }
+                }
+            }
+        }
     }
-    // Cross-view association is the seed/recovery path. Only consume a seed
-    // when at least two of its detections remain unclaimed by live tracks.
+
+    int available_views[temporal_max_tracks]{};
+    bool has_recovery_seed = false;
+    float reid_costs[temporal_max_tracks][temporal_max_tracks];
     for (int seed = 0; seed < tracks; ++seed) {
-        int available = 0;
         for (int view = 0; view < views; ++view) {
             const int candidate = seeds[seed * views + view];
-            if (candidate < temporal_candidates && !used[view][candidate] && candidates[view * temporal_candidates + candidate]) ++available;
+            if (candidate < temporal_candidates && !used[view * temporal_candidates + candidate] &&
+                candidates[view * temporal_candidates + candidate]) ++available_views[seed];
         }
-        if (available < 2) continue;
-        int slot = -1;
-        for (int track = 0; track < tracks; ++track) if (!active[track]) { slot = track; break; }
-        if (slot < 0) break;
-        active[slot] = 1; missed[slot] = 0; ids[slot] = (*next_id)++;
+        has_recovery_seed |= available_views[seed] >= 2;
+        for (int track = 0; track < tracks; ++track) {
+            reid_costs[seed][track] = CUDART_INF_F;
+            if (available_views[seed] >= 2 && dormant[track])
+                reid_costs[seed][track] = temporal_reidentification_cost(seed, track,
+                    points, scores, candidates, seeds, used, projections,
+                    anchor_xyz, anchor_velocity, anchor_age, anchor_valid,
+                    minimum_score, views);
+        }
+    }
+
+    // The seed buffer is cleared on ordinary frames. Avoid running the
+    // dormant-track assignment when there is nothing to recover.
+    if (!has_recovery_seed) {
+        for (int track = 0; track < tracks; ++track) {
+            if (!active[track] || ids[track] != 0) continue;
+            bool assigned = false;
+            for (int view = 0; view < views; ++view)
+                assigned |= assignments[track * views + view] != 255;
+            if (assigned) ids[track] = (*next_id)++;
+        }
+        return;
+    }
+
+    // One-to-one Hungarian matching of recovery seeds to dormant identities.
+    constexpr int columns = temporal_max_tracks * 2;
+    float u[temporal_max_tracks + 1]{}, v[columns + 1]{}, minv[columns + 1]{};
+    int p[columns + 1]{}, way[columns + 1]{};
+    unsigned char used_columns[columns + 1]{};
+    for (int row = 1; row <= tracks; ++row) {
+        p[0] = row;
+        int column_zero = 0;
+        for (int column = 0; column <= columns; ++column) {
+            minv[column] = CUDART_INF_F;
+            used_columns[column] = 0;
+        }
+        do {
+            used_columns[column_zero] = 1;
+            const int current_row = p[column_zero];
+            float delta = CUDART_INF_F;
+            int column_one = 0;
+            for (int column = 1; column <= columns; ++column) {
+                if (used_columns[column]) continue;
+                float edge = temporal_reidentification_gate_px;
+                if (column <= tracks) {
+                    edge = reid_costs[current_row - 1][column - 1];
+                    if (!isfinite(edge)) edge = 1e6F;
+                }
+                const float current = edge - u[current_row] - v[column];
+                if (current < minv[column]) {
+                    minv[column] = current;
+                    way[column] = column_zero;
+                }
+                if (minv[column] < delta) {
+                    delta = minv[column];
+                    column_one = column;
+                }
+            }
+            for (int column = 0; column <= columns; ++column) {
+                if (used_columns[column]) {
+                    u[p[column]] += delta;
+                    v[column] -= delta;
+                } else {
+                    minv[column] -= delta;
+                }
+            }
+            column_zero = column_one;
+        } while (p[column_zero] != 0);
+        do {
+            const int column_one = way[column_zero];
+            p[column_zero] = p[column_one];
+            column_zero = column_one;
+        } while (column_zero != 0);
+    }
+
+    bool seed_matched[temporal_max_tracks]{};
+    for (int column = 1; column <= tracks; ++column) {
+        const int row = p[column] - 1;
+        if (row < 0 || row >= tracks || !dormant[column - 1] ||
+            !(reid_costs[row][column - 1] < temporal_reidentification_gate_px)) continue;
+        const int track = column - 1;
+        seed_matched[row] = true;
+        active[track] = 1;
+        dormant[track] = 0;
+        missed[track] = 0;
+        dormant_age[track] = 0;
         for (int joint = 0; joint < temporal_joints; ++joint) {
-            joint_valid[slot * temporal_joints + joint] = 0;
-            joint_missed[slot * temporal_joints + joint] = 0;
-            for (int axis = 0; axis < 3; ++axis) velocity[(slot * temporal_joints + joint) * 3 + axis] = 0.0F;
+            const int state = track * temporal_joints + joint;
+            joint_valid[state] = 0;
+            joint_missed[state] = 0;
+            for (int axis = 0; axis < 3; ++axis)
+                velocity[state * 3 + axis] = anchor_velocity[state * 3 + axis];
+        }
+        for (int view = 0; view < views; ++view) {
+            const int candidate = seeds[row * views + view];
+            if (candidate < temporal_candidates && !used[view * temporal_candidates + candidate] &&
+                candidates[view * temporal_candidates + candidate]) {
+                assignments[track * views + view] = static_cast<unsigned char>(candidate);
+                used[view * temporal_candidates + candidate] = true;
+            }
+        }
+    }
+
+    // Unmatched recovery seeds create fresh identities in free or oldest dormant slots.
+    for (int seed = 0; seed < tracks; ++seed) {
+        if (seed_matched[seed] || available_views[seed] < 2) continue;
+        int slot = -1;
+        for (int track = 0; track < tracks; ++track)
+            if (!active[track] && !dormant[track]) { slot = track; break; }
+        if (slot < 0) {
+            int oldest = -1;
+            for (int track = 0; track < tracks; ++track)
+                if (dormant[track] && (oldest < 0 || dormant_age[track] > dormant_age[oldest])) oldest = track;
+            slot = oldest;
+        }
+        if (slot < 0) continue;
+        active[slot] = 1;
+        dormant[slot] = 0;
+        missed[slot] = 0;
+        dormant_age[slot] = 0;
+        ids[slot] = (*next_id)++;
+        for (int joint = 0; joint < temporal_joints; ++joint) {
+            const int state = slot * temporal_joints + joint;
+            joint_valid[state] = 0;
+            joint_missed[state] = 0;
+            anchor_valid[state] = 0;
+            anchor_age[state] = 0.0F;
+            for (int axis = 0; axis < 3; ++axis) {
+                velocity[state * 3 + axis] = 0.0F;
+                anchor_xyz[state * 3 + axis] = 0.0F;
+                anchor_velocity[state * 3 + axis] = 0.0F;
+            }
         }
         for (int view = 0; view < views; ++view) {
             const int candidate = seeds[seed * views + view];
-            if (candidate < temporal_candidates && !used[view][candidate] && candidates[view * temporal_candidates + candidate]) {
+            if (candidate < temporal_candidates && !used[view * temporal_candidates + candidate] &&
+                candidates[view * temporal_candidates + candidate]) {
                 assignments[slot * views + view] = static_cast<unsigned char>(candidate);
-                used[view][candidate] = true;
+                used[view * temporal_candidates + candidate] = true;
             }
         }
     }
@@ -843,6 +1047,8 @@ __global__ void temporal_update_kernel(
     float minimum_score, float max_error, float dt,
     int views, int tracks, float* xyz, float* velocity,
     unsigned char* joint_valid, unsigned char* joint_missed,
+    float* anchor_xyz, float* anchor_velocity, float* anchor_age,
+    unsigned char* anchor_valid,
     const unsigned char* active) {
     const int work = blockIdx.x * blockDim.x + threadIdx.x;
     if (work >= tracks * temporal_joints) return;
@@ -907,6 +1113,12 @@ __global__ void temporal_update_kernel(
         for (int axis = 0; axis < 3; ++axis) xyz[state*3+axis] = measured[axis];
         joint_valid[state] = 1;
         joint_missed[state] = 0;
+        anchor_valid[state] = 1;
+        anchor_age[state] = 0.0F;
+        for (int axis = 0; axis < 3; ++axis) {
+            anchor_xyz[state * 3 + axis] = measured[axis];
+            anchor_velocity[state * 3 + axis] = velocity[state * 3 + axis];
+        }
     } else if (joint_valid[state]) {
         if (joint_missed[state] == 0) {
             for (int axis = 0; axis < 3; ++axis) xyz[state*3+axis] += velocity[state*3+axis] * dt;
@@ -917,6 +1129,7 @@ __global__ void temporal_update_kernel(
             for (int axis = 0; axis < 3; ++axis) velocity[state*3+axis] = 0.0F;
         }
     }
+    if (!solved && anchor_valid[state]) anchor_age[state] += dt;
     if (!active[track]) {
         joint_valid[state] = 0;
         joint_missed[state] = 0;
@@ -975,8 +1188,8 @@ struct MultiviewAssociationWorkspace {
 
 struct MultiviewTemporalWorkspace {
     std::size_t views{}, tracks{};
-    float *projection{}, *costs{}, *xyz{}, *velocity{};
-    unsigned char *joint_valid{}, *joint_missed{}, *active{}, *missed{}, *assignments{};
+    float *projection{}, *costs{}, *xyz{}, *velocity{}, *anchor_xyz{}, *anchor_velocity{}, *anchor_age{};
+    unsigned char *joint_valid{}, *joint_missed{}, *anchor_valid{}, *active{}, *dormant{}, *missed{}, *dormant_age{}, *assignments{};
     std::uint64_t *ids{}, *next_id{};
     unsigned char *host_assignments{}, *host_valid{}, *host_predicted{}, *host_active{};
     std::uint64_t *host_ids{};
@@ -995,19 +1208,31 @@ cudaError_t create_multiview_temporal_workspace(std::size_t views, std::size_t t
     e = cudaMalloc(&w->costs, sizeof(float) * views * tracks * temporal_candidates); if (e != cudaSuccess) return fail(e);
     e = cudaMalloc(&w->xyz, sizeof(float) * tracks * temporal_joints * 3); if (e != cudaSuccess) return fail(e);
     e = cudaMalloc(&w->velocity, sizeof(float) * tracks * temporal_joints * 3); if (e != cudaSuccess) return fail(e);
+    e = cudaMalloc(&w->anchor_xyz, sizeof(float) * tracks * temporal_joints * 3); if (e != cudaSuccess) return fail(e);
+    e = cudaMalloc(&w->anchor_velocity, sizeof(float) * tracks * temporal_joints * 3); if (e != cudaSuccess) return fail(e);
+    e = cudaMalloc(&w->anchor_age, sizeof(float) * tracks * temporal_joints); if (e != cudaSuccess) return fail(e);
     e = cudaMalloc(&w->joint_valid, sizeof(unsigned char) * tracks * temporal_joints); if (e != cudaSuccess) return fail(e);
     e = cudaMalloc(&w->joint_missed, sizeof(unsigned char) * tracks * temporal_joints); if (e != cudaSuccess) return fail(e);
+    e = cudaMalloc(&w->anchor_valid, sizeof(unsigned char) * tracks * temporal_joints); if (e != cudaSuccess) return fail(e);
     e = cudaMalloc(&w->active, sizeof(unsigned char) * tracks); if (e != cudaSuccess) return fail(e);
+    e = cudaMalloc(&w->dormant, sizeof(unsigned char) * tracks); if (e != cudaSuccess) return fail(e);
     e = cudaMalloc(&w->missed, sizeof(unsigned char) * tracks); if (e != cudaSuccess) return fail(e);
+    e = cudaMalloc(&w->dormant_age, sizeof(unsigned char) * tracks); if (e != cudaSuccess) return fail(e);
     e = cudaMalloc(&w->assignments, sizeof(unsigned char) * tracks * views); if (e != cudaSuccess) return fail(e);
     e = cudaMalloc(&w->ids, sizeof(std::uint64_t) * tracks); if (e != cudaSuccess) return fail(e);
     e = cudaMalloc(&w->next_id, sizeof(std::uint64_t)); if (e != cudaSuccess) return fail(e);
     e = cudaMemset(w->xyz, 0, sizeof(float) * tracks * temporal_joints * 3); if (e != cudaSuccess) return fail(e);
     e = cudaMemset(w->velocity, 0, sizeof(float) * tracks * temporal_joints * 3); if (e != cudaSuccess) return fail(e);
+    e = cudaMemset(w->anchor_xyz, 0, sizeof(float) * tracks * temporal_joints * 3); if (e != cudaSuccess) return fail(e);
+    e = cudaMemset(w->anchor_velocity, 0, sizeof(float) * tracks * temporal_joints * 3); if (e != cudaSuccess) return fail(e);
+    e = cudaMemset(w->anchor_age, 0, sizeof(float) * tracks * temporal_joints); if (e != cudaSuccess) return fail(e);
     e = cudaMemset(w->joint_valid, 0, sizeof(unsigned char) * tracks * temporal_joints); if (e != cudaSuccess) return fail(e);
     e = cudaMemset(w->joint_missed, 0, sizeof(unsigned char) * tracks * temporal_joints); if (e != cudaSuccess) return fail(e);
+    e = cudaMemset(w->anchor_valid, 0, sizeof(unsigned char) * tracks * temporal_joints); if (e != cudaSuccess) return fail(e);
     e = cudaMemset(w->active, 0, sizeof(unsigned char) * tracks); if (e != cudaSuccess) return fail(e);
+    e = cudaMemset(w->dormant, 0, sizeof(unsigned char) * tracks); if (e != cudaSuccess) return fail(e);
     e = cudaMemset(w->missed, 0, sizeof(unsigned char) * tracks); if (e != cudaSuccess) return fail(e);
+    e = cudaMemset(w->dormant_age, 0, sizeof(unsigned char) * tracks); if (e != cudaSuccess) return fail(e);
     e = cudaMemset(w->ids, 0, sizeof(std::uint64_t) * tracks); if (e != cudaSuccess) return fail(e);
     { const std::uint64_t first_id = 1; e = cudaMemcpy(w->next_id, &first_id, sizeof(first_id), cudaMemcpyHostToDevice); }
     if (e != cudaSuccess) return fail(e);
@@ -1033,9 +1258,15 @@ void destroy_multiview_temporal_workspace(MultiviewTemporalWorkspace* w) {
     if (w->ids) cudaFree(w->ids);
     if (w->assignments) cudaFree(w->assignments);
     if (w->missed) cudaFree(w->missed);
+    if (w->dormant_age) cudaFree(w->dormant_age);
+    if (w->dormant) cudaFree(w->dormant);
     if (w->active) cudaFree(w->active);
+    if (w->anchor_valid) cudaFree(w->anchor_valid);
     if (w->joint_missed) cudaFree(w->joint_missed);
     if (w->joint_valid) cudaFree(w->joint_valid);
+    if (w->anchor_age) cudaFree(w->anchor_age);
+    if (w->anchor_velocity) cudaFree(w->anchor_velocity);
+    if (w->anchor_xyz) cudaFree(w->anchor_xyz);
     if (w->velocity) cudaFree(w->velocity);
     if (w->xyz) cudaFree(w->xyz);
     if (w->costs) cudaFree(w->costs);
@@ -1064,8 +1295,10 @@ cudaError_t launch_multiview_temporal_update(MultiviewTemporalWorkspace* w,
         w->costs, w->active, w->assignments, static_cast<int>(w->views),
         static_cast<int>(w->tracks), gate);
     e = cudaGetLastError(); if (e != cudaSuccess) return e;
-    temporal_lifecycle_kernel<<<1, 1, 0, stream>>>(candidate_valid, seeds, w->assignments,
-        w->active, w->missed, w->joint_valid, w->joint_missed, w->velocity, w->ids, w->next_id,
+    temporal_lifecycle_kernel<<<1, 1, 0, stream>>>(keypoints, scores, candidate_valid, seeds,
+        w->projection, w->assignments, w->active, w->dormant, w->missed, w->dormant_age,
+        w->joint_valid, w->joint_missed, w->velocity, w->anchor_xyz, w->anchor_velocity,
+        w->anchor_age, w->anchor_valid, w->ids, w->next_id, minimum_score,
         static_cast<int>(w->views), static_cast<int>(w->tracks));
     e = cudaGetLastError(); if (e != cudaSuccess) return e;
     e = cudaEventRecord(assignment_end, stream); if (e != cudaSuccess) return e;
@@ -1073,7 +1306,8 @@ cudaError_t launch_multiview_temporal_update(MultiviewTemporalWorkspace* w,
     temporal_update_kernel<<<(joint_work + 127) / 128, 128, 0, stream>>>(keypoints, scores,
         candidate_valid, w->assignments, w->projection, minimum_score, maximum_reprojection_error, dt,
         static_cast<int>(w->views), static_cast<int>(w->tracks), w->xyz, w->velocity,
-        w->joint_valid, w->joint_missed, w->active);
+        w->joint_valid, w->joint_missed, w->anchor_xyz, w->anchor_velocity,
+        w->anchor_age, w->anchor_valid, w->active);
     return cudaGetLastError();
 }
 

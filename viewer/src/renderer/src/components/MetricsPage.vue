@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { MetricsSnapshot, VideoDecodeStatus } from '../types/iris'
 
 const props = defineProps<{
   snapshot?: MetricsSnapshot | null
   inputMode?: string
   videoDecodeStatus?: VideoDecodeStatus[]
+  activeCameraCount?: number
+  cameraCount?: number
 }>()
 const average = (name: string): number | null => {
   const histogram = props.snapshot?.histograms?.[name]
@@ -18,21 +20,6 @@ const metricValue = (names: string[]): number | null => {
   }
   return null
 }
-const videoCards = computed(() => {
-  const sourceRate = metricValue(['iris_video_source_frame_rate_fps'])
-  const batchRate = metricValue(['iris_video_batch_rate_fps'])
-  const active = metricValue(['iris_video_ingestion_active']) === 1
-  const detail = active ? 'Current file ingestion' : 'Ingestion stopped or files reached end'
-  return [
-    { label: 'SOURCE RATE', value: sourceRate?.toFixed(1) ?? '—', unit: 'FPS', detail: 'Nominal rate from first video file', width: `${Math.min(100, (sourceRate ?? 0) * 3)}%`, tone: 'cyan' },
-    { label: 'INGEST RATE', value: batchRate?.toFixed(1) ?? '—', unit: 'BATCH/S', detail, width: `${Math.min(100, (batchRate ?? 0) * 3)}%`, tone: 'green' },
-    { label: 'VIDEO DECODE', value: metricValue(['iris_video_last_batch_decode_ms'])?.toFixed(1) ?? '—', unit: 'MS', detail: 'Last synchronized batch, all file decodes', width: `${Math.min(100, (metricValue(['iris_video_last_batch_decode_ms']) ?? 0) / 5)}%`, tone: 'cyan' },
-    { label: 'FRAME POOL WAIT', value: metricValue(['iris_video_last_batch_pool_wait_ms'])?.toFixed(2) ?? '—', unit: 'MS', detail: 'Wait for reusable GPU frame buffers', width: `${Math.min(100, (metricValue(['iris_video_last_batch_pool_wait_ms']) ?? 0) * 5)}%`, tone: 'orange' },
-    { label: 'GPU UPLOAD CALL', value: metricValue(['iris_video_last_batch_upload_ms'])?.toFixed(1) ?? '—', unit: 'MS', detail: 'CUDA upload submission for the batch', width: `${Math.min(100, (metricValue(['iris_video_last_batch_upload_ms']) ?? 0) / 5)}%`, tone: 'cyan' },
-    { label: 'PIPELINE SEND WAIT', value: metricValue(['iris_video_last_batch_submit_wait_ms'])?.toFixed(2) ?? '—', unit: 'MS', detail: 'Time blocked sending batch to pipeline', width: `${Math.min(100, (metricValue(['iris_video_last_batch_submit_wait_ms']) ?? 0) * 5)}%`, tone: 'orange' },
-    { label: 'BATCH WORK', value: metricValue(['iris_video_last_batch_work_ms'])?.toFixed(1) ?? '—', unit: 'MS', detail: 'Decode + upload + submit, excluding realtime pacing', width: `${Math.min(100, (metricValue(['iris_video_last_batch_work_ms']) ?? 0) / 5)}%`, tone: 'green' }
-  ]
-})
 const videoCameraDecodes = computed(() => {
   const gauges = props.snapshot?.gauges ?? {}
   const decodeStatus = new Map((props.videoDecodeStatus ?? []).map((status) => [status.camera_id, status]))
@@ -67,96 +54,127 @@ const stageTimings = computed(() => {
   const maximum = Math.max(...stages.map((stage) => stage.value ?? 0), 1)
   return stages.map((stage) => ({ ...stage, width: `${stage.value === null ? 0 : Math.max(6, (stage.value / maximum) * 100)}%` }))
 })
-const metrics = computed(() => {
-  if (props.inputMode === 'video') return videoCards.value
+const captureRate = computed(() => {
+  if (props.inputMode === 'video')
+    return metricValue(['iris_video_source_frame_rate_fps', 'iris_video_batch_rate_fps'])
   const interval = average('iris_capture_interframe_interval_ms')
-  const captureRate = interval && interval > 0 ? 1000 / interval : null
-  const captureLatency = metricValue(['iris_capture_last_capture_to_emit_ms']) ?? average('iris_capture_capture_to_emit_ms')
-  const decodeSubmit = average('iris_capture_decode_submit_ms')
-  const frameAge = metricValue(['iris_capture_last_frame_age_ms'])
-  const poseQueue = metricValue(['iris_channel_capture_to_pose_depth'])
-  const outputQueue = metricValue(['iris_channel_pose_to_output_depth'])
-  const pool = metricValue(['iris_capture_pool_available'])
-  const poseLatency =
-    metricValue(['iris_pose_last_capture_to_result_ms']) ??
-    average('iris_pose_capture_to_result_ms')
-  const poseProcess = metricValue(['iris_pose_last_process_ms']) ?? average('iris_pose_process_ms')
-  const dropped =
-    (metricValue(['iris_channel_capture_samples_dropped_total']) ?? 0) +
-    (metricValue(['iris_channel_capture_to_pose_dropped_total']) ?? 0)
-  return [
-    {
-      label: 'POSE LATENCY',
-      value: poseLatency?.toFixed(1) ?? '—',
-      unit: 'MS',
-      detail: `Capture to triangulated pose · ${poseProcess?.toFixed(1) ?? '—'} ms pose processing`,
-      width: `${Math.max(4, 100 - Math.min(100, (poseLatency ?? 100) / 5))}%`,
-      tone: poseLatency && poseLatency > 150 ? 'orange' : 'cyan'
-    },
-    {
-      label: 'CAPTURE RATE',
-      value: captureRate?.toFixed(1) ?? '—',
-      unit: 'FPS',
-      detail: '4 synchronized sources',
-      width: '96%',
-      tone: 'green'
-    },
-    {
-      label: 'CAPTURE LATENCY',
-      value: captureLatency?.toFixed(1) ?? '—',
-      unit: 'MS',
-      detail: 'Source timestamp to emitted frame',
-      width: `${Math.max(4, 100 - Math.min(100, (captureLatency ?? 100) * 2))}%`,
-      tone: 'cyan'
-    },
-    {
-      label: 'DECODE SUBMIT',
-      value: decodeSubmit?.toFixed(1) ?? '—',
-      unit: 'MS',
-      detail: 'Mean GPU decode submission time',
-      width: `${Math.max(4, 100 - Math.min(100, (decodeSubmit ?? 100) * 4))}%`,
-      tone: 'cyan'
-    },
-    {
-      label: 'FRAME AGE',
-      value: frameAge?.toFixed(1) ?? '—',
-      unit: 'MS',
-      detail: 'Age of the latest captured frame',
-      width: `${Math.max(4, 100 - Math.min(100, (frameAge ?? 100) * 2))}%`,
-      tone: 'green'
-    },
-    {
-      label: 'POSE QUEUE',
-      value: poseQueue?.toFixed(0) ?? '—',
-      unit: 'FRAMES',
-      detail: 'Capture → pose channel depth',
-      width: `${Math.min(100, (poseQueue ?? 0) * 25)}%`,
-      tone: 'orange'
-    },
-    {
-      label: 'OUTPUT QUEUE',
-      value: outputQueue?.toFixed(0) ?? '—',
-      unit: 'FRAMES',
-      detail: 'Pose → output channel depth',
-      width: `${Math.min(100, (outputQueue ?? 0) * 25)}%`,
-      tone: 'orange'
-    },
-    {
-      label: 'POOL AVAILABLE',
-      value: pool?.toFixed(0) ?? '—',
-      unit: 'BUFFERS',
-      detail: 'Capture pool available',
-      width: `${Math.min(100, (pool ?? 0) * 25)}%`,
-      tone: 'green'
-    },
-    {
-      label: 'DROPPED FRAMES',
-      value: dropped.toFixed(0),
-      unit: 'TOTAL',
-      detail: 'Capture and pose transport drops',
-      width: `${dropped ? 100 : 4}%`,
-      tone: dropped ? 'orange' : 'green'
+  return interval && interval > 0 ? 1000 / interval : null
+})
+const poseLatency = computed(() =>
+  metricValue(['iris_pose_last_capture_to_result_ms']) ?? average('iris_pose_capture_to_result_ms')
+)
+const droppedFrames = computed(() => {
+  const counters = props.snapshot?.counters
+  if (!counters) return null
+  if (props.inputMode === 'video') {
+    const videoDrops = Object.entries(counters)
+      .filter(([name]) => name.startsWith('iris_video_') && /dropped.*total|total.*dropped/i.test(name))
+    return videoDrops.length ? videoDrops.reduce((sum, [, value]) => sum + value, 0) : null
+  }
+  return (counters.iris_channel_capture_samples_dropped_total ?? 0) +
+    (counters.iris_channel_capture_to_pose_dropped_total ?? 0)
+})
+type CaptureRateSample = { timestamp: number; value: number }
+const captureRateStorageKey = 'iris-viewer-capture-rate-v1'
+function restoreCaptureRateHistory(): CaptureRateSample[] {
+  try {
+    const stored: unknown = JSON.parse(localStorage.getItem(captureRateStorageKey) ?? '[]')
+    if (!Array.isArray(stored)) return []
+    const now = Date.now()
+    return stored
+      .filter((sample): sample is CaptureRateSample => {
+        if (!sample || typeof sample !== 'object') return false
+        const { timestamp, value } = sample as CaptureRateSample
+        return Number.isFinite(timestamp) && Number.isFinite(value) && timestamp <= now && now - timestamp <= 60_000
+      })
+      .slice(-120)
+  } catch {
+    return []
+  }
+}
+const captureRateHistory = ref<CaptureRateSample[]>(restoreCaptureRateHistory())
+const chartTime = ref(Date.now())
+let historyTimer: number | undefined
+const initialCaptureHistogram = props.snapshot?.histograms?.iris_capture_interframe_interval_ms
+let previousCaptureHistogram: { count: number; sum: number } | null = initialCaptureHistogram
+  ? { count: initialCaptureHistogram.count, sum: initialCaptureHistogram.sum }
+  : null
+watch(() => props.snapshot, (snapshot) => {
+  if (!snapshot) return
+  let value = captureRate.value
+  if (props.inputMode !== 'video') {
+    const histogram = snapshot.histograms?.iris_capture_interframe_interval_ms
+    if (histogram) {
+      const previous = previousCaptureHistogram
+      if (previous && histogram.count > previous.count && histogram.sum > previous.sum) {
+        const intervalCount = histogram.count - previous.count
+        const intervalSum = histogram.sum - previous.sum
+        value = intervalSum > 0 ? 1000 * intervalCount / intervalSum : value
+      }
+      previousCaptureHistogram = { count: histogram.count, sum: histogram.sum }
     }
+  }
+  const timestamp = Date.now()
+  captureRateHistory.value = captureRateHistory.value
+    .filter((sample) => timestamp - sample.timestamp <= 60_000)
+  if (value !== null && Number.isFinite(value))
+    captureRateHistory.value = [...captureRateHistory.value, { timestamp, value }].slice(-120)
+}, { deep: true })
+watch(captureRateHistory, (history) => {
+  try {
+    localStorage.setItem(captureRateStorageKey, JSON.stringify(history))
+  } catch {
+    // Keep the live chart usable when storage is unavailable.
+  }
+}, { deep: true })
+onMounted(() => {
+  historyTimer = window.setInterval(() => {
+    chartTime.value = Date.now()
+    const currentHistory = captureRateHistory.value
+    const recentHistory = currentHistory.filter((sample) => chartTime.value - sample.timestamp <= 60_000)
+    if (recentHistory.length !== currentHistory.length)
+      captureRateHistory.value = recentHistory
+  }, 500)
+})
+onBeforeUnmount(() => {
+  if (historyTimer !== undefined) window.clearInterval(historyTimer)
+})
+const captureRatePoints = computed(() => captureRateHistory.value
+  .filter((sample) => chartTime.value - sample.timestamp <= 60_000)
+  .map((sample) => {
+    const x = ((sample.timestamp - (chartTime.value - 60_000)) / 60_000) * 100
+    const y = 34 - Math.max(0, Math.min(30, sample.value / 3))
+    return `${x},${y}`
+  })
+  .join(' '))
+const frameAgeSummary = computed(() => {
+  const gauges = props.snapshot?.gauges ?? {}
+  const ages = Object.entries(gauges)
+    .filter(([name, value]) => /^iris_capture_camera_\d+_last_frame_age_ms$/.test(name) && Number.isFinite(value))
+    .map(([, value]) => value)
+  if (!ages.length) {
+    const current = metricValue(['iris_capture_last_frame_age_ms'])
+    return { oldest: current, average: current }
+  }
+  return {
+    oldest: Math.max(...ages),
+    average: ages.reduce((sum, value) => sum + value, 0) / ages.length
+  }
+})
+const queueSummary = computed(() => {
+  const value = (name: string): number | null => metricValue([name])
+  if (props.inputMode === 'video') return [
+    { label: 'Source rate', value: metricValue(['iris_video_source_frame_rate_fps']), unit: 'FPS' },
+    { label: 'Ingest rate', value: metricValue(['iris_video_batch_rate_fps']), unit: 'BATCH/S' },
+    { label: 'Last decode', value: metricValue(['iris_video_last_batch_decode_ms']), unit: 'MS' },
+    { label: 'Frame pool wait', value: metricValue(['iris_video_last_batch_pool_wait_ms']), unit: 'MS' }
+  ]
+  return [
+    { label: 'Capture queue', value: value('iris_channel_capture_samples_depth'), unit: 'FRAMES' },
+    { label: 'Pose queue', value: value('iris_channel_capture_to_pose_depth'), unit: 'FRAMES' },
+    { label: 'Output queue', value: value('iris_channel_pose_to_output_depth'), unit: 'FRAMES' },
+    { label: 'Oldest frame age', value: frameAgeSummary.value.oldest, unit: 'MS' },
+    { label: 'Average frame age', value: frameAgeSummary.value.average, unit: 'MS' }
   ]
 })
 
@@ -232,97 +250,116 @@ const allMetrics = computed<MetricRow[]>(() => {
   <div class="metrics-page">
     <header class="metrics-hero">
       <div>
-        <span class="eyebrow">PIPELINE TELEMETRY</span>
-        <h2>Runtime performance</h2>
-        <p>Live health and throughput for the current capture session.</p>
+        <h1>System Metrics</h1>
+        <p>Live performance and pipeline health</p>
       </div>
-      <span class="healthy" :class="{ waiting: !snapshot }">{{
-        snapshot ? 'LIVE' : 'WAITING FOR IRIS'
-      }}</span>
+      <div class="metrics-range"><span>{{ snapshot ? 'Live' : 'Waiting for IRIS' }}</span><span>Last 60 seconds</span></div>
     </header>
-    <div class="metrics-cards">
-      <article v-for="metric in metrics" :key="metric.label" class="metric-card">
-        <span class="metric-label">{{ metric.label }}</span
-        ><strong
-          >{{ metric.value }} <small>{{ metric.unit }}</small></strong
-        ><span class="metric-detail">{{ metric.detail }}</span>
-        <div class="large-meter"><i :class="metric.tone" :style="{ width: metric.width }"></i></div>
+    <section class="metrics-summary" aria-label="Current performance">
+      <article class="summary-stat">
+        <strong>{{ captureRate?.toFixed(1) ?? '—' }} <small>FPS</small></strong>
+        <span>Capture Rate</span>
       </article>
+      <article class="summary-stat">
+        <strong>{{ poseLatency?.toFixed(1) ?? '—' }} <small>MS</small></strong>
+        <span>Pose Latency (avg)</span>
+      </article>
+      <article class="summary-stat">
+        <strong>{{ droppedFrames?.toLocaleString() ?? '—' }} <small>FRAMES</small></strong>
+        <span>Dropped Frames</span>
+      </article>
+      <article class="summary-stat">
+        <strong>{{ activeCameraCount ?? 0 }} / {{ cameraCount ?? 0 }}</strong>
+        <span>Active Cameras</span>
+      </article>
+    </section>
+    <section class="capture-chart" aria-labelledby="capture-rate-title">
+      <header class="section-heading">
+        <div><h2 id="capture-rate-title">Capture Rate</h2><span>FPS</span></div>
+        <span>Target {{ captureRate ? `${captureRate.toFixed(0)} FPS` : '—' }}</span>
+      </header>
+      <div class="chart-stage">
+        <div class="chart-y-labels" aria-hidden="true"><span>90</span><span>60</span><span>30</span><span>0</span></div>
+        <svg viewBox="0 0 100 40" preserveAspectRatio="none" role="img" aria-label="Capture rate during the last 60 seconds">
+          <line x1="0" y1="4" x2="100" y2="4" />
+          <line x1="0" y1="14" x2="100" y2="14" />
+          <line x1="0" y1="24" x2="100" y2="24" />
+          <line x1="0" y1="34" x2="100" y2="34" />
+          <polyline v-if="captureRateHistory.length > 1" :points="captureRatePoints" />
+        </svg>
+      </div>
+      <div class="chart-x-labels" aria-hidden="true"><span>60s</span><span>45s</span><span>30s</span><span>15s</span><span>0s</span></div>
+      <p v-if="!captureRateHistory.length" class="chart-empty">Waiting for capture metrics.</p>
+    </section>
+    <div class="metrics-detail-grid">
+      <section class="timing-panel" aria-labelledby="pipeline-timing-title">
+        <header class="section-heading">
+          <div><h2 id="pipeline-timing-title">Pipeline Timing</h2><span>{{ inputMode === 'video' ? 'Latest batch' : 'Average per frame' }}</span></div>
+          <span>MS</span>
+        </header>
+        <div class="timing-list">
+          <div v-for="stage in stageTimings" :key="stage.name" class="timing-row">
+            <span>{{ stage.name === 'POSE' ? 'Pose Estimation' : stage.name === 'CAPTURE' ? 'Capture' : stage.name === 'OUTPUT' ? 'Output' : stage.name }}</span>
+            <i class="timing-meter"><b :class="stage.tone" :style="{ width: stage.width }"></b></i>
+            <strong>{{ stage.value?.toFixed(1) ?? '—' }} ms</strong>
+          </div>
+        </div>
+      </section>
+      <section class="queues-panel" aria-labelledby="queues-title">
+        <header class="section-heading">
+          <div><h2 id="queues-title">{{ inputMode === 'video' ? 'Video Input' : 'Queues & Frame Age' }}</h2></div>
+          <span>{{ inputMode === 'video' ? 'CURRENT' : 'CURRENT DEPTH' }}</span>
+        </header>
+        <div class="queue-list">
+          <div v-for="item in queueSummary" :key="item.label" class="queue-row">
+            <span>{{ item.label }}</span><strong>{{ item.value?.toFixed(item.unit === 'MS' ? 1 : 0) ?? '—' }} <small>{{ item.unit }}</small></strong>
+          </div>
+          <div v-if="inputMode === 'video'" class="queue-row">
+            <span>Active video feeds</span><strong>{{ videoDecodeStatus?.length ?? videoCameraDecodes.length }}</strong>
+          </div>
+        </div>
+      </section>
     </div>
-    <section v-if="inputMode === 'video'" class="video-ingestion">
-      <div class="card-title">VIDEO FEED DETAIL <span>{{ Number(snapshot?.counters?.iris_video_batches_emitted_total ?? 0).toLocaleString() }} BATCHES · {{ Number(snapshot?.counters?.iris_video_frames_emitted_total ?? 0).toLocaleString() }} FRAMES EMITTED</span></div>
-      <div v-if="videoCameraDecodes.length" class="video-camera-metrics">
-        <article v-for="camera in videoCameraDecodes" :key="camera.cameraId" class="video-camera-metric">
-          <strong>CAMERA {{ String(camera.cameraId).padStart(2, '0') }}</strong>
-          <span>{{ camera.value.toFixed(1) }} MS LAST DECODE</span>
-          <small>{{ camera.nvdec ? 'NVDEC' : 'SOFTWARE DECODE' }} · {{ camera.gpuConversion ? 'GPU COLOR CONVERSION' : 'CPU COLOR CONVERSION' }}</small>
-          <small v-if="camera.codec">{{ camera.codec.toUpperCase() }} · {{ camera.decodeDetail }}</small>
-          <small>{{ camera.sourceRate?.toFixed(1) ?? '—' }} FPS SOURCE RATE · HISTOGRAM MEAN {{ average(`iris_video_camera_${camera.cameraId}_decode_ms`)?.toFixed(1) ?? '—' }} MS</small>
-        </article>
-      </div>
-      <p v-else class="empty-metrics">Waiting for video feed decode metrics.</p>
-    </section>
-    <section class="pipeline-timing" aria-labelledby="pipeline-timing-title">
-      <div class="card-title" id="pipeline-timing-title">PIPELINE STAGE TIMING <span>{{ inputMode === 'video' ? 'LATEST BATCH · MS' : 'MEAN COMPLETION TIME · MS' }}</span></div>
-      <div class="pipeline-flow">
-        <article v-for="(stage, index) in stageTimings" :key="stage.name" class="stage-block">
-          <div class="stage-heading"><span class="stage-index">0{{ index + 1 }}</span><span class="stage-name">{{ stage.name }}</span></div>
-          <strong class="stage-value">{{ stage.value?.toFixed(1) ?? '—' }} <small>MS</small></strong>
-          <span class="stage-description">{{ stage.description }}</span>
-          <div class="stage-meter"><i :class="stage.tone" :style="{ width: stage.width }"></i></div>
-          <span v-if="index < stageTimings.length - 1" class="stage-arrow" aria-hidden="true">→</span>
-        </article>
-      </div>
-    </section>
-    <section class="gauge-section">
-      <div class="card-title">
-        GAUGE HISTORY
-        <span>{{ gaugeCharts.length }} LIVE DIAGRAMS · LAST {{ historyLimit / 2 }} SECONDS</span>
-      </div>
-      <label class="gauge-filter">
-        <span>Filter gauges</span>
-        <input v-model="gaugeFilter" type="search" placeholder="e.g. queue, camera, pose" />
-      </label>
-      <div v-if="gaugeCharts.length" class="gauge-grid">
-        <article v-for="gauge in gaugeCharts" :key="gauge.name" class="gauge-chart">
-          <header>
-            <code>{{ gauge.name }}</code
-            ><strong>{{ format(gauge.current) }}</strong>
-          </header>
-          <svg
-            viewBox="0 0 100 54"
-            preserveAspectRatio="none"
-            role="img"
-            :aria-label="`${gauge.name} history`"
-          >
-            <line x1="0" y1="50" x2="100" y2="50" />
-            <polyline :points="chartPoints(gauge.values)" />
-          </svg>
-          <footer>
-            <span>{{ format(Math.min(...gauge.values)) }}</span
-            ><span>{{ format(Math.max(...gauge.values)) }}</span>
-          </footer>
-        </article>
-      </div>
-      <p v-else class="empty-metrics">No gauges match this filter.</p>
-    </section>
-    <section class="all-metrics">
-      <div class="card-title">
-        ALL EXPORTED METRICS <span>{{ allMetrics.length }} LIVE SERIES</span>
-      </div>
-      <div v-if="allMetrics.length" class="metric-table" role="table">
-        <div class="metric-row metric-header" role="row">
-          <span>Metric</span><span>Type</span><span>Value</span><span>Details</span>
+    <details class="metrics-more">
+      <summary>Detailed metrics <span>{{ gaugeCharts.length }} gauges · {{ allMetrics.length }} exported series</span></summary>
+      <section v-if="inputMode === 'video'" class="video-ingestion">
+        <div class="details-heading">Video Feed Detail <span>{{ Number(snapshot?.counters?.iris_video_batches_emitted_total ?? 0).toLocaleString() }} batches · {{ Number(snapshot?.counters?.iris_video_frames_emitted_total ?? 0).toLocaleString() }} frames emitted</span></div>
+        <div v-if="videoCameraDecodes.length" class="video-camera-metrics">
+          <article v-for="camera in videoCameraDecodes" :key="camera.cameraId" class="video-camera-metric">
+            <strong>Camera {{ String(camera.cameraId + 1).padStart(2, '0') }}</strong>
+            <span>{{ camera.value.toFixed(1) }} ms last decode</span>
+            <small>{{ camera.nvdec ? 'NVDEC' : 'Software decode' }} · {{ camera.gpuConversion ? 'GPU color conversion' : 'CPU color conversion' }}</small>
+            <small v-if="camera.codec">{{ camera.codec.toUpperCase() }} · {{ camera.decodeDetail }}</small>
+            <small>{{ camera.sourceRate?.toFixed(1) ?? '—' }} FPS source rate · Histogram mean {{ average(`iris_video_camera_${camera.cameraId}_decode_ms`)?.toFixed(1) ?? '—' }} ms</small>
+          </article>
         </div>
-        <div v-for="metric in allMetrics" :key="metric.name" class="metric-row" role="row">
-          <code>{{ metric.name }}</code
-          ><span>{{ metric.kind }}</span
-          ><strong>{{ metric.value }}</strong
-          ><span>{{ metric.detail }}</span>
+        <p v-else class="empty-metrics">Waiting for video feed decode metrics.</p>
+      </section>
+      <section class="gauge-section">
+        <header class="details-heading">Gauge History <span>{{ gaugeCharts.length }} live series · last {{ historyLimit / 2 }} seconds</span></header>
+        <label class="gauge-filter"><span>Filter gauges</span><input v-model="gaugeFilter" type="search" placeholder="e.g. queue, camera, pose" /></label>
+        <div v-if="gaugeCharts.length" class="gauge-grid">
+          <article v-for="gauge in gaugeCharts" :key="gauge.name" class="gauge-chart">
+            <header><code>{{ gauge.name }}</code><strong>{{ format(gauge.current) }}</strong></header>
+            <svg viewBox="0 0 100 54" preserveAspectRatio="none" role="img" :aria-label="`${gauge.name} history`">
+              <line x1="0" y1="50" x2="100" y2="50" /><polyline :points="chartPoints(gauge.values)" />
+            </svg>
+            <footer><span>{{ format(Math.min(...gauge.values)) }}</span><span>{{ format(Math.max(...gauge.values)) }}</span></footer>
+          </article>
         </div>
-      </div>
-      <p v-else class="empty-metrics">Waiting for the runtime to publish metrics.</p>
-    </section>
+        <p v-else class="empty-metrics">No gauges match this filter.</p>
+      </section>
+      <section class="all-metrics">
+        <header class="details-heading">All Exported Metrics <span>{{ allMetrics.length }} live series</span></header>
+        <div v-if="allMetrics.length" class="metric-table" role="table">
+          <div class="metric-row metric-header" role="row"><span>Metric</span><span>Type</span><span>Value</span><span>Details</span></div>
+          <div v-for="metric in allMetrics" :key="metric.name" class="metric-row" role="row">
+            <code>{{ metric.name }}</code><span>{{ metric.kind }}</span><strong>{{ metric.value }}</strong><span>{{ metric.detail }}</span>
+          </div>
+        </div>
+        <p v-else class="empty-metrics">Waiting for the runtime to publish metrics.</p>
+      </section>
+    </details>
   </div>
 </template>
 
@@ -607,6 +644,294 @@ p {
   }
   .metrics-hero p {
     display: none;
+  }
+}
+
+.metrics-page {
+  padding: 22px 28px 28px;
+  color: #e6ebee;
+  font-size: 13px;
+  scrollbar-color: #34434e transparent;
+}
+.metrics-hero {
+  min-height: 58px;
+  align-items: center;
+  padding: 0 0 14px;
+  border-color: #26333e;
+}
+.metrics-hero h1 {
+  margin: 0 0 4px;
+  font-size: 20px;
+  font-weight: 500;
+}
+.metrics-hero p {
+  color: #9aa8b1;
+  font-size: 13px;
+}
+.metrics-range {
+  display: grid;
+  gap: 4px;
+  color: #9aa8b1;
+  font-size: 12px;
+  text-align: right;
+}
+.metrics-range span:first-child {
+  color: #36df98;
+}
+.metrics-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 14px 0 16px;
+  padding: 4px 0 12px;
+  border-bottom: 1px solid #26333e;
+}
+.summary-stat {
+  display: grid;
+  place-content: center;
+  gap: 4px;
+  min-width: 0;
+  min-height: 62px;
+  padding: 0 18px;
+  text-align: center;
+}
+.summary-stat + .summary-stat {
+  border-left: 1px solid #34434e;
+}
+.summary-stat strong {
+  overflow: hidden;
+  color: #29d8d1;
+  font-size: 22px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.summary-stat small {
+  color: #c1cbd1;
+  font-size: 12px;
+  font-weight: 400;
+}
+.summary-stat > span {
+  color: #bdc7cd;
+  font-size: 12px;
+}
+.capture-chart,
+.timing-panel,
+.queues-panel {
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid #293640;
+  background: #121c25;
+}
+.capture-chart {
+  position: relative;
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+.section-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  color: #9aa8b1;
+  font-size: 11px;
+}
+.section-heading h2 {
+  margin: 0 0 3px;
+  color: #e6ebee;
+  font-size: 13px;
+  font-weight: 500;
+}
+.section-heading div > span,
+.section-heading > span {
+  color: #9aa8b1;
+  font-size: 11px;
+}
+.chart-stage {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-items: stretch;
+  gap: 7px;
+  height: clamp(150px, 24vh, 220px);
+  margin-top: 8px;
+}
+.chart-y-labels {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 1px 0 7px;
+  color: #9aa8b1;
+  font-size: 10px;
+  text-align: right;
+}
+.chart-stage svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+.chart-stage line {
+  stroke: #34434e;
+  stroke-width: .5;
+  vector-effect: non-scaling-stroke;
+}
+.chart-stage polyline {
+  fill: none;
+  stroke: #29d8d1;
+  stroke-width: 1.7;
+  vector-effect: non-scaling-stroke;
+}
+.chart-x-labels {
+  display: flex;
+  justify-content: space-between;
+  margin: 5px 0 0 35px;
+  color: #9aa8b1;
+  font-size: 10px;
+}
+.chart-empty {
+  position: absolute;
+  right: 35px;
+  bottom: 48%;
+  left: 55px;
+  color: #9aa8b1;
+  font-size: 12px;
+  text-align: center;
+  pointer-events: none;
+}
+.metrics-detail-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(280px, .9fr);
+  gap: 12px;
+}
+.timing-panel,
+.queues-panel {
+  min-height: 174px;
+}
+.timing-list,
+.queue-list {
+  margin-top: 10px;
+}
+.timing-row,
+.queue-row {
+  display: grid;
+  grid-template-columns: minmax(100px, .75fr) minmax(80px, 1.5fr) minmax(65px, auto);
+  align-items: center;
+  gap: 12px;
+  min-height: 34px;
+  border-top: 1px solid #24313a;
+  color: #bdc7cd;
+  font-size: 12px;
+}
+.timing-row strong,
+.queue-row strong {
+  color: #e6ebee;
+  font-size: 12px;
+  font-weight: 400;
+  text-align: right;
+  white-space: nowrap;
+}
+.timing-meter {
+  display: block;
+  height: 8px;
+  overflow: hidden;
+  background: #27343e;
+}
+.timing-meter b {
+  display: block;
+  height: 100%;
+  background: #29d8d1;
+}
+.timing-meter b.green {
+  background: #36df98;
+}
+.timing-meter b.orange {
+  background: #eba45b;
+}
+.queue-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-height: 29px;
+}
+.queue-row small {
+  color: #9aa8b1;
+  font-size: 10px;
+}
+.metrics-more {
+  margin-top: 12px;
+  border-top: 1px solid #293640;
+  border-bottom: 1px solid #293640;
+}
+.metrics-more > summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 2px;
+  color: #dce3e7;
+  font-size: 12px;
+  cursor: pointer;
+  list-style-position: inside;
+}
+.metrics-more > summary span {
+  color: #9aa8b1;
+  font-size: 11px;
+}
+.metrics-more > section {
+  margin: 0 0 14px;
+  padding: 12px;
+  border: 1px solid #293640;
+  background: #121c25;
+}
+.details-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: #e6ebee;
+  font-size: 12px;
+}
+.details-heading span {
+  color: #9aa8b1;
+  font-size: 10px;
+}
+.metrics-more .video-camera-metrics,
+.metrics-more .gauge-grid {
+  margin-top: 10px;
+}
+.metrics-more .gauge-section,
+.metrics-more .pipeline-timing,
+.metrics-more .video-ingestion,
+.metrics-more .all-metrics {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+.metrics-more .metric-row {
+  min-width: 620px;
+  font-size: 11px;
+}
+.metrics-more .metric-row code {
+  font-size: 10px;
+}
+@media (max-width: 900px) {
+  .metrics-detail-grid {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 600px) {
+  .metrics-page {
+    padding: 18px 16px 24px;
+  }
+  .metrics-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .summary-stat:nth-child(3) {
+    border-left: 0;
+  }
+  .summary-stat:nth-child(n + 3) {
+    border-top: 1px solid #34434e;
+  }
+  .timing-row {
+    grid-template-columns: minmax(90px, .75fr) minmax(50px, 1fr) auto;
+    gap: 8px;
+    font-size: 11px;
   }
 }
 </style>

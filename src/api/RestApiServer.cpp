@@ -289,7 +289,7 @@ class RestApiServer::Impl {
             SynchronizedVideoConfig c;
             c.cuda_device=b.value("cuda_device",0);
             c.frame_pool_capacity=b.value("frame_pool_capacity",8U);
-            c.realtime=b.value("realtime",false);
+            c.realtime=b.value("realtime",true);
             c.loop=b.value("loop",false);
             for(const auto& item:b["cameras"]) {
                 if(!item.is_object() || !item.contains("camera_id") || !item["camera_id"].is_number_unsigned() || !item.contains("path") || !item["path"].is_string()) return error(http::status::bad_request,"each video camera requires camera_id and path");
